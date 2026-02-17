@@ -1,212 +1,242 @@
-# MCP Stringwork
+# Stringwork
 
-A local MCP (Model Context Protocol) server written in Go that enables **coordination** between AI tools (Cursor and Claude Code). It provides only collaboration tools—messaging, tasks, plans, presence, and file locks—so each AI uses its own native file, search, git, and terminal capabilities.
+An MCP server for orchestrating AI coding agents. One driver (e.g. Cursor) directs multiple workers (Claude Code, Codex) through shared tasks, messaging, plans, and progress monitoring -- all from a single Go binary.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaakkos/stringwork/main/scripts/install.sh | sh
+```
+
+Supports macOS (arm64, amd64) and Linux (amd64, arm64). Pass `--version v0.1.0` for a specific release or `--dir /usr/local/bin` to change the install location.
+
+Or build from source:
+
+```bash
+go build -o mcp-stringwork ./cmd/mcp-server
+```
+
+## How It Works
+
+Stringwork uses a **driver/worker** model:
+
+```
+  Driver (Cursor)
+       |
+       |-- creates tasks, monitors progress, cancels stuck workers
+       |
+       +-- Worker 1 (Claude Code)  -- claims tasks, reports progress, sends findings
+       +-- Worker 2 (Codex)        -- claims tasks, reports progress, sends findings
+       +-- Worker N (any agent)    -- ...
+```
+
+- The **driver** creates tasks (with `assigned_to='any'` for auto-assignment), monitors workers via `worker_status`, and cancels stuck agents with `cancel_agent`.
+- **Workers** are spawned automatically by the server when there's pending work. They claim tasks, report progress every 2-3 minutes, and communicate findings back via messages.
+- All agents share state through a single SQLite file (`~/.config/stringwork/state.sqlite`).
+
+The server provides only coordination tools. Each agent uses its own native capabilities for file editing, search, git, and terminal.
 
 ## Features
 
-- **Session**: Get full context, set presence, add shared notes
-- **Messaging**: Send and read messages between agents (with optional urgency)
-- **Tasks**: Create, list, update tasks; auto-notify on assign and completion
-- **Planning**: Create plans, view plans, add/update plan items
-- **Workflow**: Hand off work, claim next task, request code review
-- **File locks**: Lock/unlock/check files to avoid simultaneous edits
-- **Agent registration**: Register custom agents beyond built-in cursor/claude-code
-- **Auto-respond**: Built-in agent wake-up — spawns commands when non-connected agents have unread messages
-- **Piggyback notifications**: Tool responses include a banner when the agent has unread messages or pending tasks
-- **Safety**: Workspace path validation, message pruning (TTL + max count)
+- **Driver/worker orchestration** -- one driver, N workers with automatic spawning, SLA monitoring, and cancellation
+- **Task management** -- create, assign, track, and auto-notify on task lifecycle events
+- **Messaging** -- inter-agent messages with urgency, piggyback notifications on every tool call
+- **Shared planning** -- collaborative plans with items, acceptance criteria, and progress tracking
+- **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (3 min warning, 5 min critical, 10 min auto-recovery)
+- **File locks** -- prevent simultaneous edits across agents
+- **Knowledge indexing** -- FTS5-powered project knowledge base (markdown, Go source, session notes, task summaries)
+- **Web dashboard** -- real-time view of tasks, workers, messages, and plans at `http://localhost:8943/dashboard`
+- **Auto-respond** -- server spawns agents when they have unread messages, no external daemon needed
+- **Git worktree isolation** -- optional per-worker checkouts to prevent file conflicts
+- **Dynamic workspace** -- switch projects at runtime via `set_presence workspace='...'`
+- **Custom agents** -- register any MCP client as a participant via `register_agent`
 
 ## Quick Start
 
-```bash
-# Build the server
-go build -o mcp-stringwork ./cmd/mcp-server
+### 1. Configure your MCP client
 
-# Run tests
-go test ./...
-
-# Check agent status (used by auto-respond)
-./mcp-stringwork status claude-code
-```
-
-## Configuration
-
-### Environment Variables
-
-- `MCP_CONFIG`: Path to a YAML configuration file
-
-### Configuration File
-
-Copy `mcp/config.yaml` to your project and customize:
-
-```yaml
-# Initial workspace root (startup default). Clients can change it at runtime
-# via set_presence workspace='/new/path' — the server follows dynamically.
-workspace_root: "/path/to/your/project"
-
-# State file: leave empty for global default (~/.config/stringwork/state.sqlite).
-# All agents on the machine share this file regardless of working directory.
-# Set an absolute path to override, or relative (joined with workspace_root).
-state_file: ""
-
-enabled_tools:
-  - "*"  # Enable all coordination tools
-message_retention_max: 1000
-message_retention_days: 30
-presence_ttl_seconds: 300
-
-# Auto-respond: wake agents when they have unread messages
-auto_respond:
-  claude-code:
-    command: ["claude", "--continue", "-p", "/pair-respond", "--dangerously-skip-permissions"]
-    cooldown_seconds: 30
-```
-
-## Client Setup
-
-### Cursor
-
-Add to your `.cursor/mcp.json`:
+**Cursor** -- add to `.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "stringwork": {
       "command": "/path/to/mcp-stringwork",
-      "args": [],
-      "env": {
-        "MCP_CONFIG": "/path/to/config.yaml"
-      }
+      "env": { "MCP_CONFIG": "/path/to/config.yaml" }
     }
   }
 }
 ```
 
-See [docs/mcp-client-configs/cursor-config.md](docs/mcp-client-configs/cursor-config.md) for details.
-
-### Claude Code CLI
-
-MCP is configured with the **`claude` CLI** (e.g. `claude mcp add-json`, `claude mcp list`). Add the server:
+**Claude Code CLI:**
 
 ```bash
 claude mcp add-json --scope user stringwork '{
   "type": "stdio",
   "command": "/path/to/mcp-stringwork",
-  "args": [],
-  "env": {
-    "MCP_CONFIG": "/path/to/config.yaml"
-  }
+  "env": { "MCP_CONFIG": "/path/to/config.yaml" }
 }'
 ```
 
-See [docs/mcp-client-configs/claude-code-config.md](docs/mcp-client-configs/claude-code-config.md) for details.
+### 2. Create a config file
 
-## Available Tools (17 coordination tools)
+Copy `mcp/config.yaml` and customize. Minimal example:
 
+```yaml
+workspace_root: "/path/to/your/project"
+transport: "stdio"
+enabled_tools: ["*"]
+
+orchestration:
+  driver: cursor
+  workers:
+    - type: claude-code
+      instances: 1
+      command: ["claude", "-p", "You are claude-code. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Do the work 5) report_progress 6) send_message with findings.", "--dangerously-skip-permissions"]
+      timeout_seconds: 600
+```
+
+### 3. Start working
+
+The driver creates tasks, workers get spawned automatically:
+
+```
+# Driver (Cursor) creates a task
+create_task title='Add auth middleware' assigned_to='any' created_by='cursor'
+
+# Server spawns a worker, which claims and works on it
+# Driver monitors via:
+worker_status
+```
+
+## Configuration
+
+### Transport modes
+
+| Mode | How it works | When to use |
+|------|-------------|-------------|
+| `stdio` (default) | Each MCP client spawns its own server process | Simple setup, one client at a time |
+| `http` | Single persistent server, clients connect via HTTP | Multi-client, daemon mode, dashboard access |
+
+### Orchestration
+
+```yaml
+orchestration:
+  driver: cursor                          # which agent is the driver
+  assignment_strategy: least_loaded       # or capability_match
+  heartbeat_interval_seconds: 30
+  worker_timeout_seconds: 120
+  worktrees:
+    enabled: false                        # git worktree isolation per worker
+  workers:
+    - type: claude-code
+      instances: 2                        # run up to 2 Claude Code workers
+      command: ["claude", "-p", "...", "--dangerously-skip-permissions"]
+      cooldown_seconds: 30
+      timeout_seconds: 600
+      max_retries: 2
+      env:
+        GH_TOKEN: "${GH_TOKEN}"           # ${VAR} expands from server env
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
+      # inherit_env: ["HOME", "PATH", "GH_*", "SSH_*"]  # restrict inherited env
+    - type: codex
+      instances: 1
+      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "..."]
+```
+
+See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
+
+## Available Tools (23)
+
+### Session
 | Tool | Description |
 |------|-------------|
-| `get_context` | Full session context (messages, tasks, presence, plans, notifications) |
-| `set_presence` | Update your status; optionally list all presence |
+| `get_context` | Full session context (messages, tasks, presence, plans) |
+| `set_presence` | Update status and workspace; dynamically changes server's project context |
 | `add_note` | Add shared note or decision |
-| `send_message` | Send message to pair (optional title, urgent) |
-| `read_messages` | Read messages from pair |
-| `create_task` | Create shared task (auto-notifies assignee) |
+
+### Communication
+| Tool | Description |
+|------|-------------|
+| `send_message` | Message an agent (optional title, urgency) |
+| `read_messages` | Read and mark messages as read |
+
+### Tasks
+| Tool | Description |
+|------|-------------|
+| `create_task` | Create task with optional work context (relevant_files, background, constraints) |
 | `list_tasks` | List tasks with filters |
-| `update_task` | Update task (auto-notifies on completion) |
-| `create_plan` | Create a shared plan |
+| `update_task` | Update status, assignment, priority; auto-notifies on completion |
+
+### Planning
+| Tool | Description |
+|------|-------------|
+| `create_plan` | Create shared plan |
 | `get_plan` | View plan(s); omit ID to list all |
-| `update_plan` | Add or update plan items |
+| `update_plan` | Add or update plan items with acceptance criteria |
+
+### Workflow
+| Tool | Description |
+|------|-------------|
 | `handoff` | Hand off work with summary and next steps |
-| `claim_next` | Claim next task (or dry_run to peek) |
-| `request_review` | Request code review from pair |
-| `lock_file` | Lock, unlock, check, or list file locks (action param) |
-| `register_agent` | Register a custom agent for auto-discovery |
+| `claim_next` | Claim next task (dry_run to peek) |
+| `request_review` | Request code review from an agent |
+
+### Orchestration (driver/worker)
+| Tool | Description |
+|------|-------------|
+| `worker_status` | Live view of workers: progress, SLA status, process activity |
+| `heartbeat` | Signal liveness every 60-90s with progress info |
+| `report_progress` | Structured progress: description, percent complete, ETA |
+| `cancel_agent` | Cancel a worker's tasks, send STOP signal, kill process |
+| `get_work_context` | Get task context (files, background, constraints, notes) |
+| `update_work_context` | Add shared notes to a task's work context |
+
+### Infrastructure
+| Tool | Description |
+|------|-------------|
+| `lock_file` | Lock, unlock, check, or list file locks |
+| `register_agent` | Register a custom agent for collaboration |
 | `list_agents` | List all available agents (built-in and registered) |
 
-Use Cursor or Claude Code's native tools for files, search, git, and terminal.
-
-### Custom Agent Registration
-
-Beyond the built-in agents (`cursor`, `claude-code`), any MCP client can register as a custom agent:
-
-```
-register_agent name='my-bot' display_name='My Bot' capabilities='["testing","linting"]'
-```
-
-Once registered, the custom agent can use **all** coordination tools (send/read messages, create tasks, set presence, etc.) just like the built-in agents. Use `list_agents` to discover all available agents.
-
-## Auto-Respond
-
-The server can automatically wake up agents when they have unread messages. When Cursor's MCP server detects unread content for `claude-code`, it spawns the configured command (e.g. `claude --continue -p "/pair-respond"`) to let Claude Code process the messages and reply — no external daemon needed. The `--continue` flag preserves conversation context so claude-code retains memory of prior work across auto-respond invocations.
-
-- **Workspace-aware**: The spawned agent inherits the workspace from the connected agent's presence (set via `set_presence workspace='/path/to/project'`). Cursor sets this automatically so claude-code always works in the right project directory.
-- Cooldown prevents rapid-fire invocations (default 30s)
-- Lockfile prevents concurrent spawns for the same agent
-- Only triggers for agents that are NOT the currently connected client (piggyback covers the connected agent)
-
-## Global State
-
-By default, the state file is stored at `~/.config/stringwork/state.sqlite`, shared across all agents on the machine. This means:
-
-- **No per-project state file** — agents always find each other regardless of cwd
-- **Cursor sets the working context** via `set_presence workspace='/path/to/project'`
-- **Auto-spawned agents** (like claude-code) inherit the workspace from the calling agent's presence
-
-## Dynamic Workspace
-
-The `workspace_root` in `config.yaml` is only the startup default. Clients can change it at runtime:
-
-```
-set_presence agent='cursor' status='working' workspace='/path/to/new/project'
-```
-
-When the workspace is updated via `set_presence`:
-- **File path validation** follows the new workspace
-- **Project detection** (`get_session_context`) reflects the new project
-- **Auto-spawned agents** use the new directory as their working directory
-
-This lets you switch projects mid-session without restarting the MCP server.
-
-## CLI Subcommand
+## CLI
 
 ```bash
-# Check unread/pending counts for any agent
-./mcp-stringwork status claude-code
-# Output: unread=2 pending=1
+mcp-stringwork                          # start MCP server (normal operation)
+mcp-stringwork --version                # print version
+mcp-stringwork status claude-code       # check unread/pending counts for an agent
 ```
-
-## Security
-
-- All file paths are validated to stay within the workspace root (dynamically updatable via `set_presence workspace=...`)
-- Message retention and presence TTL limit state growth
-
-## AI Agent Instructions
-
-The MCP server sends tailored instructions to each connecting client during initialization (via the MCP `initialize` response). This replaces the need for static instruction files in most setups.
-
-For reference, the project also includes static instruction files:
-
-- **`AGENTS.md`** - Instructions for Cursor (identifies as `cursor`)
-- **`CLAUDE.md`** - Instructions for Claude Code (identifies as `claude-code`)
-
-These define the default pair programming workflow: check context, set workspace, read messages, claim tasks, do work, communicate findings.
 
 ## Project Structure
 
 ```
 .
-├── cmd/mcp-server/          # Server entrypoint
+├── cmd/mcp-server/          # Server entrypoint, CLI
 ├── internal/
-│   ├── domain/              # Collaboration entities (Message, Task, Plan, etc.)
-│   ├── app/                 # Application service, interfaces, helpers
-│   ├── repository/          # State persistence (sqlite)
-│   ├── mcp/                 # MCP protocol types and transport
-│   ├── policy/              # Security policy enforcement
-│   ├── server/              # MCP server and tool registry
-│   └── tools/
-│       └── collab/          # 17 coordination tools (messaging, tasks, plans, presence, locks, agents)
+│   ├── domain/              # Core entities (Message, Task, Plan, AgentInstance, ...)
+│   ├── app/                 # Application services (CollabService, WorkerManager, Watchdog, Orchestrator)
+│   ├── repository/sqlite/   # State persistence (SQLite)
+│   ├── policy/              # Workspace validation, config, safety policy
+│   ├── dashboard/           # Web dashboard (HTML + REST API)
+│   ├── knowledge/           # FTS5 project knowledge indexer
+│   ├── worktree/            # Git worktree manager for worker isolation
+│   └── tools/collab/        # 23 MCP tool handlers
 ├── mcp/                     # Configuration files
-└── docs/                    # Documentation
+├── scripts/                 # Install script, daemon helper
+├── docs/                    # Documentation
+├── .github/workflows/       # CI and release automation
+├── AGENTS.md                # Cursor agent instructions
+└── CLAUDE.md                # Claude Code agent instructions
 ```
+
+## Documentation
+
+- [Setup Guide](docs/SETUP_GUIDE.md) -- installation, client config, orchestration setup
+- [Workflow](docs/WORKFLOW.md) -- collaboration patterns and best practices
+- [Quick Reference](docs/QUICK_REFERENCE.md) -- tool usage examples
+- [Architecture](docs/ARCHITECTURE.md) -- clean architecture overview
+- [Daemon Setup](docs/DAEMON_SETUP.md) -- HTTP mode and launchd
+- [Client Configs](docs/mcp-client-configs/README.md) -- Cursor and Claude Code specifics
 
 ## License
 

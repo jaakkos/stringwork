@@ -1,507 +1,266 @@
-# Pair Programming Workflow
+# Workflow Guide
 
-Standard patterns and protocols for effective collaboration between cursor and claude-code.
+Patterns and protocols for effective collaboration using the driver/worker model.
 
 ## Core Principles
 
-1. **Check context first** - Always run `get_context` at session start
-2. **Communicate findings** - Your pair can't see your work unless you send messages
-3. **Update task status** - Keep shared task list current
-4. **Coordinate work** - Avoid duplicate effort or conflicts
-5. **Be explicit** - Clear messages prevent misunderstandings
+1. **Check context first** -- always run `get_context` at session start
+2. **Communicate findings** -- agents can't see each other's work unless you send messages
+3. **Report progress** -- workers must heartbeat every 60-90s and report progress every 2-3 min
+4. **Update task status** -- keep the shared task list current
+5. **Obey cancellation** -- stop immediately when you see a STOP signal
 
-## Agent Identities
+## Roles
 
-Built-in agents (always available):
+### Driver (e.g. Cursor)
 
-- **cursor** - The agent working in the Cursor IDE
-- **claude-code** - The agent working in the Claude Code CLI
+The driver creates and assigns work, monitors progress, and intervenes when things go wrong.
 
-Custom agents can register via `register_agent` and then participate in all collaboration tools. Each agent should use a consistent identifier in all tool calls.
+Key tools:
+- `create_task` with `assigned_to='any'` for auto-assignment to workers
+- `worker_status` to see live progress, SLA status, and process activity
+- `cancel_agent` to stop stuck workers
+- `send_message` to give instructions or feedback
 
-## Standard Workflow Pattern
+### Workers (e.g. Claude Code, Codex, custom agents)
 
-### 1. Session Start
+Workers claim tasks, do the work, and report back.
 
-Every session should begin with:
+Key tools:
+- `claim_next` to get the next available task
+- `heartbeat` every 60-90 seconds with progress info
+- `report_progress` every 2-3 minutes with task_id, description, percent_complete
+- `send_message` to report findings to the driver
+- `update_task` to mark work as completed
 
-```
-Use get_context for '<your-agent-name>'
-```
+### Custom agents
 
-This returns:
-- Unread message count and summary
-- Tasks assigned to you
-- Recent activity overview
+Any MCP client can join by calling `register_agent`. Once registered, it uses the same tools as built-in agents.
 
-### 2. Read Messages
+## Standard Workflow
 
-If there are unread messages, `get_context` includes a summary; use:
-
-```
-Use read_messages for '<your-agent-name>'
-```
-
-to mark messages as read and get full content.
-
-### 3. Check Tasks
-
-Review tasks assigned to you:
+### 1. Session start
 
 ```
-Use list_tasks with assigned_to='<your-agent-name>'
+get_context for '<your-agent-name>'
+set_presence agent='<you>' status='working' workspace='/path/to/project'
+read_messages for '<you>'
+list_tasks assigned_to='<you>'
 ```
 
-Or see all tasks:
+### 2. Driver creates work
 
 ```
-Use list_tasks
+create_task title='Add auth middleware' assigned_to='any' created_by='cursor'
 ```
 
-### 4. Claim and Work on Tasks
+Using `assigned_to='any'` lets the server auto-assign to an available worker. Alternatively, assign directly: `assigned_to='claude-code'`.
 
-When starting a task:
-
-```
-Use update_task with id=X status='in_progress' updated_by='<your-agent-name>'
-```
-
-**Do the work** using your native tools (file edit, search, git, terminal).
-
-### 5. Report Progress (MANDATORY)
-
-Workers **must** report progress while working. The server monitors these reports and escalates if a worker goes silent.
-
-**Heartbeat — every 60–90 seconds:**
+### 3. Worker claims and works
 
 ```
-Use heartbeat agent='<your-agent-name>' progress='Implementing auth middleware' step=2 total_steps=5
+claim_next agent='claude-code'                    # or: update_task id=X status='in_progress'
 ```
 
-**Structured progress — every 2–3 minutes:**
+Do the work using native tools (file edit, search, git, terminal).
+
+### 4. Worker reports progress (mandatory)
+
+**Heartbeat -- every 60-90 seconds:**
 
 ```
-Use report_progress agent='<your-agent-name>' task_id=X description='Auth middleware done, writing unit tests' percent_complete=60 eta_seconds=180
+heartbeat agent='claude-code' progress='Implementing auth middleware' step=2 total_steps=5
+```
+
+**Structured progress -- every 2-3 minutes:**
+
+```
+report_progress agent='claude-code' task_id=5 description='Auth middleware done, writing tests' percent_complete=60 eta_seconds=180
 ```
 
 **What happens if you don't report:**
 
 | Silence duration | Consequence |
 |------------------|-------------|
-| 3 minutes | Warning alert sent to driver |
+| 3 minutes | Warning sent to driver |
 | 5 minutes | Critical alert sent to driver |
 | 10 minutes (no heartbeat) | Task auto-recovered, worker may be cancelled |
 
-**Informal updates** are also welcome for context — send them as messages:
+### 5. Worker reports findings
 
 ```
-Use send_message from='<your-agent-name>' to='<other-agent>' content='Task #X: finished auth, writing tests. ~2 min left.'
-```
-
-Include: what you've completed, what's remaining, and estimated time.
-
-### 6. Report Findings
-
-After completing work, send a message with your findings:
-
-```
-Use send_message from='<your-agent-name>' to='<other-agent>' content='...'
-```
-
-Include:
-- What you discovered
-- Changes made
-- Issues found
-- Questions or blockers
-- Next steps or handoff info
-
-### 7. Update Task Status
-
-Mark the task complete:
-
-```
-Use update_task with id=X status='completed' updated_by='<your-agent-name>'
-```
-
-## Communication Patterns
-
-### When to Send Messages
-
-**Always message when:**
-- Completing a task (report findings)
-- Finding a blocker (ask for help)
-- Making architectural decisions (get input)
-- Discovering issues (share knowledge)
-- Handing off work (provide context)
-
-**Message format:**
-- Use markdown for readability
-- Include code snippets when relevant
-- Reference file paths and line numbers
-- Be concise but complete
-
-### When to Create Tasks
-
-**Create tasks for:**
-- Work that needs to be done
-- Specific assignments for your pair
-- Follow-up work discovered during investigation
-- Work you can't complete yourself
-
-**Task format:**
-```
-Use create_task with
-  title='Clear, actionable title'
-  description='Detailed description with context and acceptance criteria'
-  assigned_to='cursor|claude-code'
-  created_by='<your-agent-name>'
-```
-
-### Example: Good Communication
-
-**Completing a task:**
-```
-Use send_message from='claude-code' to='cursor' content='
-## Task #5 Complete: Add authentication middleware
-
-Implemented JWT authentication middleware in `internal/middleware/auth.go:1-45`.
+send_message from='claude-code' to='cursor' content='
+## Task #5 Complete: Add auth middleware
 
 **Changes:**
-- Added `AuthMiddleware()` function
-- Validates JWT tokens from Authorization header
-- Returns 401 for invalid/missing tokens
-- Adds user context to request
+- internal/middleware/auth.go -- JWT validation middleware
+- internal/auth/service.go -- Token generation
 
-**Testing:**
-- Added unit tests in `auth_test.go`
-- All tests passing: `go test ./internal/middleware`
+**Testing:** All tests passing
 
-**Next steps:**
-- Need to integrate into router (see routes.go:12)
-- Should we add rate limiting as well?
+**Notes:** Consider adding rate limiting next
 '
 ```
 
-## Task Management Patterns
-
-### Task Lifecycle
+### 6. Worker completes task
 
 ```
-pending → in_progress → completed
-                      → cancelled  (driver cancelled the work)
-                      → blocked    (waiting on something)
+update_task id=5 status='completed' updated_by='claude-code'
 ```
 
-- **pending** - Created, not yet started
-- **in_progress** - Someone is actively working on it
-- **completed** - Work is done and verified
-- **cancelled** - The driver cancelled the work (worker should stop)
-- **blocked** - Waiting on an external dependency
+The driver sees a completion notification via piggyback banner on their next tool call.
 
-### Task Assignment
+## Driver Patterns
 
-**Assign to specific agent:**
+### Monitor workers
+
 ```
-Use create_task with assigned_to='cursor' ...
+worker_status
 ```
 
-**Unassigned task (either can take):**
+Shows each worker's: agent progress (heartbeat info), task progress (description, percent, SLA), process activity (runtime, output), and worktree info.
+
+### Cancel a stuck worker
+
 ```
-Use create_task with assigned_to='' ...
+cancel_agent agent='claude-code' cancelled_by='cursor' reason='taking too long'
 ```
 
-### Task Dependencies
+This does three things atomically:
+1. Cancels all in-progress tasks for the agent
+2. Sends a STOP message to the agent
+3. Kills the spawned worker process
 
-When tasks depend on each other:
+### Create tasks with SLAs
 
-1. **Message about dependencies:**
-   ```
-   "Task #7 is blocked by Task #5. I'll start on something else."
-   ```
+```
+create_task title='Code review' assigned_to='any' created_by='cursor' expected_duration_seconds=300
+```
 
-2. **Include in task description:**
-   ```
-   "Depends on Task #5 (auth middleware) being completed first."
-   ```
+If the task exceeds its SLA, the driver gets an alert.
+
+### Create tasks with work context
+
+```
+create_task title='Fix auth bug' assigned_to='any' created_by='cursor' relevant_files='["internal/auth/handler.go","internal/auth/service.go"]' background='JWT tokens expire too quickly' constraints='["Do not change the token format"]'
+```
+
+Workers can retrieve this context with `get_work_context`.
+
+## Worker Patterns
+
+### Autonomous loop
+
+For hands-off operation:
+
+```
+claim_next agent='claude-code' dry_run=true       # peek at what's next
+claim_next agent='claude-code'                     # claim it
+# ... do the work, report progress ...
+update_task id=X status='completed'                # or handoff
+# repeat
+```
+
+### Handoff to another agent
+
+```
+handoff from='claude-code' to='cursor' summary='Auth middleware implemented' next_steps='Wire into router and add rate limiting'
+```
+
+### Handle cancellation
+
+When the driver cancels your work, you'll see on your next tool call:
+
+```
+STOP: 1 of your task(s) have been cancelled. Stop immediately, call read_messages, and exit.
+```
+
+You must:
+1. Stop all current work immediately
+2. Call `read_messages` to understand why
+3. Exit cleanly -- do NOT continue working on cancelled tasks
 
 ## Collaboration Scenarios
 
-### Scenario 1: Code Review
+### Parallel work
 
-**Cursor creates task:**
+**Driver distributes tasks:**
+
 ```
-Use create_task with
-  title='Review pull request #123'
-  description='Review PR for authentication feature. Check security, error handling, tests.'
-  assigned_to='claude-code'
-  created_by='cursor'
+create_task title='Frontend auth UI' assigned_to='claude-code' created_by='cursor'
+create_task title='Backend auth API' assigned_to='codex' created_by='cursor'
 ```
 
-**Claude-code reviews:** (using native tools for diff/review, then)
+Both workers execute in parallel. Driver monitors via `worker_status`.
+
+### Code review
+
 ```
-Use send_message from='claude-code' to='cursor' content='Review complete. Found 3 issues...'
-Use update_task with id=X status='completed' updated_by='claude-code'
+request_review from='cursor' to='claude-code' files='["internal/auth/handler.go"]' description='Review JWT handling for security issues'
 ```
 
-### Scenario 2: Parallel Work
+The reviewer sends findings via `send_message`.
 
-**Cursor messages:**
-```
-Use send_message from='cursor' to='claude-code' content='
-I'm working on the frontend (Task #8). Can you handle the backend API (Task #9)?
-They're independent, so we can work in parallel.'
-```
+### Shared planning
 
-**Claude-code responds:**
+For complex features:
+
 ```
-Use get_context for 'claude-code'
-Use update_task with id=9 status='in_progress' updated_by='claude-code'
-Use send_message from='claude-code' to='cursor' content='Taking Task #9, will ping when done.'
+create_plan id='auth' title='Auth feature' goal='JWT auth with rate limiting' created_by='cursor'
+update_plan action='add_item' id='1' title='JWT middleware' owner='claude-code'
+update_plan action='add_item' id='2' title='Rate limiter' owner='codex'
+update_plan action='add_item' id='3' title='Integration tests' owner='cursor' dependencies='["1","2"]'
 ```
 
-### Scenario 3: Blocked by Issue
+Workers update their items as they progress:
 
-**Claude-code hits blocker:**
 ```
-Use send_message from='claude-code' to='cursor' content='
+update_plan action='update_item' item_id='1' status='completed' add_note='Implemented with RS256'
+```
+
+Check progress: `get_plan id='auth'`
+
+### Blocked worker
+
+```
+send_message from='claude-code' to='cursor' content='
 ## Blocked on Task #10
 
-Can't implement the database migration - missing schema definition.
-
-Where should the users table schema live? Should I:
-1. Create a new schema file in db/migrations/
-2. Use the existing schema in docs/schema.sql
-3. Something else?
+Missing database schema definition. Should I create db/migrations/003_users.sql?
 '
+update_task id=10 status='blocked' blocked_by='Waiting for schema decision' updated_by='claude-code'
 ```
 
-**Cursor responds with guidance:**
-```
-Use send_message from='cursor' to='claude-code' content='
-Use db/migrations/ and follow the pattern in 001_initial.sql. Number it 003_users.sql.'
-```
-
-### Scenario 4: Driver Cancels Slow Worker
-
-**Worker is taking too long:**
-```
-# Driver checks worker status
-Use worker_status
-
-# No progress update in 5 minutes — cancel the worker
-Use cancel_agent agent='claude-code' cancelled_by='cursor' reason='taking too long, will handle it differently'
-```
-
-**Worker sees STOP on next tool call:**
-```
-🛑 STOP: 1 of your task(s) have been cancelled. The driver no longer needs this work.
-Stop immediately, call read_messages to see details, and exit.
-```
-
-**Worker responds:**
-```
-Use read_messages for 'claude-code'
-# Sees: "cursor has cancelled your work. Reason: taking too long."
-# Worker stops all work and exits
-```
-
-### Scenario 5: Feature Handoff
-
-**Cursor completes initial work:**
-```
-Use send_message from='cursor' to='claude-code' content='
-## Feature branch ready: feature/auth
-
-I've implemented the basic auth flow in:
-- internal/auth/handler.go (login/logout endpoints)
-- internal/auth/service.go (business logic)
-- internal/auth/models.go (user model)
-
-**Not done yet:**
-- Unit tests (need coverage)
-- Integration with existing middleware
-- Documentation
-
-Created Task #11 for tests. Can you take it?'
-
-Use create_task with
-  title='Add tests for auth feature'
-  description='Add unit tests for auth handler, service, and models. Target 80%+ coverage.'
-  assigned_to='claude-code'
-  created_by='cursor'
-```
-
-## Best Practices
-
-### DO ✓
-
-- **Check context at session start** - `get_context` first thing
-- **Read all unread messages** - Stay synchronized
-- **Update task status** - In progress when starting, completed when done
-- **Call heartbeat every 60-90s** - With progress description and step info
-- **Call report_progress every 2-3 min** - Structured updates with percent and ETA
-- **Message with findings** - Report what you learned/did
-- **Be specific in messages** - Include file paths, line numbers, error messages
-- **Create tasks for follow-up work** - Don't let things get lost
-- **Ask questions when blocked** - Don't spin your wheels
-- **Coordinate parallel work** - Avoid conflicts
-- **Obey STOP signals** - Stop immediately when your work is cancelled
-
-### DON'T ✗
-
-- **Don't work without checking context** - You might miss important messages
-- **Don't skip status updates** - Your pair needs to know what's happening
-- **Don't work silently for minutes** - 3 min triggers warning, 5 min triggers critical alert, 10 min triggers auto-recovery
-- **Don't assume your pair sees your work** - Explicitly communicate findings
-- **Don't create duplicate tasks** - Check existing tasks first
-- **Don't ignore messages** - Read and acknowledge them
-- **Don't ignore STOP signals** - Stop immediately, don't continue cancelled work
-- **Don't leave tasks stale** - Update or complete them
-- **Don't make big decisions alone** - Discuss architectural changes
-
-## Message Templates
-
-### Completing a Task
+Driver unblocks:
 
 ```
-## Task #X Complete: [title]
-
-**Summary:** [1-2 sentence overview]
-
-**Changes:**
-- [file:line] - description
-- [file:line] - description
-
-**Testing:** [how you verified it works]
-
-**Issues found:** [any problems discovered]
-
-**Next steps:** [follow-up work needed, if any]
+send_message from='cursor' to='claude-code' content='Yes, follow the pattern in 001_initial.sql'
+update_task id=10 status='in_progress' blocked_by='' updated_by='cursor'
 ```
 
-### Reporting a Blocker
+## Notifications
+
+### Piggyback notifications
+
+Every tool response includes a banner when you have unread content:
 
 ```
-## Blocked on Task #X: [reason]
-
-**Problem:** [clear description of what's blocking you]
-
-**What I tried:**
-- [attempt 1]
-- [attempt 2]
-
-**Need:** [what you need to proceed]
-
-**Options:**
-1. [option 1]
-2. [option 2]
+You have 2 unread message(s) and 1 pending task(s). Call read_messages or get_session_context.
 ```
 
-### Asking for Review
+This means agents discover new messages on their very next tool call without polling.
+
+### STOP banners
+
+If the driver cancels a worker, the piggyback is replaced with:
 
 ```
-## Ready for Review: [feature/change]
-
-**What:** [what you built/changed]
-
-**Where:** [affected files]
-
-**Testing:** [how to test it]
-
-**Questions:**
-- [specific question 1]
-- [specific question 2]
+STOP: 1 of your task(s) have been cancelled. Stop immediately.
 ```
 
-### Handoff
+### Auto-respond
 
-```
-## Handing off: [feature/task]
-
-**Status:** [current state]
-
-**Completed:**
-- [done item 1]
-- [done item 2]
-
-**Remaining:**
-- [todo item 1] - details
-- [todo item 2] - details
-
-**Context:** [important background info]
-
-**Created Task #X** for next steps.
-```
-
-## Tools Quick Reference (23 coordination tools)
-
-| Tool | Purpose |
-|------|---------|
-| `get_context` | Session context: messages, tasks, presence, notes |
-| `set_presence` | Update status and workspace; dynamically changes the server's project context |
-| `add_note` | Add shared note or decision |
-| `send_message` | Message your pair (optional title, urgent) |
-| `read_messages` | Read and mark messages as read |
-| `create_task` | Create task (auto-notifies assignee) |
-| `list_tasks` | View tasks, filter by assignment/status |
-| `update_task` | Update task (auto-notifies on completion; status: pending/in_progress/completed/blocked/cancelled) |
-| `create_plan` | Create shared plan |
-| `get_plan` | View plan(s); omit ID to list all |
-| `update_plan` | Add or update plan items |
-| `handoff` | Hand off work with summary and next steps |
-| `claim_next` | Claim next task (dry_run to peek) |
-| `request_review` | Request code review from pair |
-| `lock_file` | Lock, unlock, check, or list file locks (action param) |
-| `register_agent` | Register a custom agent for auto-discovery |
-| `list_agents` | List all available agents (built-in and registered) |
-| `worker_status` | (Driver) List workers: progress, SLA status, process activity, worktrees |
-| `heartbeat` | (Workers) Signal liveness every 60-90s; include progress, step, total_steps |
-| `report_progress` | (Workers) Structured task progress: description, percent, ETA |
-| `cancel_agent` | (Driver) Cancel a worker's tasks, send STOP signal, kill process |
-| `get_work_context` | Get task context (relevant files, background, constraints, shared notes) |
-| `update_work_context` | Add shared notes to a task's work context |
-
-Use your IDE/CLI native tools for files, search, git, and commands.
-
-### Custom Agent Registration
-
-Any MCP client can join the collaboration by registering as a custom agent:
-
-1. **Register:** `register_agent name='my-bot' display_name='My Bot'`
-2. **Set presence with workspace:** `set_presence agent='my-bot' status='working' workspace='/path/to/project'`
-3. **Participate:** Use any coordination tool (send_message, create_task, etc.)
-
-Once registered, a custom agent is validated the same way as built-in agents (`cursor`, `claude-code`). Use `list_agents` to discover all agents.
-
-## Notifications and Auto-Response
-
-The MCP server provides two mechanisms to keep agents in sync without polling:
-
-### 1. Piggyback Notifications
-
-Every tool response includes a notification banner when the connected agent has unread messages or pending tasks:
-
-```
-🔔 You have 2 unread message(s) and 1 pending task(s). Call read_messages or get_session_context to see them.
-```
-
-This banner is appended to successful tool results (suppressed for `read_messages` and `get_session_context` which already display this information).
-
-### 2. STOP Banners (Cancellation)
-
-If the driver cancels a worker's tasks (via `cancel_agent`), the piggyback banner is replaced with a STOP directive:
-
-```
-🛑 STOP: 1 of your task(s) have been cancelled. The driver no longer needs this work. Stop immediately, call read_messages to see details, and exit.
-```
-
-Workers MUST obey this signal and stop working immediately.
-
-### 3. Auto-Respond (Built into Server)
-
-When the MCP server detects unread messages for an agent that is NOT the currently connected client, it can spawn a configured command to wake up that agent. This replaces any external daemon scripts.
-
-Configure in `mcp/config.yaml`:
+When an agent has unread messages and isn't the currently connected client, the server can spawn a command to wake them. Configured in `config.yaml`:
 
 ```yaml
 auto_respond:
@@ -510,51 +269,78 @@ auto_respond:
     cooldown_seconds: 30
 ```
 
-- **command**: The command to spawn (e.g., invoke Claude Code with the `/pair-respond` skill)
-- **cooldown_seconds**: Minimum time between invocations for the same agent (default: 30)
+### JSON-RPC push notifications
 
-The auto-responder uses file-based locking to prevent overlapping invocations.
-
-### 4. JSON-RPC Push Notifications
-
-The server also pushes `notifications/pair_update` to stdout when the signal file changes and the connected agent has unread content:
+In stdio mode, the server pushes `notifications/pair_update` when the connected agent has new content:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "notifications/pair_update",
-  "params": {
-    "unread_messages": 2,
-    "pending_tasks": 1,
-    "summary": "2 new message(s), 1 pending task(s)"
-  }
+  "params": { "unread_messages": 2, "pending_tasks": 1 }
 }
 ```
 
-MCP clients that support notifications can use this to trigger context refresh.
+## Best Practices
 
-### CLI Status Check
+### DO
 
-For scripts or debugging, check an agent's unread status:
+- Check `get_context` at session start
+- Set `workspace` in `set_presence` when starting or switching projects
+- Report progress continuously (heartbeat + report_progress)
+- Send detailed messages with file paths and line numbers
+- Create tasks for follow-up work
+- Ask questions when blocked
+- Obey STOP signals immediately
 
-```bash
-mcp-stringwork status claude-code
-# Output: unread=2 pending=1
+### DON'T
+
+- Work without checking context first
+- Stay silent for more than 2 minutes while working
+- Assume your pair can see your work -- communicate explicitly
+- Create duplicate tasks -- check existing tasks first
+- Ignore STOP signals -- stop immediately
+- Make big architectural decisions without discussing first
+
+## Message Templates
+
+### Task completion
+
+```
+## Task #X Complete: [title]
+
+**Summary:** [1-2 sentence overview]
+
+**Changes:**
+- [file:line] - description
+
+**Testing:** [how you verified]
+
+**Next steps:** [follow-up needed]
 ```
 
-## State Persistence
+### Blocker report
 
-All collaboration state is stored in the state file (default `~/.config/stringwork/state.sqlite`, configurable via `state_file`):
-- Messages between agents
-- Task list with status
-- Read/unread tracking
-- Agent presence
-- Shared plans
+```
+## Blocked on Task #X: [reason]
 
-**Important:** This file is the source of truth. Both agents read/write to it through the MCP server.
+**Problem:** [description]
+**Tried:** [what you attempted]
+**Need:** [what would unblock you]
+```
 
-## Next Steps
+### Handoff
 
-- Review [QUICK_REFERENCE.md](./QUICK_REFERENCE.md) for command examples
-- Check [SETUP_GUIDE.md](./SETUP_GUIDE.md) if you need to reconfigure
-- Read agent-specific instructions in [AGENTS.md](../AGENTS.md) or [CLAUDE.md](../CLAUDE.md)
+```
+## Handing off: [feature]
+
+**Completed:** [done items]
+**Remaining:** [todo items]
+**Context:** [important background]
+```
+
+## See Also
+
+- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) -- tool usage examples
+- [SETUP_GUIDE.md](SETUP_GUIDE.md) -- installation and configuration
+- [ARCHITECTURE.md](ARCHITECTURE.md) -- system design

@@ -1,49 +1,70 @@
-# Clean Architecture
+# Architecture
 
-This project follows a clean architecture layout so that business logic does not depend on storage or transport details.
+Stringwork follows a clean architecture layout. Business logic does not depend on storage, transport, or tool handler details.
 
 ## Layers
 
 ```
-cmd/mcp-server (main)
-    ↓
-internal/adapter (MCP tool handlers: parse args, call app, format MCP response)
-    ↓
-internal/app (use cases: CollabService, StateRepository interface, Policy interface)
-    ↓
-internal/domain (entities: Message, Task, Plan, CollabState, ...)
-    ↑
-internal/repository (sqlite — implements StateRepository)
-internal/policy (config — implements app.Policy)
-internal/server, internal/mcp (transport — used by adapter)
+cmd/mcp-server (main, CLI)
+    |
+    +-- internal/tools/collab (MCP tool handlers: parse args, call app, format response)
+    |       |
+    +-- internal/dashboard (web UI + REST API)
+    |       |
+    +-------+-- internal/app (use cases: CollabService, WorkerManager, Watchdog, Orchestrator)
+                    |
+                internal/domain (entities: Message, Task, Plan, AgentInstance, WorkContext, ...)
+                    ^
+                internal/repository/sqlite (implements StateRepository)
+                internal/knowledge (FTS5 knowledge store, separate from state)
+                internal/policy (config, workspace validation, safety)
+                internal/worktree (git worktree manager for worker isolation)
 ```
 
-## Directory layout
+## Package responsibilities
 
-| Path | Role |
-|------|------|
-| **internal/domain** | Entities and aggregate state. No dependencies. |
-| **internal/app** | Use cases and ports. Defines `StateRepository`, `Policy`; provides `CollabService` with all collaboration operations. Depends only on domain. |
-| **internal/repository** | Implements `StateRepository` (SQLite). Depends on domain and app (interface). |
-| **internal/adapter/mcp** | MCP tool handlers: parse `map[string]any`, call `CollabService`, return `mcp.CallToolResult`. Depends on app, server, mcp. |
-| **internal/policy** | Config loading and validation. Implements `app.Policy`. |
-| **internal/server** | MCP server (stdio, tool registry). Framework. |
-| **internal/mcp** | MCP protocol types and transport. |
+| Package | Role |
+|---------|------|
+| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies, starts MCP server (stdio or HTTP), CLI subcommands (`status`, `--version`). |
+| **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `FileLock`, `Presence`, `CollabState`. |
+| **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts), `SessionRegistry` (multi-client tracking). Defines `StateRepository` and `Policy` interfaces. |
+| **internal/repository/sqlite** | Implements `StateRepository` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`. |
+| **internal/policy** | Config loading from YAML, workspace path validation, state file and log file paths, global defaults. |
+| **internal/tools/collab** | 23 MCP tool handlers. Each handler parses `map[string]any` args, calls `CollabService`, and returns `mcp.CallToolResult`. Also: piggyback notifications, MCP resource providers, dynamic instructions. |
+| **internal/dashboard** | Web dashboard (embedded HTML) and REST API for viewing tasks, workers, messages, and plans. Served at `/dashboard` in HTTP mode. |
+| **internal/knowledge** | FTS5-powered project knowledge store. Indexes markdown docs, Go source, session notes, and task summaries. Separate SQLite database from main state. |
+| **internal/worktree** | Git worktree manager. Creates isolated checkouts per worker, runs setup commands, cleans up on cancel/exit. |
 
 ## Data flow
 
-1. **main**: Load config → create `StateRepository` (SQLite at `policy.StateFile()`) → create `CollabService(repo, policy, logger)` → register tools → run server.
-2. **Tool call**: Server receives `tools/call` → adapter handler parses args → handler calls `svc.SendMessage(...)` (or other method) → service does `repo.Load()`, mutate state, `repo.Save()` → handler formats and returns MCP result.
-3. **State**: All state lives in `domain.CollabState`. Repository loads/saves the full aggregate. No direct DB or file access from app or adapter.
+### Tool call
 
-## Migration from legacy layout
+1. MCP client sends `tools/call` request
+2. Tool handler in `internal/tools/collab` parses arguments
+3. Handler calls `svc.Run(func(state) { ... })` on `CollabService`
+4. `CollabService` does `repo.Load()`, mutates state, `repo.Save()`
+5. Handler formats the result as `mcp.CallToolResult`
+6. Piggyback middleware appends notification banners (unread messages, pending tasks, STOP signals)
 
-- **internal/tools/collab** (legacy): Monolithic package with global state, file/sqlite logic, and MCP handlers in one place.
-- **Target**: Types in **domain**; persistence behind **StateRepository** in **repository**; use cases in **app.CollabService**; MCP handlers in **adapter/mcp** calling the service. Legacy `collab` is removed or reduced to a thin wrapper that delegates to app + adapter.
+### Worker lifecycle
+
+1. Driver creates a task with `assigned_to='any'`
+2. `TaskOrchestrator` assigns it to a worker type based on strategy (least_loaded or capability_match)
+3. `WorkerManager` spawns the worker process with the configured command
+4. Worker connects to MCP server, claims the task, does work
+5. `Watchdog` monitors heartbeats and progress reports, escalates if silent
+6. Worker completes task and sends findings; process exits
+7. `WorkerManager` cleans up (worktree, process resources)
+
+### State management
+
+All state lives in `domain.CollabState`. The repository loads and saves the full aggregate on every operation. There is no partial update -- this keeps the model simple and consistent.
+
+The knowledge store (`internal/knowledge`) uses a separate SQLite database with incremental FTS5 updates (checksums, not full replace), because it indexes project files that shouldn't be destroyed on every state save.
 
 ## Key interfaces
 
-### StateRepository (app)
+### StateRepository
 
 ```go
 type StateRepository interface {
@@ -52,7 +73,7 @@ type StateRepository interface {
 }
 ```
 
-### Policy (app)
+### Policy
 
 ```go
 type Policy interface {
@@ -68,7 +89,17 @@ type Policy interface {
 
 ## Testing
 
-- **Domain**: Pure types, easy to test.
-- **App**: Mock `StateRepository` and `Policy`; unit-test `CollabService` methods.
-- **Repository**: Integration tests with a real SQLite file or temp JSON file.
-- **Adapter**: Test with mock `CollabService` or integration test with real service + in-memory repo.
+- **Domain**: Pure types, no dependencies.
+- **App**: Table-driven tests with real SQLite (temp files). Tests cover service methods, watchdog alerts, worker env, progress monitoring, and pruning.
+- **Repository**: Integration tests with temp SQLite databases.
+- **Tools/collab**: Integration tests using a real `CollabService` and in-memory state.
+- **Dashboard**: HTTP handler tests with `httptest`.
+- **Knowledge**: FTS5 indexing and query tests.
+- **Worktree**: Git worktree creation/cleanup tests.
+
+Run all tests:
+
+```bash
+go test ./...
+go test ./... -race -cover
+```
