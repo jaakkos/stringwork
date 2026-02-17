@@ -38,10 +38,10 @@ type TaskData struct {
 
 // IndexerConfig controls what and how content is indexed.
 type IndexerConfig struct {
-	WorkspaceRoot      string
-	IndexGoSource      bool
-	WatchEnabled       bool
-	StateSyncInterval  time.Duration // how often to sync state items (default 60s)
+	WorkspaceRoot     string
+	IndexGoSource     bool
+	WatchEnabled      bool
+	StateSyncInterval time.Duration // how often to sync state items (default 60s)
 }
 
 // Indexer scans the workspace and watches for file changes, keeping the

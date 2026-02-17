@@ -102,7 +102,7 @@ func TestGetBuiltinAgents(t *testing.T) {
 	state.AgentInstances = map[string]*domain.AgentInstance{
 		"cursor":      {AgentType: "cursor"},
 		"claude-code": {AgentType: "claude-code"},
-		"codex":      {AgentType: "codex"},
+		"codex":       {AgentType: "codex"},
 	}
 	agents := GetBuiltinAgents(state)
 	if len(agents) != 3 {

@@ -31,7 +31,7 @@ func TestHeartbeat_OfflineToIdle(t *testing.T) {
 
 	// Pre-seed AgentInstances with claude-code set to "offline"
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "offline", CurrentTasks: []int{}},
 	}
 
@@ -54,7 +54,7 @@ func TestHeartbeat_UpdatesTimestamp(t *testing.T) {
 
 	oldTime := time.Now().Add(-10 * time.Minute)
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", LastHeartbeat: oldTime, CurrentTasks: []int{}},
 	}
 
@@ -141,7 +141,7 @@ func TestHeartbeat_ByAgentType(t *testing.T) {
 
 	// Set up multi-instance scenario: claude-code-1 as the instance ID, claude-code as agent type
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":       {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":        {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code-1": {InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker, Status: "offline", CurrentTasks: []int{}},
 	}
 
@@ -167,7 +167,7 @@ func TestHeartbeat_DoesNotChangeNonOfflineStatus(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "working", CurrentTasks: []int{1}},
 	}
 

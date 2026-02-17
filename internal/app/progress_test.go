@@ -212,7 +212,7 @@ func TestWatchdog_SLAExceeded(t *testing.T) {
 		AssignedTo:          "claude-code",
 		UpdatedAt:           now.Add(-8 * time.Minute),
 		LastProgressAt:      now.Add(-1 * time.Minute), // recent progress (so no stale alert)
-		ExpectedDurationSec: 300,                        // 5 minutes SLA
+		ExpectedDurationSec: 300,                       // 5 minutes SLA
 	})
 	state.NextTaskID = 2
 	state.NextMsgID = 1

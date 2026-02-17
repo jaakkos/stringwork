@@ -15,11 +15,11 @@ type Triggerable interface {
 
 // CollabService runs collaboration use cases over persisted state.
 type CollabService struct {
-	repo      StateRepository
-	policy    Policy
-	logger    *log.Logger
-	mu        sync.Mutex
-	notifier  Triggerable // optional; set via SetNotifier after construction
+	repo     StateRepository
+	policy   Policy
+	logger   *log.Logger
+	mu       sync.Mutex
+	notifier Triggerable // optional; set via SetNotifier after construction
 }
 
 // NewCollabService returns a new CollabService.

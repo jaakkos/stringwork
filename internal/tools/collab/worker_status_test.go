@@ -65,7 +65,7 @@ func TestWorkerStatus_WithHeartbeat(t *testing.T) {
 
 	// Pre-seed instances with a recent heartbeat
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", LastHeartbeat: time.Now(), CurrentTasks: []int{}},
 	}
 
@@ -91,7 +91,7 @@ func TestWorkerStatus_WithCurrentTasks(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "working", CurrentTasks: []int{1, 3}, LastHeartbeat: time.Now()},
 	}
 

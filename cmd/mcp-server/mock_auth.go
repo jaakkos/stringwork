@@ -72,7 +72,7 @@ func (m *mockAuthServer) handleMetadata(w http.ResponseWriter, r *http.Request) 
 		"registration_endpoint":                 m.baseURL + "/register",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"code_challenge_methods_supported":       []string{"S256"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 	}
 
@@ -102,8 +102,8 @@ func (m *mockAuthServer) handleRegister(w http.ResponseWriter, r *http.Request) 
 	m.logger.Printf("Mock auth: client registered: %s", clientID)
 
 	resp := map[string]any{
-		"client_id":                clientID,
-		"client_id_issued_at":     time.Now().Unix(),
+		"client_id":                  clientID,
+		"client_id_issued_at":        time.Now().Unix(),
 		"token_endpoint_auth_method": "none",
 	}
 

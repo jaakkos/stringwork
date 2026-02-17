@@ -59,8 +59,8 @@ type WorkerManager struct {
 	fallbackDir    string
 	logger         *log.Logger
 	mu             sync.Mutex
-	lastSpawn      map[string]time.Time           // instanceID -> last successful spawn
-	runningWorkers map[string]context.CancelFunc   // instanceID -> cancel func for spawned process
+	lastSpawn      map[string]time.Time          // instanceID -> last successful spawn
+	runningWorkers map[string]context.CancelFunc // instanceID -> cancel func for spawned process
 	sessionChecker func(instanceOrType string) bool
 	// mcpServerURL when set (HTTP mode): used to register MCP server with worker CLIs.
 	mcpServerURL string
@@ -78,11 +78,11 @@ type WorkerManager struct {
 
 // ProcessInfo holds runtime process metadata for a worker instance.
 type ProcessInfo struct {
-	InstanceID     string    `json:"instance_id"`
-	StartedAt      time.Time `json:"started_at"`
-	LastOutputAt   time.Time `json:"last_output_at"`
-	OutputBytes    int64     `json:"output_bytes"`
-	WorkspaceDir   string    `json:"workspace_dir"`
+	InstanceID   string    `json:"instance_id"`
+	StartedAt    time.Time `json:"started_at"`
+	LastOutputAt time.Time `json:"last_output_at"`
+	OutputBytes  int64     `json:"output_bytes"`
+	WorkspaceDir string    `json:"workspace_dir"`
 }
 
 // NewWorkerManager creates a WorkerManager from orchestration config. Workers are built from orch.Workers only.
@@ -169,9 +169,9 @@ func (m *WorkerManager) GetProcessInfo() map[string]ProcessInfo {
 
 // activityWriter wraps an io.Writer and records when writes happen for process monitoring.
 type activityWriter struct {
-	inner    *os.File
-	mu       *sync.Mutex
-	info     *ProcessInfo
+	inner *os.File
+	mu    *sync.Mutex
+	info  *ProcessInfo
 }
 
 func (w *activityWriter) Write(p []byte) (int, error) {

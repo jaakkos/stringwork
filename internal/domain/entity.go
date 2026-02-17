@@ -34,9 +34,9 @@ type AgentInstance struct {
 	Workspace          string    `json:"workspace,omitempty"`
 	LastHeartbeat      time.Time `json:"last_heartbeat"`
 	Progress           string    `json:"progress,omitempty"`             // free-text progress description from last heartbeat
-	ProgressStep       int       `json:"progress_step,omitempty"`       // current step number (e.g. 3 of 5)
+	ProgressStep       int       `json:"progress_step,omitempty"`        // current step number (e.g. 3 of 5)
 	ProgressTotalSteps int       `json:"progress_total_steps,omitempty"` // total steps
-	ProgressUpdatedAt  time.Time `json:"progress_updated_at,omitempty"` // when progress was last reported
+	ProgressUpdatedAt  time.Time `json:"progress_updated_at,omitempty"`  // when progress was last reported
 }
 
 // WorkContext holds shared context for a task (files, background, constraints).
@@ -46,7 +46,7 @@ type WorkContext struct {
 	RelevantFiles []string          `json:"relevant_files,omitempty"`
 	Background    string            `json:"background,omitempty"`
 	Constraints   []string          `json:"constraints,omitempty"`
-	SharedNotes   map[string]string  `json:"shared_notes,omitempty"`
+	SharedNotes   map[string]string `json:"shared_notes,omitempty"`
 	ParentCtxID   string            `json:"parent_ctx_id,omitempty"`
 }
 
@@ -57,7 +57,7 @@ type Task struct {
 	Description   string    `json:"description"`
 	Status        string    `json:"status"` // pending, in_progress, completed, blocked, cancelled
 	AssignedTo    string    `json:"assigned_to"`
-	CreatedBy    string    `json:"created_by"`
+	CreatedBy     string    `json:"created_by"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	Priority      int       `json:"priority"`

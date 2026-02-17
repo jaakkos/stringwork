@@ -14,15 +14,15 @@ import (
 
 // StateSnapshot is the JSON response from /api/state.
 type StateSnapshot struct {
-	Timestamp    string              `json:"timestamp"`
-	Workspace    string              `json:"workspace"`
-	Agents       []AgentSnapshot     `json:"agents"`
-	Tasks        []TaskSnapshot      `json:"tasks"`
-	Messages     []MessageSnapshot   `json:"messages"`
-	Plans        []PlanSnapshot      `json:"plans,omitempty"`
-	Workers      []WorkerSnapshot    `json:"workers,omitempty"`
-	SessionNotes []NoteSnapshot      `json:"session_notes,omitempty"`
-	FileLocks    []FileLockSnapshot  `json:"file_locks,omitempty"`
+	Timestamp    string             `json:"timestamp"`
+	Workspace    string             `json:"workspace"`
+	Agents       []AgentSnapshot    `json:"agents"`
+	Tasks        []TaskSnapshot     `json:"tasks"`
+	Messages     []MessageSnapshot  `json:"messages"`
+	Plans        []PlanSnapshot     `json:"plans,omitempty"`
+	Workers      []WorkerSnapshot   `json:"workers,omitempty"`
+	SessionNotes []NoteSnapshot     `json:"session_notes,omitempty"`
+	FileLocks    []FileLockSnapshot `json:"file_locks,omitempty"`
 }
 
 // AgentSnapshot is a per-agent summary.

@@ -37,16 +37,16 @@ type mockPolicy struct {
 	workspaceRoot string
 }
 
-func (p *mockPolicy) MessageRetentionMax() int                       { return 1000 }
-func (p *mockPolicy) MessageRetentionDays() int                      { return 30 }
-func (p *mockPolicy) PresenceTTLSeconds() int                        { return 300 }
-func (p *mockPolicy) StateFile() string                              { return "" }
-func (p *mockPolicy) SignalFilePath() string                         { return "" }
-func (p *mockPolicy) WorkspaceRoot() string                          { return p.workspaceRoot }
-func (p *mockPolicy) SetWorkspaceRoot(root string)                   { p.workspaceRoot = root }
-func (p *mockPolicy) IsToolEnabled(string) bool                      { return true }
-func (p *mockPolicy) ValidatePath(path string) (string, error)       { return path, nil }
-func (p *mockPolicy) Orchestration() *policy.OrchestrationConfig     { return nil }
+func (p *mockPolicy) MessageRetentionMax() int                   { return 1000 }
+func (p *mockPolicy) MessageRetentionDays() int                  { return 30 }
+func (p *mockPolicy) PresenceTTLSeconds() int                    { return 300 }
+func (p *mockPolicy) StateFile() string                          { return "" }
+func (p *mockPolicy) SignalFilePath() string                     { return "" }
+func (p *mockPolicy) WorkspaceRoot() string                      { return p.workspaceRoot }
+func (p *mockPolicy) SetWorkspaceRoot(root string)               { p.workspaceRoot = root }
+func (p *mockPolicy) IsToolEnabled(string) bool                  { return true }
+func (p *mockPolicy) ValidatePath(path string) (string, error)   { return path, nil }
+func (p *mockPolicy) Orchestration() *policy.OrchestrationConfig { return nil }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}
@@ -202,8 +202,8 @@ func TestAPIState_AgentOrdering(t *testing.T) {
 
 	now := time.Now()
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"codex":      {InstanceID: "codex", AgentType: "codex", Role: domain.RoleWorker, Status: "idle", LastHeartbeat: now},
-		"cursor":     {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", LastHeartbeat: now},
+		"codex":       {InstanceID: "codex", AgentType: "codex", Role: domain.RoleWorker, Status: "idle", LastHeartbeat: now},
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", LastHeartbeat: now},
 		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "busy", LastHeartbeat: now},
 	}
 	repo.state.DriverID = "cursor"

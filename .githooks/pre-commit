@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run gofmt on staged Go files.
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+UNFORMATTED=$(gofmt -l . 2>/dev/null)
+if [ -n "$UNFORMATTED" ]; then
+  echo "gofmt: these files are not formatted:"
+  echo "$UNFORMATTED"
+  echo ""
+  echo "Run: gofmt -w ."
+  exit 1
+fi

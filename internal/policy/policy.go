@@ -27,34 +27,34 @@ func GlobalStateFile() string {
 
 // WorkerConfig configures a worker type in the driver/worker orchestration model.
 type WorkerConfig struct {
-	Type                 string            `yaml:"type"`                    // e.g. "claude-code", "codex"
-	Instances            int               `yaml:"instances"`              // max concurrent instances (default 1)
-	Command              []string          `yaml:"command"`                 // spawn command
-	Capabilities         []string          `yaml:"capabilities"`           // e.g. ["code-edit", "code-review"]
-	MaxConcurrentTasks   int               `yaml:"max_concurrent_tasks"`   // per instance (default 1)
-	CooldownSeconds      int               `yaml:"cooldown_seconds"`
-	TimeoutSeconds       int               `yaml:"timeout_seconds"`
-	RetryDelaySeconds    int               `yaml:"retry_delay_seconds"`
-	MaxRetries           int               `yaml:"max_retries"`
+	Type               string   `yaml:"type"`                 // e.g. "claude-code", "codex"
+	Instances          int      `yaml:"instances"`            // max concurrent instances (default 1)
+	Command            []string `yaml:"command"`              // spawn command
+	Capabilities       []string `yaml:"capabilities"`         // e.g. ["code-edit", "code-review"]
+	MaxConcurrentTasks int      `yaml:"max_concurrent_tasks"` // per instance (default 1)
+	CooldownSeconds    int      `yaml:"cooldown_seconds"`
+	TimeoutSeconds     int      `yaml:"timeout_seconds"`
+	RetryDelaySeconds  int      `yaml:"retry_delay_seconds"`
+	MaxRetries         int      `yaml:"max_retries"`
 	// Env sets additional environment variables for the spawned worker process.
 	// Values can reference parent env vars with ${VAR} syntax (e.g. "home_dir: ${HOME}").
 	// These are merged on top of the inherited environment.
-	Env                  map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env"`
 	// InheritEnv is a list of glob patterns for env var names to inherit from the parent
 	// process. By default, ALL env vars are inherited. Use this when you want to explicitly
 	// ensure specific vars are passed (e.g. ["GH_*", "GITHUB_*", "SSH_AUTH_SOCK",
 	// "DOCKER_HOST"]). If set to ["none"], no env vars are inherited (clean environment).
-	InheritEnv           []string          `yaml:"inherit_env"`
+	InheritEnv []string `yaml:"inherit_env"`
 }
 
 // OrchestrationConfig holds driver/worker orchestration settings.
 type OrchestrationConfig struct {
-	Driver                   string          `yaml:"driver"`                      // agent type that is the driver, e.g. "cursor"
+	Driver                   string          `yaml:"driver"` // agent type that is the driver, e.g. "cursor"
 	Workers                  []WorkerConfig  `yaml:"workers"`
-	AssignmentStrategy       string          `yaml:"assignment_strategy"`          // least_loaded (default), capability_match, round_robin
+	AssignmentStrategy       string          `yaml:"assignment_strategy"` // least_loaded (default), capability_match, round_robin
 	HeartbeatIntervalSeconds int             `yaml:"heartbeat_interval_seconds"`
 	WorkerTimeoutSeconds     int             `yaml:"worker_timeout_seconds"`
-	Worktrees                *WorktreeConfig `yaml:"worktrees"`                    // optional git worktree isolation
+	Worktrees                *WorktreeConfig `yaml:"worktrees"` // optional git worktree isolation
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with
@@ -100,10 +100,10 @@ type Config struct {
 	MessageRetentionDays int `yaml:"message_retention_days"`
 	PresenceTTLSeconds   int `yaml:"presence_ttl_seconds"`
 
-	HTTPPort      int                           `yaml:"http_port"`
-	Orchestration *OrchestrationConfig          `yaml:"orchestration"`
-	MCPServers    map[string]MCPServerConfig    `yaml:"mcp_servers"`
-	Features      *FeaturesConfig               `yaml:"features"`
+	HTTPPort      int                        `yaml:"http_port"`
+	Orchestration *OrchestrationConfig       `yaml:"orchestration"`
+	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
+	Features      *FeaturesConfig            `yaml:"features"`
 }
 
 // DefaultConfig returns sensible defaults. Orchestration is always set (driver cursor, no workers).

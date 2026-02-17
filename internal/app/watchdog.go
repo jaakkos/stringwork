@@ -41,21 +41,21 @@ const (
 // - Clears stale sessions from the registry so workers can be respawned
 // - Sends system notifications about recovery actions
 type Watchdog struct {
-	svc                      *CollabService
-	registry                 *SessionRegistry
-	logger                   *log.Logger
-	interval                 time.Duration
-	heartbeatStaleThresh     time.Duration
-	taskStuckThresh          time.Duration
-	sessionStaleThresh       time.Duration
-	progressWarningThresh    time.Duration
-	progressCriticalThresh   time.Duration
-	notifier                 Triggerable
-	stopCh                   chan struct{}
-	doneCh                   chan struct{}
+	svc                    *CollabService
+	registry               *SessionRegistry
+	logger                 *log.Logger
+	interval               time.Duration
+	heartbeatStaleThresh   time.Duration
+	taskStuckThresh        time.Duration
+	sessionStaleThresh     time.Duration
+	progressWarningThresh  time.Duration
+	progressCriticalThresh time.Duration
+	notifier               Triggerable
+	stopCh                 chan struct{}
+	doneCh                 chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
 	// Key: taskID, Value: "warning" or "critical".
-	alertedTasks             map[int]string
+	alertedTasks map[int]string
 }
 
 // WatchdogOption configures the watchdog.
