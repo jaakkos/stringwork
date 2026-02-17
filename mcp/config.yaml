@@ -1,0 +1,165 @@
+# MCP Stringwork Configuration
+# Copy this file and customize for your project
+
+# Initial workspace root directory (used for file operation policy checks).
+# Leave empty to use current working directory.
+# NOTE: This is NOT where the state file lives — the state file is global.
+# This value is a startup default. Clients can dynamically change the workspace
+# at runtime by calling set_presence with a "workspace" parameter, which updates
+# file path validation, project detection, and worker spawn working directory.
+workspace_root: "/path/to/workspace"
+
+# Log file path. Default: ~/.config/stringwork/mcp-stringwork.log
+# Logs are always written to both stderr and this file.
+# Set to "none" to disable file logging.
+# Tail the log in real time:  tail -f ~/.config/stringwork/mcp-stringwork.log
+log_file: ""
+
+# Collaboration state file path.
+# If empty (recommended), defaults to ~/.config/stringwork/state.sqlite
+# which is shared globally across all agents on this machine.
+# Set an explicit absolute path to override, or a relative path (resolved against workspace_root).
+state_file: ""
+
+# Which tools to enable (use "*" for all, or list specific tool names)
+enabled_tools:
+  - "*"
+
+# --- Collaboration Settings ---
+
+# Maximum number of messages to keep (0 = unlimited)
+# When exceeded, oldest messages are pruned
+message_retention_max: 1000
+
+# Delete messages older than N days (0 = unlimited)
+# Applied alongside max count
+message_retention_days: 30
+
+# Agent is considered stale/offline after N seconds without presence update
+# Used by list_presence to filter active agents
+presence_ttl_seconds: 300
+
+# --- Transport (how the MCP server runs) ---
+# "stdio" (default): Cursor/Claude start the server as a subprocess. One instance per client.
+# "http" or "sse": Run the server as a persistent daemon; Cursor connects via SSE, Claude Code via Streamable HTTP.
+transport: "http"
+http_port: 8943
+
+# --- MCP Servers for Workers ---
+# MCP servers to auto-register with worker CLIs (claude, codex) when they spawn.
+# stringwork is always auto-registered in HTTP mode (from transport+port above).
+# For servers requiring auth (OAuth/bearer), workers must log in manually once:
+#   claude mcp login stringwork   OR   codex mcp login <name>
+mcp_servers:
+  atlassian:
+    url: "https://mcp.atlassian.com/v1/mcp"
+    auth: oauth
+  ai-assist:
+    url: "https://example.com/ai-assist/mcp"
+    auth: oauth
+  devconsole:
+    url: "https://example.com/devconsole/mcp"
+    auth: oauth
+  dev-ass:
+    url: "https://example.com/dev-assistance/mcp"
+    auth: oauth
+  glean_default:
+    url: "https://example.com/glean/mcp"
+    auth: oauth
+  sequential:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-sequential-thinking"
+  playwright:
+    command: npx
+    args:
+      - "@playwright/mcp@latest"
+      - "--browser"
+      - "chromium"
+      - "--user-data-dir"
+      - "/tmp/playwright-profile"
+      - "--output-dir"
+      - "/tmp/playwright-mcp"
+
+# --- Features ---
+# Optional features that can be enabled for enhanced capabilities.
+features:
+  knowledge:
+    enabled: true               # Enable FTS5-based project knowledge indexer
+    index_go_source: true       # Index Go source files (function signatures, comments)
+    watch_interval_seconds: 60  # How often to sync session notes and task summaries
+
+# --- Orchestration (driver + workers) ---
+# The server uses one driver (e.g. Cursor) and N workers. When the driver creates
+# tasks or sends messages to workers, the server spawns worker processes so you
+# don't need to keep Claude Code or Codex running — the server manages their lifecycle.
+#
+# When the server runs in HTTP mode (transport: "http"), it auto-registers MCP servers
+# with worker CLIs (claude, codex) using their native `mcp add` commands.
+# stringwork is always auto-registered; additional servers come from mcp_servers above.
+#
+# Worker spawn behavior:
+#   - Startup recovery: checks for pending work on server (re)start
+#   - Retry with backoff, timeout protection, failure/success acks
+#
+# Per worker: type, instances, command, cooldown_seconds, timeout_seconds,
+# retry_delay_seconds, max_retries, env, inherit_env.
+# Spawned processes get STRINGWORK_AGENT, STRINGWORK_WORKSPACE plus all inherited env vars.
+#
+# Environment control:
+#   env:           Additional env vars. Values support ${VAR} expansion from parent env.
+#   inherit_env:   Glob patterns for which parent env vars to pass through.
+#                  Default (empty): inherit ALL parent env vars.
+#                  Set to ["none"] for a clean environment.
+#                  Examples: ["GH_*", "GITHUB_*", "HOME", "PATH", "SSH_AUTH_SOCK"]
+orchestration:
+  driver: cursor
+  # least_loaded = any worker can take any task, pick the one with fewest current tasks (default when all workers have same capabilities)
+  # capability_match = only assign to workers that have the task's required capabilities
+  assignment_strategy: least_loaded
+  heartbeat_interval_seconds: 30
+  worker_timeout_seconds: 120
+  # Git worktree isolation: each worker gets its own checkout to prevent file conflicts.
+  # Requires the workspace to be a git repository. Falls back to shared workspace if not.
+  worktrees:
+    enabled: false                          # opt-in: set to true to enable worktree isolation
+    base_branch: ""                         # empty = current HEAD
+    cleanup_strategy: "on_cancel"           # "on_cancel" | "on_exit" | "manual"
+    setup_commands: []                      # auto-detect if empty (go mod download, npm install, etc.)
+    path: ".stringwork/worktrees"      # relative to workspace root
+  workers:
+    - type: claude-code
+      instances: 1
+      command: ["claude", "-p", "You are claude-code in a pair programming session. Your workspace is {workspace}. Steps: 1) set_presence agent='claude-code' status='working' workspace='{workspace}' 2) read_messages for 'claude-code' 3) list_tasks assigned_to='claude-code' 4) Process ALL unread messages and pending tasks using your full tool suite (file edit, search, git, terminal, and all MCP tools). 5) report_progress every 2-3 minutes. 6) ALWAYS send_message from='claude-code' to='cursor' with detailed findings before finishing.", "--dangerously-skip-permissions"]
+      cooldown_seconds: 30
+      max_retries: 2
+      retry_delay_seconds: 15
+      timeout_seconds: 600
+      # env: pass additional env vars to the worker process.
+      # Values support ${VAR} expansion from the server's environment.
+      env:
+        # Ensure gh CLI can reach GitHub API (pass through auth token)
+        GH_TOKEN: "${GH_TOKEN}"
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        # Pass SSH agent for git operations
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
+      # inherit_env: by default all env vars are inherited.
+      # Uncomment to restrict to specific patterns:
+      # inherit_env: ["HOME", "PATH", "SHELL", "USER", "LANG", "LC_*",
+      #               "GH_*", "GITHUB_*", "SSH_*", "DOCKER_*", "NPM_*",
+      #               "GOPATH", "GOROOT", "NVM_*", "PAIR_*"]
+    - type: codex
+      instances: 1
+      # Codex sandbox blocks network by default even with --full-auto.
+      # Use --sandbox danger-full-access to allow gh, curl, git push, API calls, etc.
+      # Alternative: --full-auto -c 'sandbox_workspace_write.network_access=true'
+      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are codex in a pair programming session. Your workspace is {workspace}. Steps: 1) set_presence agent='codex' status='working' workspace='{workspace}' 2) read_messages for 'codex' 3) list_tasks assigned_to='codex' 4) Process ALL unread messages and pending tasks using your full tool suite (file edit, search, terminal, and all MCP tools). 5) report_progress every 2-3 minutes. 6) ALWAYS send_message from='codex' to='cursor' with detailed findings before finishing."]
+      cooldown_seconds: 30
+      max_retries: 2
+      retry_delay_seconds: 15
+      timeout_seconds: 600
+      env:
+        GH_TOKEN: "${GH_TOKEN}"
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
