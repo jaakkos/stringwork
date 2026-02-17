@@ -12,6 +12,7 @@ type SessionRegistry struct {
 	sessions     map[string]string    // sessionID → agentName
 	agents       map[string]string    // agentName → sessionID (reverse lookup)
 	lastActivity map[string]time.Time // sessionID → last activity timestamp
+	dashboardURL string               // set after HTTP listener binds
 }
 
 // NewSessionRegistry creates an empty registry.
@@ -110,6 +111,20 @@ func (r *SessionRegistry) AgentCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.agents)
+}
+
+// SetDashboardURL stores the dashboard URL (set after the HTTP listener binds).
+func (r *SessionRegistry) SetDashboardURL(url string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dashboardURL = url
+}
+
+// DashboardURL returns the dashboard URL, or "" if not yet available.
+func (r *SessionRegistry) DashboardURL() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dashboardURL
 }
 
 // BackdateActivity sets the last activity time for a session to a specific time.

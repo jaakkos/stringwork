@@ -140,6 +140,11 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 					buf.WriteString("  Git: not a git repository\n")
 				}
 
+				if dashURL := registry.DashboardURL(); dashURL != "" {
+					buf.WriteByte('\n')
+					fmt.Fprintf(&buf, "Dashboard: %s\n", dashURL)
+				}
+
 				result = buf.String()
 				return nil
 			}); err != nil {

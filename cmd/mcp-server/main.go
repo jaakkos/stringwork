@@ -319,6 +319,9 @@ func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *poli
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	baseURL := fmt.Sprintf("http://localhost:%d", actualPort)
 
+	// Store dashboard URL so tools can expose it to the driver
+	registry.SetDashboardURL(fmt.Sprintf("%s/dashboard", baseURL))
+
 	// Update worker manager with actual URL (important when port was 0)
 	if wm != nil {
 		wm.SetMCPServerURL(fmt.Sprintf("%s/mcp", baseURL))
