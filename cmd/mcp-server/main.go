@@ -30,11 +30,20 @@ import (
 	"github.com/jaakkos/stringwork/internal/worktree"
 )
 
+// Version is set by -ldflags at build time.
+var Version = "dev"
+
 func main() {
 	// Handle CLI subcommands before starting MCP server.
-	if len(os.Args) > 1 && os.Args[1] == "status" {
-		runStatusCommand()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "status":
+			runStatusCommand()
+			return
+		case "--version", "-v", "version":
+			fmt.Println("mcp-stringwork " + Version)
+			return
+		}
 	}
 
 	// Load config
@@ -97,7 +106,7 @@ func main() {
 
 	mcpServer := server.NewMCPServer(
 		"mcp-stringwork",
-		"1.0.0",
+		Version,
 		server.WithInstructions(collab.InstructionsText()),
 		server.WithToolHandlerMiddleware(collab.PiggybackMiddleware(svc, registry)),
 		server.WithHooks(hooks),
