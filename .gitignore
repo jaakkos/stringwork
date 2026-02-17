@@ -22,3 +22,4 @@ vendor/
 
 # Cursor plans
 .cursor/plans/
+mcp-server

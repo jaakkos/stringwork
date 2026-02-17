@@ -20,6 +20,8 @@ func AgentNameForClient(clientName string) string {
 		return "claude-code"
 	case strings.Contains(lower, "codex"):
 		return "codex"
+	case strings.Contains(lower, "gemini"):
+		return "gemini"
 	case strings.Contains(lower, "windsurf"):
 		return "windsurf"
 	case strings.Contains(lower, "vscode"), strings.Contains(lower, "visual studio"):
@@ -30,17 +32,12 @@ func AgentNameForClient(clientName string) string {
 }
 
 // pairForAgent returns the default pair partner name.
-// With three built-in agents, each gets a default pair:
-//   - cursor's default pair is claude-code
-//   - claude-code's default pair is cursor
-//   - codex's default pair is cursor
+// Each built-in agent defaults to pairing with cursor (the driver).
 func pairForAgent(agent string) string {
 	switch agent {
 	case "cursor":
 		return "claude-code"
-	case "claude-code":
-		return "cursor"
-	case "codex":
+	case "claude-code", "codex", "gemini":
 		return "cursor"
 	default:
 		return "cursor"

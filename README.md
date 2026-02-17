@@ -1,6 +1,6 @@
 # Stringwork
 
-An MCP server for orchestrating AI coding agents. One driver (e.g. Cursor) directs multiple workers (Claude Code, Codex) through shared tasks, messaging, plans, and progress monitoring -- all from a single Go binary.
+An MCP server for orchestrating AI coding agents. One driver (e.g. Cursor) directs multiple workers (Claude Code, Codex, Gemini CLI) through shared tasks, messaging, plans, and progress monitoring -- all from a single Go binary.
 
 ## Install
 
@@ -27,6 +27,7 @@ Stringwork uses a **driver/worker** model:
        |
        +-- Worker 1 (Claude Code)  -- claims tasks, reports progress, sends findings
        +-- Worker 2 (Codex)        -- claims tasks, reports progress, sends findings
+       +-- Worker 3 (Gemini CLI)   -- claims tasks, reports progress, sends findings
        +-- Worker N (any agent)    -- ...
 ```
 
@@ -134,6 +135,11 @@ orchestration:
     - type: codex
       instances: 1
       command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "..."]
+    - type: gemini
+      instances: 1
+      command: ["gemini", "--yolo", "--prompt", "..."]
+      env:
+        GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 ```
 
 See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.

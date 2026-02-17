@@ -600,6 +600,11 @@ func isCodexCommand(exe string) bool {
 	return base == "codex" || strings.Contains(strings.ToLower(exe), "codex")
 }
 
+func isGeminiCommand(exe string) bool {
+	base := filepath.Base(exe)
+	return base == "gemini" || strings.Contains(strings.ToLower(exe), "gemini")
+}
+
 // mcpBaseURL extracts the scheme+host+port from a URL (e.g. "http://localhost:8943/mcp" -> "http://localhost:8943").
 func mcpBaseURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
@@ -646,6 +651,18 @@ func (m *WorkerManager) ensureMCPRegistered(agentType, exe string) error {
 			}
 			m.logger.Printf("WorkerManager: registering MCP %q with %s CLI...", server.Name, agentType)
 			if err := registerMCPViaCodex(exe, server, m.logger); err != nil {
+				return fmt.Errorf("failed to register MCP %q with %s CLI: %w", server.Name, agentType, err)
+			}
+			m.logger.Printf("WorkerManager: MCP %q registered with %s CLI", server.Name, agentType)
+		}
+	case isGeminiCommand(exe):
+		for _, server := range servers {
+			if isGeminiMCPConfigured(server.Name, server) {
+				m.logger.Printf("WorkerManager: MCP %q already registered with %s CLI", server.Name, agentType)
+				continue
+			}
+			m.logger.Printf("WorkerManager: registering MCP %q with %s CLI...", server.Name, agentType)
+			if err := registerMCPViaGemini(exe, server, m.logger); err != nil {
 				return fmt.Errorf("failed to register MCP %q with %s CLI: %w", server.Name, agentType, err)
 			}
 			m.logger.Printf("WorkerManager: MCP %q registered with %s CLI", server.Name, agentType)
@@ -853,6 +870,68 @@ func registerMCPViaCodex(exe string, entry MCPServerEntry, logger *log.Logger) e
 	if err != nil {
 		logger.Printf("WorkerManager: codex mcp add output: %s", strings.TrimSpace(string(output)))
 		return fmt.Errorf("codex mcp add: %w", err)
+	}
+	return nil
+}
+
+// isGeminiMCPConfigured checks ~/.gemini/settings.json for a named MCP server entry.
+func isGeminiMCPConfigured(name string, entry MCPServerEntry) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil {
+		return false
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+	servers, _ := cfg["mcpServers"].(map[string]interface{})
+	serverCfg, _ := servers[name].(map[string]interface{})
+	if len(serverCfg) == 0 {
+		return false
+	}
+	if entry.URL != "" {
+		existingURL, _ := serverCfg["url"].(string)
+		return strings.TrimSuffix(existingURL, "/") == strings.TrimSuffix(entry.URL, "/")
+	}
+	if entry.Command != "" {
+		cmd, _ := serverCfg["command"].(string)
+		return cmd == entry.Command
+	}
+	return false
+}
+
+// registerMCPViaGemini uses "gemini mcp add" to register a server.
+func registerMCPViaGemini(exe string, entry MCPServerEntry, logger *log.Logger) error {
+	// Remove existing entry (ignore errors — may not exist)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel1()
+	_ = exec.CommandContext(ctx1, exe, "mcp", "remove", "-s", "user", entry.Name).Run()
+
+	// Add new entry
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel2()
+
+	var args []string
+	if entry.URL != "" {
+		args = []string{"mcp", "add", "-s", "user", "--transport", "http", entry.Name, entry.URL}
+	} else {
+		args = []string{"mcp", "add", "-s", "user", entry.Name, entry.Command}
+		args = append(args, "--")
+		args = append(args, entry.Args...)
+	}
+	for k, v := range entry.Env {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+	}
+
+	cmd := exec.CommandContext(ctx2, exe, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("WorkerManager: gemini mcp add output: %s", strings.TrimSpace(string(output)))
+		return fmt.Errorf("gemini mcp add: %w", err)
 	}
 	return nil
 }

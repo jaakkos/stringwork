@@ -95,8 +95,8 @@ features:
 # tasks or sends messages to workers, the server spawns worker processes so you
 # don't need to keep Claude Code or Codex running — the server manages their lifecycle.
 #
-# MCP servers are auto-registered with worker CLIs (claude, codex) using their
-# native `mcp add` commands. Stringwork itself is always auto-registered;
+# MCP servers are auto-registered with worker CLIs (claude, codex, gemini) using
+# their native `mcp add` commands. Stringwork itself is always auto-registered;
 # additional servers come from mcp_servers above.
 #
 # Worker spawn behavior:
@@ -160,6 +160,21 @@ orchestration:
       retry_delay_seconds: 15
       timeout_seconds: 600
       env:
+        GH_TOKEN: "${GH_TOKEN}"
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
+    - type: gemini
+      instances: 1
+      # Gemini CLI with --yolo auto-approves tool executions (no interactive prompts).
+      # Requires GOOGLE_API_KEY or GOOGLE_APPLICATION_CREDENTIALS for auth.
+      # Install: npm install -g @google/gemini-cli
+      command: ["gemini", "--yolo", "--prompt", "You are gemini in a pair programming session. Your workspace is {workspace}. Steps: 1) set_presence agent='gemini' status='working' workspace='{workspace}' 2) read_messages for 'gemini' 3) list_tasks assigned_to='gemini' 4) Process ALL unread messages and pending tasks using your full tool suite (file edit, search, terminal, and all MCP tools). 5) report_progress every 2-3 minutes. 6) ALWAYS send_message from='gemini' to='cursor' with detailed findings before finishing."]
+      cooldown_seconds: 30
+      max_retries: 2
+      retry_delay_seconds: 15
+      timeout_seconds: 600
+      env:
+        GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
         GH_TOKEN: "${GH_TOKEN}"
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
         SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"

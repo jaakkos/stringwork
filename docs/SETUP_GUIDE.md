@@ -188,6 +188,21 @@ workers:
 | `workspace-write` + `network_access=true` | Write in workspace | Allowed | Trusted tasks needing APIs |
 | `danger-full-access` | Full system | Full | Trusted worker agents |
 
+#### Gemini CLI workers
+
+Install via npm: `npm install -g @google/gemini-cli`. Requires `GOOGLE_API_KEY` for auth.
+
+```yaml
+workers:
+  - type: gemini
+    instances: 1
+    command: ["gemini", "--yolo", "--prompt", "...prompt..."]
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+```
+
+`--yolo` auto-approves all tool executions (no interactive prompts). `--prompt` runs in non-interactive headless mode.
+
 ### Worker environment variables
 
 Workers inherit the server's environment by default. You can customize:

@@ -16,6 +16,8 @@ func TestAgentNameForClient(t *testing.T) {
 		{"claude-code", "claude-code"},
 		{"Codex", "codex"},
 		{"codex-cli", "codex"},
+		{"Gemini CLI", "gemini"},
+		{"gemini", "gemini"},
 		{"Windsurf", "windsurf"},
 		{"VSCode", "vscode"},
 		{"Visual Studio Code", "vscode"},
