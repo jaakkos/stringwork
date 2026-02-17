@@ -6,16 +6,79 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version tag (e.g. v0.1.0)"
+      bump:
+        description: "Version bump type"
         required: true
-        type: string
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prev_tag: ${{ steps.version.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Get latest semver tag, default to v0.0.0 if none exist
+            LATEST=$(git tag --sort=-v:refname --list 'v[0-9]*' | head -n1)
+            if [ -z "$LATEST" ]; then
+              LATEST="v0.0.0"
+            fi
+            echo "prev_tag=${LATEST}" >> "$GITHUB_OUTPUT"
+
+            # Strip the 'v' prefix and split into parts
+            VERSION="${LATEST#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+            case "${{ inputs.bump }}" in
+              major)
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+                ;;
+              minor)
+                MINOR=$((MINOR + 1))
+                PATCH=0
+                ;;
+              patch)
+                PATCH=$((PATCH + 1))
+                ;;
+            esac
+
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "## Version bump: ${LATEST} → ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Triggered by tag push — use that tag directly
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            PREV=$(git tag --sort=-v:refname --list 'v[0-9]*' | grep -v "^${GITHUB_REF_NAME}$" | head -n1)
+            echo "prev_tag=${PREV}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
   build:
+    needs: prepare
     strategy:
       matrix:
         include:
@@ -35,28 +98,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Resolve version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create and push tag (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           BINARY="mcp-stringwork-${GOOS}-${GOARCH}"
           go build -ldflags="-s -w -X main.Version=${VERSION}" -o "${BINARY}" ./cmd/mcp-server
           sha256sum "${BINARY}" > "${BINARY}.sha256"
@@ -69,17 +117,38 @@ jobs:
             mcp-stringwork-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
 
   release:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve version
-        id: version
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          TAG="${{ needs.prepare.outputs.tag }}"
+          PREV="${{ needs.prepare.outputs.prev_tag }}"
+
+          {
+            echo "body<<CHANGELOG_EOF"
+
+            if [ -n "$PREV" ] && [ "$PREV" != "v0.0.0" ]; then
+              echo "## What's Changed"
+              echo ""
+              git log "${PREV}..HEAD" --pretty=format:"- %s (%h)" --no-merges
+              echo ""
+              echo ""
+              echo "**Full diff:** [\`${PREV}...${TAG}\`](https://github.com/${{ github.repository }}/compare/${PREV}...${TAG})"
+            else
+              echo "## Initial Release"
+              echo ""
+              git log --pretty=format:"- %s (%h)" --no-merges
+            fi
+
+            echo ""
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v7
         with:
@@ -90,8 +159,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          body: ${{ steps.changelog.outputs.body }}
+          generate_release_notes: false
           files: |
             mcp-stringwork-*
             checksums.txt

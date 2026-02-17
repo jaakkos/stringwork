@@ -1,6 +1,12 @@
-# Stringwork
+<p align="center">
+  <img src="logo.svg" width="128" height="128" alt="Stringwork logo">
+</p>
 
-An MCP server for orchestrating AI coding agents. One driver (e.g. Cursor) directs multiple workers (Claude Code, Codex, Gemini CLI) through shared tasks, messaging, plans, and progress monitoring -- all from a single Go binary.
+<h1 align="center">Stringwork</h1>
+
+<p align="center">
+  An MCP server for orchestrating AI coding agents. One driver (e.g. Cursor) directs multiple workers (Claude Code, Codex, Gemini CLI) through shared tasks, messaging, plans, and progress monitoring — all from a single Go binary.
+</p>
 
 ## Install
 
@@ -234,7 +240,3 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 - [Quick Reference](docs/QUICK_REFERENCE.md) -- tool usage examples
 - [Architecture](docs/ARCHITECTURE.md) -- clean architecture overview
 - [Client Configs](docs/mcp-client-configs/README.md) -- Cursor and Claude Code specifics
-
-## License
-
-MIT

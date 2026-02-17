@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" aria-labelledby="title desc" role="img">
+  <title id="title">Stringwork</title>
+  <desc id="desc">Stringwork logo — central orchestration node linked to worker nodes through curved paths.</desc>
+
+  <path d="M64 64C53 55 38 48 24 38" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/>
+  <path d="M64 64C74 50 90 39 105 31" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/>
+  <path d="M64 64C78 70 96 86 102 103" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/>
+  <path d="M64 64C55 79 42 93 29 104" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/>
+
+  <circle cx="64" cy="64" r="8" fill="#4F46E5" stroke="#F8FAFC" stroke-width="2"/>
+  <circle cx="64" cy="64" r="2" fill="#F8FAFC"/>
+
+  <circle cx="24" cy="38" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/>
+  <circle cx="105" cy="31" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/>
+  <circle cx="102" cy="103" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/>
+  <circle cx="29" cy="104" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/>
+
+  <path d="M24 38L18 32M24 38L31 34" stroke="#F8FAFC" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M105 31L110 24M105 31L114 33" stroke="#F8FAFC" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M102 103L109 106M102 103L98 112" stroke="#F8FAFC" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

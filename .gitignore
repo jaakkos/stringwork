@@ -20,6 +20,9 @@ vendor/
 *.sqlite-wal
 *.sqlite-shm
 
+# Local dev scripts
+dev-install.sh
+
 # Cursor (mcp.json contains personal paths)
 .cursor/
 mcp-server

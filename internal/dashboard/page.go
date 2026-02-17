@@ -13,6 +13,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stringwork Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' fill='none'%3E%3Cpath d='M64 64C53 55 38 48 24 38' stroke='%234F46E5' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M64 64C74 50 90 39 105 31' stroke='%234F46E5' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M64 64C78 70 96 86 102 103' stroke='%234F46E5' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M64 64C55 79 42 93 29 104' stroke='%234F46E5' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='64' r='8' fill='%234F46E5' stroke='%23F8FAFC' stroke-width='2'/%3E%3Ccircle cx='64' cy='64' r='2' fill='%23F8FAFC'/%3E%3Ccircle cx='24' cy='38' r='5' fill='%2314B8A6' stroke='%23F8FAFC' stroke-width='2'/%3E%3Ccircle cx='105' cy='31' r='5' fill='%2314B8A6' stroke='%23F8FAFC' stroke-width='2'/%3E%3Ccircle cx='102' cy='103' r='5' fill='%2314B8A6' stroke='%23F8FAFC' stroke-width='2'/%3E%3Ccircle cx='29' cy='104' r='5' fill='%2314B8A6' stroke='%23F8FAFC' stroke-width='2'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0d1117;
@@ -433,7 +434,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <body>
 <header>
   <div>
-    <h1><span>&#9881;</span> Stringwork</h1>
+    <h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" width="28" height="28" style="vertical-align: middle; margin-right: 6px"><path d="M64 64C53 55 38 48 24 38" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/><path d="M64 64C74 50 90 39 105 31" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/><path d="M64 64C78 70 96 86 102 103" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/><path d="M64 64C55 79 42 93 29 104" stroke="#4F46E5" stroke-width="4" stroke-linecap="round"/><circle cx="64" cy="64" r="8" fill="#4F46E5" stroke="#F8FAFC" stroke-width="2"/><circle cx="64" cy="64" r="2" fill="#F8FAFC"/><circle cx="24" cy="38" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/><circle cx="105" cy="31" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/><circle cx="102" cy="103" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/><circle cx="29" cy="104" r="5" fill="#14B8A6" stroke="#F8FAFC" stroke-width="2"/></svg> Stringwork</h1>
     <div class="workspace-bar" id="workspace-bar"></div>
   </div>
   <div class="settings">
