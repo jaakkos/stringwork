@@ -20,6 +20,6 @@ vendor/
 *.sqlite-wal
 *.sqlite-shm
 
-# Cursor plans
-.cursor/plans/
+# Cursor (mcp.json contains personal paths)
+.cursor/
 mcp-server
