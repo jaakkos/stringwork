@@ -25,7 +25,7 @@ cmd/mcp-server (main, CLI)
 
 | Package | Role |
 |---------|------|
-| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies, starts MCP server (stdio or HTTP), CLI subcommands (`status`, `--version`). |
+| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies, runs stdio for the driver and HTTP for workers/dashboard. CLI subcommands (`status`, `--version`). |
 | **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `FileLock`, `Presence`, `CollabState`. |
 | **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts), `SessionRegistry` (multi-client tracking). Defines `StateRepository` and `Policy` interfaces. |
 | **internal/repository/sqlite** | Implements `StateRepository` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`. |

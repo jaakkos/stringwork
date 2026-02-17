@@ -58,11 +58,11 @@ type OrchestrationConfig struct {
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with
-// worker CLIs (claude, codex) when they are spawned. Supports both URL-based
-// (HTTP/SSE) and command-based (stdio) servers.
+// worker CLIs (claude, codex) when they are spawned. Supports URL-based
+// (HTTP/SSE) and command-based servers.
 type MCPServerConfig struct {
 	URL     string            `yaml:"url,omitempty"`     // For URL-based servers (HTTP/SSE)
-	Command string            `yaml:"command,omitempty"` // For command-based servers (stdio)
+	Command string            `yaml:"command,omitempty"` // For command-based servers
 	Args    []string          `yaml:"args,omitempty"`    // Command arguments
 	Env     map[string]string `yaml:"env,omitempty"`     // Environment variables for command
 	Auth    string            `yaml:"auth,omitempty"`    // "oauth", "bearer", or empty for none
@@ -100,7 +100,6 @@ type Config struct {
 	MessageRetentionDays int `yaml:"message_retention_days"`
 	PresenceTTLSeconds   int `yaml:"presence_ttl_seconds"`
 
-	Transport     string                        `yaml:"transport"`
 	HTTPPort      int                           `yaml:"http_port"`
 	Orchestration *OrchestrationConfig          `yaml:"orchestration"`
 	MCPServers    map[string]MCPServerConfig    `yaml:"mcp_servers"`

@@ -6,8 +6,7 @@ import (
 )
 
 // SessionRegistry tracks connected MCP client sessions and their associated
-// agent names. With stdio transport there is exactly one session; with SSE or
-// Streamable HTTP there can be many.
+// agent names. Multiple sessions can be active (SSE and Streamable HTTP).
 type SessionRegistry struct {
 	mu           sync.RWMutex
 	sessions     map[string]string    // sessionID → agentName

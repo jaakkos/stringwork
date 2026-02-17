@@ -1,6 +1,5 @@
 // MCP Stringwork Server
-// A local MCP server for pair programming with Cursor and Claude Code.
-// Supports stdio (single-client) and HTTP (multi-client, SSE + Streamable HTTP).
+// Stdio for the driver (Cursor), HTTP for workers and dashboard.
 package main
 
 import (
@@ -8,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,7 +56,6 @@ func main() {
 	logger.Println("Starting MCP Stringwork server...")
 	logger.Printf("Log file: %s", pol.LogFile())
 	logger.Printf("Workspace root: %s", cfg.WorkspaceRoot)
-	logger.Printf("Transport: %s", cfg.Transport)
 
 	// State repository
 	repo, err := repository.NewStateRepository(pol.StateFile())
@@ -183,7 +182,6 @@ func main() {
 	}
 
 	// Start notifier with WorkerManager (orchestration-driven worker spawn)
-	transport := strings.ToLower(cfg.Transport)
 	var notifierOpts []app.NotifierOption
 	var wm *app.WorkerManager // accessible for cancel_agent tool
 	orchCfg := pol.Orchestration()
@@ -192,14 +190,6 @@ func main() {
 		wm.SetSessionChecker(func(instanceOrType string) bool {
 			return registry.HasActiveSession(instanceOrType)
 		})
-		// When running as HTTP daemon, inject MCP config into spawned workers so they connect without manual "claude mcp add-json".
-		if transport == "http" || transport == "sse" {
-			port := cfg.HTTPPort
-			if port == 0 {
-				port = 8943
-			}
-			wm.SetMCPServerURL(fmt.Sprintf("http://localhost:%d/mcp", port))
-		}
 		// Pass configured MCP servers to worker manager for auto-registration with worker CLIs.
 		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
 			var entries []app.MCPServerEntry
@@ -279,13 +269,19 @@ func main() {
 	)
 	go watchdog.Start(ctx)
 
-	// Run transport
-	switch transport {
-	case "http", "sse":
-		runHTTPServer(ctx, cancel, mcpServer, cfg, logger, registry, sessions, hooks, svc, wm)
-	default: // "stdio" or empty
-		runStdioServer(ctx, mcpServer, logger, registry, sessions, hooks)
+	// Start HTTP server in background (for workers, dashboard, and external clients)
+	httpShutdown := startHTTPServer(ctx, mcpServer, cfg, cfg.HTTPPort, logger, registry, sessions, hooks, svc, wm)
+
+	// Run stdio server in foreground (for the driver, e.g. Cursor)
+	logger.Println("Stdio ready (driver connection)")
+	stdioSrv := server.NewStdioServer(mcpServer)
+	if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil {
+		logger.Printf("Stdio server stopped: %v", err)
 	}
+
+	// Driver disconnected -- shut everything down
+	cancel()
+	httpShutdown()
 
 	watchdog.Stop()
 	notifier.Stop()
@@ -312,43 +308,27 @@ func main() {
 	logger.Println("Server stopped")
 }
 
-// runStdioServer runs the MCP server over stdin/stdout (single-client).
-func runStdioServer(ctx context.Context, mcpServer *server.MCPServer, logger *log.Logger, registry *app.SessionRegistry, sessions *sessionStore, hooks *server.Hooks) {
-	logger.Println("Running in stdio mode")
-
-	// For stdio, register/unregister session hooks
-	hooks.AddBeforeInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest) {
-		if session := server.ClientSessionFromContext(ctx); session != nil {
-			sessions.set(session.SessionID(), session)
-			logger.Printf("Client session registered: %s", session.SessionID())
-		}
-		if message != nil {
-			ci := message.Params.ClientInfo
-			logger.Printf("Client: %s %s, Protocol: %s", ci.Name, ci.Version, message.Params.ProtocolVersion)
-		}
-	})
-
-	stdioSrv := server.NewStdioServer(mcpServer)
-	if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil {
-		logger.Printf("Stdio server error: %v", err)
+// startHTTPServer starts the HTTP server in the background for workers, dashboard,
+// and external clients. Returns a shutdown function. Uses net.Listen to support
+// port 0 (auto-assign) for running multiple instances.
+func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *policy.Config, port int, logger *log.Logger, registry *app.SessionRegistry, sessions *sessionStore, hooks *server.Hooks, svc *app.CollabService, wm *app.WorkerManager) func() {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		logger.Fatalf("HTTP listen: %v", err)
 	}
-}
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	baseURL := fmt.Sprintf("http://localhost:%d", actualPort)
 
-// runHTTPServer runs the MCP server as a persistent HTTP daemon serving both
-// SSE (/sse) and Streamable HTTP (/mcp) on the same port.
-func runHTTPServer(ctx context.Context, cancel context.CancelFunc, mcpServer *server.MCPServer, cfg *policy.Config, logger *log.Logger, registry *app.SessionRegistry, sessions *sessionStore, hooks *server.Hooks, svc *app.CollabService, wm *app.WorkerManager) {
-	port := cfg.HTTPPort
-	if port == 0 {
-		port = 8943
+	// Update worker manager with actual URL (important when port was 0)
+	if wm != nil {
+		wm.SetMCPServerURL(fmt.Sprintf("%s/mcp", baseURL))
 	}
-	addr := fmt.Sprintf(":%d", port)
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
 
-	logger.Printf("Running in HTTP mode on %s", addr)
-	logger.Printf("  SSE endpoint:            %s/sse", baseURL)
-	logger.Printf("  Streamable HTTP endpoint: %s/mcp", baseURL)
+	logger.Printf("HTTP server on :%d", actualPort)
+	logger.Printf("  Workers connect at:      %s/mcp", baseURL)
+	logger.Printf("  Dashboard:               %s/dashboard", baseURL)
 
-	// Session lifecycle hooks
+	// Session lifecycle hooks for HTTP clients (workers connecting back)
 	hooks.AddBeforeInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest) {
 		if session := server.ClientSessionFromContext(ctx); session != nil {
 			sessions.set(session.SessionID(), session)
@@ -358,13 +338,11 @@ func runHTTPServer(ctx context.Context, cancel context.CancelFunc, mcpServer *se
 			ci := message.Params.ClientInfo
 			logger.Printf("Client: %s %s, Protocol: %s", ci.Name, ci.Version, message.Params.ProtocolVersion)
 
-			// Send ack message when a non-cursor agent connects (e.g. claude-code, codex via auto-respond)
 			agent := collab.AgentNameForClient(ci.Name)
 			if agent != "cursor" && agent != "" {
 				clientName, clientVersion := ci.Name, ci.Version
 				go func() {
 					_ = svc.Run(func(state *domain.CollabState) error {
-						// Find who sent the most recent unread message to this agent
 						recipient := ""
 						for i := len(state.Messages) - 1; i >= 0; i-- {
 							m := state.Messages[i]
@@ -374,13 +352,13 @@ func runHTTPServer(ctx context.Context, cancel context.CancelFunc, mcpServer *se
 							}
 						}
 						if recipient == "" {
-							recipient = "cursor" // default
+							recipient = "cursor"
 						}
 						state.Messages = append(state.Messages, domain.Message{
 							ID:        state.NextMsgID,
 							From:      "system",
 							To:        recipient,
-							Content:   fmt.Sprintf("✅ **%s** connected and working (%s %s)", agent, clientName, clientVersion),
+							Content:   fmt.Sprintf("**%s** connected (%s %s)", agent, clientName, clientVersion),
 							Timestamp: time.Now(),
 						})
 						state.NextMsgID++
@@ -391,60 +369,42 @@ func runHTTPServer(ctx context.Context, cancel context.CancelFunc, mcpServer *se
 		}
 	})
 
-	// SSE server (for Cursor and other SSE-capable clients)
-	sseSrv := server.NewSSEServer(mcpServer,
-		server.WithBaseURL(baseURL),
-	)
-
-	// Streamable HTTP server (for Claude Code and other HTTP clients)
+	sseSrv := server.NewSSEServer(mcpServer, server.WithBaseURL(baseURL))
 	streamSrv := server.NewStreamableHTTPServer(mcpServer)
-
-	// Mock OAuth 2.1 endpoints (so Claude Code's auth flow succeeds without real credentials)
 	mockAuth := newMockAuthServer(baseURL, logger)
 
-	// Combined HTTP mux
 	mux := http.NewServeMux()
 	mux.Handle("/sse", sseSrv)
 	mux.Handle("/sse/", sseSrv)
-	mux.Handle("/message", sseSrv) // SSE message endpoint
+	mux.Handle("/message", sseSrv)
 	mux.Handle("/mcp", streamSrv)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","agents":%d}`, registry.AgentCount())
+		fmt.Fprintf(w, `{"status":"ok","port":%d,"agents":%d}`, actualPort, registry.AgentCount())
 	})
-
-	// Register mock OAuth routes (/.well-known/oauth-authorization-server, /register, /authorize, /token)
 	mockAuth.registerRoutes(mux)
 
-	// Dashboard UI and API
 	var dashOpts []dashboard.HandlerOption
 	if wm != nil {
 		dashOpts = append(dashOpts, dashboard.WithWorkerController(wm))
 	}
 	dash := dashboard.NewHandler(svc, registry, dashOpts...)
 	dash.RegisterRoutes(mux)
-	logger.Printf("  Dashboard:               %s/dashboard", baseURL)
 
-	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
+	httpServer := &http.Server{Handler: mux}
 
-	// Start HTTP server in background
 	go func() {
-		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		if err := httpServer.Serve(ln); err != http.ErrServerClosed {
 			logger.Fatalf("HTTP server error: %v", err)
 		}
 	}()
 
-	// Wait for shutdown signal
-	<-ctx.Done()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*1e9) // 5 seconds
-	defer shutdownCancel()
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		logger.Printf("HTTP shutdown error: %v", err)
+	return func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Printf("HTTP shutdown error: %v", err)
+		}
 	}
 }
 

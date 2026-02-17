@@ -1,15 +1,23 @@
-# MCP client configuration
+# MCP Client Configurations
 
-How to connect **Cursor** and **Claude Code** to the stringwork MCP server.
+Configuration examples for connecting to the Stringwork server.
 
-| Client        | Config guide |
-|---------------|--------------|
-| **Cursor**    | [cursor-config.md](cursor-config.md) – stdio or SSE (HTTP daemon) |
-| **Claude Code** | [claude-code-config.md](claude-code-config.md) – stdio or Streamable HTTP (HTTP daemon) |
+**Cursor (driver)** connects via stdio -- add to `.cursor/mcp.json`:
 
-**This project:**
+```json
+{
+  "mcpServers": {
+    "stringwork": {
+      "command": "mcp-stringwork",
+      "env": { "MCP_CONFIG": "/path/to/config.yaml" }
+    }
+  }
+}
+```
 
-- **Cursor:** already configured in [`.cursor/mcp.json`](../../.cursor/mcp.json) (stdio, uses `mcp/config.yaml`).
-- **Claude Code:** use the **`claude` CLI** to add the server: `claude mcp add-json --scope user stringwork '...'` (see [claude-code-config.md](claude-code-config.md)); use the same binary path and `MCP_CONFIG` as in `.cursor/mcp.json`.
+The server runs stdio for Cursor and starts an HTTP listener for workers and the dashboard. No daemon needed.
 
-Server config (transport, port, auto_respond, etc.) is in [../../mcp/config.yaml](../../mcp/config.yaml). To run the server as a daemon (HTTP mode), use the [startup script](../DAEMON_SETUP.md) (`scripts/mcp-server-daemon.sh start` or `install-launchd`).
+See individual config files:
+
+- [cursor-config.md](cursor-config.md) -- Cursor setup
+- [claude-code-config.md](claude-code-config.md) -- Claude Code CLI setup (manual use)

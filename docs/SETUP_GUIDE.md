@@ -43,11 +43,10 @@ Create `~/.config/stringwork/config.yaml` (or keep it per-project):
 # Startup default workspace. Clients can change at runtime via set_presence.
 workspace_root: "/path/to/your/project"
 
-# Transport: "http" is required for driver/worker orchestration.
-# Workers spawned by the server connect back via HTTP -- this does not work
-# in stdio mode where each client runs its own isolated server process.
-transport: "http"
-http_port: 8943
+# Port for the background HTTP listener (workers + dashboard).
+# 0 = auto-assign (supports multiple Cursor windows).
+# Fixed port (e.g. 8943) = predictable dashboard URL but only one instance at a time.
+http_port: 0
 
 enabled_tools: ["*"]
 message_retention_max: 1000
@@ -79,27 +78,7 @@ orchestration:
 
 See [mcp/config.yaml](../mcp/config.yaml) for a fully annotated example with all options.
 
-## Step 3: Start the server
-
-Since driver/worker orchestration requires HTTP mode, start the server as a persistent process:
-
-```bash
-# Start as a background daemon
-./scripts/mcp-server-daemon.sh start
-
-# Or run in foreground for debugging
-MCP_CONFIG=/path/to/config.yaml mcp-stringwork
-```
-
-The server listens at `http://localhost:8943` by default. Workers spawned by the server connect back to this URL automatically.
-
-See [DAEMON_SETUP.md](DAEMON_SETUP.md) for running as a macOS launchd agent (auto-start at login).
-
-## Step 4: Configure MCP clients
-
-All clients connect to the running HTTP server.
-
-### Cursor (driver)
+## Step 3: Configure Cursor (driver)
 
 Add to `.cursor/mcp.json` in your project:
 
@@ -107,17 +86,26 @@ Add to `.cursor/mcp.json` in your project:
 {
   "mcpServers": {
     "stringwork": {
-      "url": "http://localhost:8943/sse"
+      "command": "mcp-stringwork",
+      "env": { "MCP_CONFIG": "/path/to/config.yaml" }
     }
   }
 }
 ```
 
-Restart Cursor to load the MCP server.
+Cursor starts the server as a subprocess via stdio. The server simultaneously starts an HTTP listener in the background for workers and the dashboard -- **no daemon or background setup needed**.
+
+When Cursor closes, the server shuts down. When Cursor opens, it starts fresh.
+
+### Multiple Cursor windows
+
+With `http_port: 0` (default), each Cursor window spawns its own server on an auto-assigned port. No port conflicts. All instances share the same SQLite state file, so tasks and messages are visible across windows.
+
+To find the dashboard URL, check the MCP server logs -- the actual port is printed on startup.
 
 ### Claude Code CLI (manual use)
 
-Workers are spawned automatically by the server, but if you also want to use Claude Code interactively:
+Workers are spawned automatically, but to use Claude Code interactively you'd need to connect via HTTP. The auto-assigned port makes this impractical, so set a fixed `http_port` in config if you need this:
 
 ```bash
 claude mcp add-json --scope user stringwork '{
@@ -126,11 +114,9 @@ claude mcp add-json --scope user stringwork '{
 }'
 ```
 
-Verify with `claude mcp list`. Restart Claude Code to load.
-
 See [docs/mcp-client-configs/](mcp-client-configs/) for detailed client configuration.
 
-## Step 5: Verify setup
+## Step 4: Verify setup
 
 ### Test from Cursor
 
@@ -264,15 +250,14 @@ Requires the workspace to be a git repository.
 
 ## Dashboard
 
-When the server is running in HTTP mode, the web dashboard is available at:
+The web dashboard is available on the HTTP listener. The URL is logged on startup:
 
 ```
-http://localhost:8943/dashboard
+HTTP server on :54321
+  Dashboard: http://localhost:54321/dashboard
 ```
 
-It shows real-time tasks, workers, messages, and plans.
-
-See [DAEMON_SETUP.md](DAEMON_SETUP.md) for running as a macOS launchd agent (auto-start at login).
+With a fixed `http_port` (e.g. 8943), the URL is always `http://localhost:8943/dashboard`.
 
 ## Common Issues
 
@@ -310,4 +295,3 @@ set_presence agent='cursor' status='working' workspace='/path/to/correct/project
 
 - [WORKFLOW.md](WORKFLOW.md) -- collaboration patterns and best practices
 - [QUICK_REFERENCE.md](QUICK_REFERENCE.md) -- tool usage examples
-- [DAEMON_SETUP.md](DAEMON_SETUP.md) -- HTTP mode and background service

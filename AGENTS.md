@@ -11,7 +11,7 @@ This repository is a Go MCP server for pair-programming coordination. It support
 - `internal/policy/`: workspace and safety policy; orchestration config (driver, workers).
 - `mcp/`: runtime config (`config.yaml` with optional `orchestration` section).
 - `docs/`: setup, architecture, and workflow docs.
-- `scripts/`: operational helpers (for example `scripts/mcp-server-daemon.sh`).
+- `scripts/`: install script and helpers.
 
 ## Build, Test, and Development Commands
 - `go build -o mcp-stringwork ./cmd/mcp-server`: build the server binary.

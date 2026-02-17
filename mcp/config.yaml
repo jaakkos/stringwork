@@ -39,15 +39,15 @@ message_retention_days: 30
 # Used by list_presence to filter active agents
 presence_ttl_seconds: 300
 
-# --- Transport (how the MCP server runs) ---
-# "stdio" (default): Cursor/Claude start the server as a subprocess. One instance per client.
-# "http" or "sse": Run the server as a persistent daemon; Cursor connects via SSE, Claude Code via Streamable HTTP.
-transport: "http"
-http_port: 8943
+# --- HTTP port (for workers and dashboard) ---
+# The server runs stdio for the driver (Cursor) AND HTTP for workers/dashboard.
+# Set to 0 for auto-assigned port (supports running multiple Cursor instances).
+# Set to a fixed port (e.g. 8943) for a predictable dashboard URL.
+http_port: 0
 
 # --- MCP Servers for Workers ---
 # MCP servers to auto-register with worker CLIs (claude, codex) when they spawn.
-# stringwork is always auto-registered in HTTP mode (from transport+port above).
+# stringwork is always auto-registered with workers automatically.
 # For servers requiring auth (OAuth/bearer), workers must log in manually once:
 #   claude mcp login stringwork   OR   codex mcp login <name>
 mcp_servers:
@@ -95,9 +95,9 @@ features:
 # tasks or sends messages to workers, the server spawns worker processes so you
 # don't need to keep Claude Code or Codex running — the server manages their lifecycle.
 #
-# When the server runs in HTTP mode (transport: "http"), it auto-registers MCP servers
-# with worker CLIs (claude, codex) using their native `mcp add` commands.
-# stringwork is always auto-registered; additional servers come from mcp_servers above.
+# MCP servers are auto-registered with worker CLIs (claude, codex) using their
+# native `mcp add` commands. Stringwork itself is always auto-registered;
+# additional servers come from mcp_servers above.
 #
 # Worker spawn behavior:
 #   - Startup recovery: checks for pending work on server (re)start

@@ -45,7 +45,7 @@ The server provides only coordination tools. Each agent uses its own native capa
 - **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (3 min warning, 5 min critical, 10 min auto-recovery)
 - **File locks** -- prevent simultaneous edits across agents
 - **Knowledge indexing** -- FTS5-powered project knowledge base (markdown, Go source, session notes, task summaries)
-- **Web dashboard** -- real-time view of tasks, workers, messages, and plans at `http://localhost:8943/dashboard`
+- **Web dashboard** -- real-time view of tasks, workers, messages, and plans (URL logged on startup)
 - **Auto-respond** -- server spawns agents when they have unread messages, no external daemon needed
 - **Git worktree isolation** -- optional per-worker checkouts to prevent file conflicts
 - **Dynamic workspace** -- switch projects at runtime via `set_presence workspace='...'`
@@ -53,17 +53,34 @@ The server provides only coordination tools. Each agent uses its own native capa
 
 ## Quick Start
 
-The driver/worker model requires **HTTP mode** so all agents connect to one shared server. Workers spawned by the server connect back via HTTP -- this doesn't work in stdio mode where each client runs its own server process.
+### 1. Configure Cursor
 
-### 1. Create a config file
+Add to `.cursor/mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "stringwork": {
+      "command": "mcp-stringwork",
+      "env": { "MCP_CONFIG": "/path/to/config.yaml" }
+    }
+  }
+}
+```
+
+Cursor spawns the server as a subprocess via stdio. The server also starts an HTTP listener in the background for workers and the dashboard -- **no daemon or background process needed**.
+
+### 2. Create a config file
 
 Copy `mcp/config.yaml` and customize. Minimal example:
 
 ```yaml
 workspace_root: "/path/to/your/project"
-transport: "http"
-http_port: 8943
 enabled_tools: ["*"]
+
+# Port 0 = auto-assign (supports multiple Cursor windows).
+# Set a fixed port (e.g. 8943) for a predictable dashboard URL.
+http_port: 0
 
 orchestration:
   driver: cursor
@@ -74,42 +91,9 @@ orchestration:
       timeout_seconds: 600
 ```
 
-### 2. Start the server
+### 3. Start working
 
-```bash
-# Start as a background daemon
-./scripts/mcp-server-daemon.sh start
-
-# Or run in foreground for debugging
-MCP_CONFIG=/path/to/config.yaml mcp-stringwork
-```
-
-### 3. Connect your MCP clients
-
-**Cursor** -- add to `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "stringwork": {
-      "url": "http://localhost:8943/sse"
-    }
-  }
-}
-```
-
-**Claude Code CLI:**
-
-```bash
-claude mcp add-json --scope user stringwork '{
-  "type": "url",
-  "url": "http://localhost:8943/mcp"
-}'
-```
-
-### 4. Start working
-
-The driver creates tasks, workers get spawned automatically:
+Open Cursor -- the server starts automatically. Create tasks, workers get spawned:
 
 ```
 # Driver (Cursor) creates a task
@@ -120,14 +104,11 @@ create_task title='Add auth middleware' assigned_to='any' created_by='cursor'
 worker_status
 ```
 
+### Multiple Cursor windows
+
+Each Cursor window spawns its own server instance. With `http_port: 0` (default), each gets an auto-assigned port so they don't conflict. All instances share the same SQLite state file, so tasks and messages are visible across all windows.
+
 ## Configuration
-
-### Transport modes
-
-| Mode | How it works | When to use |
-|------|-------------|-------------|
-| `http` | Single persistent server, all clients connect via HTTP | **Required for driver/worker orchestration**, dashboard, multi-client |
-| `stdio` | Each MCP client spawns its own server process | Single agent only; worker spawning does not work in this mode |
 
 ### Orchestration
 
@@ -233,7 +214,7 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 │   ├── worktree/            # Git worktree manager for worker isolation
 │   └── tools/collab/        # 23 MCP tool handlers
 ├── mcp/                     # Configuration files
-├── scripts/                 # Install script, daemon helper
+├── scripts/                 # Install script
 ├── docs/                    # Documentation
 ├── .github/workflows/       # CI and release automation
 ├── AGENTS.md                # Cursor agent instructions
@@ -246,7 +227,6 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 - [Workflow](docs/WORKFLOW.md) -- collaboration patterns and best practices
 - [Quick Reference](docs/QUICK_REFERENCE.md) -- tool usage examples
 - [Architecture](docs/ARCHITECTURE.md) -- clean architecture overview
-- [Daemon Setup](docs/DAEMON_SETUP.md) -- HTTP mode and launchd
 - [Client Configs](docs/mcp-client-configs/README.md) -- Cursor and Claude Code specifics
 
 ## License

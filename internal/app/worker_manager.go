@@ -45,7 +45,7 @@ type WorkerSpawnConfig struct {
 type MCPServerEntry struct {
 	Name    string
 	URL     string            // URL-based server
-	Command string            // command-based (stdio) server
+	Command string            // command-based server
 	Args    []string          // command arguments
 	Env     map[string]string // command environment
 }
@@ -149,8 +149,7 @@ func (m *WorkerManager) SetSessionChecker(fn func(string) bool) {
 }
 
 // SetMCPServerURL sets the MCP server URL (e.g. http://localhost:8943/mcp) for auto-registering MCP with worker CLIs.
-// When set, spawned workers (Claude Code, Codex) get the stringwork MCP server registered via their CLI tools.
-// Only used when the server runs in HTTP/daemon mode. Leave unset for stdio-only.
+// Spawned workers (Claude Code, Codex) get the stringwork MCP server registered via their CLI tools.
 func (m *WorkerManager) SetMCPServerURL(url string) {
 	m.mcpServerURL = strings.TrimSuffix(url, "/")
 }
@@ -207,12 +206,12 @@ func (m *WorkerManager) SetMCPServers(servers []MCPServerEntry) {
 	m.mcpServers = append([]MCPServerEntry(nil), servers...)
 }
 
-// checkMCPReady verifies that the MCP HTTP endpoint is reachable (HTTP mode only).
-// Returns true if no URL is set (stdio mode) or if the health endpoint responds.
+// checkMCPReady verifies that the MCP HTTP endpoint is reachable.
+// Returns true if no URL is set or if the health endpoint responds.
 // Once ready, the result is cached — the server is in-process and stays ready.
 func (m *WorkerManager) checkMCPReady() bool {
 	if m.mcpServerURL == "" {
-		return true // stdio mode – no HTTP check needed
+		return true // no URL configured, skip check
 	}
 	m.mu.Lock()
 	if m.mcpReady {
@@ -616,7 +615,7 @@ func mcpBaseURL(rawURL string) string {
 func (m *WorkerManager) ensureMCPRegistered(agentType, exe string) error {
 	servers := m.mcpServerEntries()
 	if len(servers) == 0 {
-		return nil // stdio mode, no registration needed
+		return nil // no MCP servers to register
 	}
 
 	m.mu.Lock()

@@ -271,7 +271,7 @@ auto_respond:
 
 ### JSON-RPC push notifications
 
-In stdio mode, the server pushes `notifications/pair_update` when the connected agent has new content:
+The server can push `notifications/pair_update` when the connected agent has new content:
 
 ```json
 {
