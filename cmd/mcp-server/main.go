@@ -81,7 +81,7 @@ func main() {
 
 	// Build the MCPServer
 	hooks := &server.Hooks{}
-	hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+	hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result any) {
 		// Log tool calls
 		if message != nil {
 			logger.Printf("Calling tool: %s", message.Params.Name)
