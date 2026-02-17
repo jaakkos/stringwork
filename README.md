@@ -53,38 +53,16 @@ The server provides only coordination tools. Each agent uses its own native capa
 
 ## Quick Start
 
-### 1. Configure your MCP client
+The driver/worker model requires **HTTP mode** so all agents connect to one shared server. Workers spawned by the server connect back via HTTP -- this doesn't work in stdio mode where each client runs its own server process.
 
-**Cursor** -- add to `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "stringwork": {
-      "command": "/path/to/mcp-stringwork",
-      "env": { "MCP_CONFIG": "/path/to/config.yaml" }
-    }
-  }
-}
-```
-
-**Claude Code CLI:**
-
-```bash
-claude mcp add-json --scope user stringwork '{
-  "type": "stdio",
-  "command": "/path/to/mcp-stringwork",
-  "env": { "MCP_CONFIG": "/path/to/config.yaml" }
-}'
-```
-
-### 2. Create a config file
+### 1. Create a config file
 
 Copy `mcp/config.yaml` and customize. Minimal example:
 
 ```yaml
 workspace_root: "/path/to/your/project"
-transport: "stdio"
+transport: "http"
+http_port: 8943
 enabled_tools: ["*"]
 
 orchestration:
@@ -96,7 +74,40 @@ orchestration:
       timeout_seconds: 600
 ```
 
-### 3. Start working
+### 2. Start the server
+
+```bash
+# Start as a background daemon
+./scripts/mcp-server-daemon.sh start
+
+# Or run in foreground for debugging
+MCP_CONFIG=/path/to/config.yaml mcp-stringwork
+```
+
+### 3. Connect your MCP clients
+
+**Cursor** -- add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "stringwork": {
+      "url": "http://localhost:8943/sse"
+    }
+  }
+}
+```
+
+**Claude Code CLI:**
+
+```bash
+claude mcp add-json --scope user stringwork '{
+  "type": "url",
+  "url": "http://localhost:8943/mcp"
+}'
+```
+
+### 4. Start working
 
 The driver creates tasks, workers get spawned automatically:
 
@@ -115,8 +126,8 @@ worker_status
 
 | Mode | How it works | When to use |
 |------|-------------|-------------|
-| `stdio` (default) | Each MCP client spawns its own server process | Simple setup, one client at a time |
-| `http` | Single persistent server, clients connect via HTTP | Multi-client, daemon mode, dashboard access |
+| `http` | Single persistent server, all clients connect via HTTP | **Required for driver/worker orchestration**, dashboard, multi-client |
+| `stdio` | Each MCP client spawns its own server process | Single agent only; worker spawning does not work in this mode |
 
 ### Orchestration
 

@@ -43,8 +43,10 @@ Create `~/.config/stringwork/config.yaml` (or keep it per-project):
 # Startup default workspace. Clients can change at runtime via set_presence.
 workspace_root: "/path/to/your/project"
 
-# Transport: "stdio" for single-client, "http" for multi-client + dashboard
-transport: "stdio"
+# Transport: "http" is required for driver/worker orchestration.
+# Workers spawned by the server connect back via HTTP -- this does not work
+# in stdio mode where each client runs its own isolated server process.
+transport: "http"
 http_port: 8943
 
 enabled_tools: ["*"]
@@ -77,26 +79,29 @@ orchestration:
 
 See [mcp/config.yaml](../mcp/config.yaml) for a fully annotated example with all options.
 
-## Step 3: Configure MCP clients
+## Step 3: Start the server
+
+Since driver/worker orchestration requires HTTP mode, start the server as a persistent process:
+
+```bash
+# Start as a background daemon
+./scripts/mcp-server-daemon.sh start
+
+# Or run in foreground for debugging
+MCP_CONFIG=/path/to/config.yaml mcp-stringwork
+```
+
+The server listens at `http://localhost:8943` by default. Workers spawned by the server connect back to this URL automatically.
+
+See [DAEMON_SETUP.md](DAEMON_SETUP.md) for running as a macOS launchd agent (auto-start at login).
+
+## Step 4: Configure MCP clients
+
+All clients connect to the running HTTP server.
 
 ### Cursor (driver)
 
 Add to `.cursor/mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "stringwork": {
-      "command": "/path/to/mcp-stringwork",
-      "env": {
-        "MCP_CONFIG": "/path/to/config.yaml"
-      }
-    }
-  }
-}
-```
-
-If using HTTP mode (`transport: "http"`), use the SSE URL instead:
 
 ```json
 {
@@ -110,19 +115,9 @@ If using HTTP mode (`transport: "http"`), use the SSE URL instead:
 
 Restart Cursor to load the MCP server.
 
-### Claude Code CLI (worker or peer)
+### Claude Code CLI (manual use)
 
-```bash
-claude mcp add-json --scope user stringwork '{
-  "type": "stdio",
-  "command": "/path/to/mcp-stringwork",
-  "env": {
-    "MCP_CONFIG": "/path/to/config.yaml"
-  }
-}'
-```
-
-Or for HTTP mode:
+Workers are spawned automatically by the server, but if you also want to use Claude Code interactively:
 
 ```bash
 claude mcp add-json --scope user stringwork '{
@@ -135,7 +130,7 @@ Verify with `claude mcp list`. Restart Claude Code to load.
 
 See [docs/mcp-client-configs/](mcp-client-configs/) for detailed client configuration.
 
-## Step 4: Verify setup
+## Step 5: Verify setup
 
 ### Test from Cursor
 
@@ -267,18 +262,17 @@ orchestration:
 
 Requires the workspace to be a git repository.
 
-## HTTP mode and daemon setup
+## Dashboard
 
-For multi-client access (Cursor + Claude Code + dashboard connected to one server):
+When the server is running in HTTP mode, the web dashboard is available at:
 
-```yaml
-transport: "http"
-http_port: 8943
+```
+http://localhost:8943/dashboard
 ```
 
-See [DAEMON_SETUP.md](DAEMON_SETUP.md) for running as a background service or macOS launchd agent.
+It shows real-time tasks, workers, messages, and plans.
 
-When running in HTTP mode, the dashboard is available at `http://localhost:8943/dashboard`.
+See [DAEMON_SETUP.md](DAEMON_SETUP.md) for running as a macOS launchd agent (auto-start at login).
 
 ## Common Issues
 
