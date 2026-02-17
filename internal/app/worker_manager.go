@@ -245,6 +245,55 @@ func (m *WorkerManager) checkMCPReady() bool {
 	return true
 }
 
+// RefreshMCPRegistrations eagerly re-registers the stringwork MCP server with all
+// worker CLIs. Call this on startup after the HTTP port is known. With http_port: 0
+// the port changes on every restart, leaving stale entries in worker configs.
+// This cleans them up immediately rather than waiting for the first worker spawn.
+func (m *WorkerManager) RefreshMCPRegistrations() {
+	if m.mcpServerURL == "" || len(m.configs) == 0 {
+		return
+	}
+	go func() {
+		for _, wc := range m.configs {
+			exe := wc.Command[0]
+			agentType := wc.AgentType
+			entry := MCPServerEntry{Name: "stringwork", URL: m.mcpServerURL}
+
+			var alreadyCurrent bool
+			switch {
+			case isClaudeCommand(exe):
+				alreadyCurrent = isClaudeMCPConfigured(entry.Name, entry)
+			case isCodexCommand(exe):
+				alreadyCurrent = isCodexMCPConfigured(entry.Name, entry)
+			case isGeminiCommand(exe):
+				alreadyCurrent = isGeminiMCPConfigured(entry.Name, entry)
+			default:
+				continue
+			}
+			if alreadyCurrent {
+				m.logger.Printf("WorkerManager: stringwork MCP already current for %s", agentType)
+				continue
+			}
+
+			m.logger.Printf("WorkerManager: refreshing stringwork MCP for %s (port may have changed)...", agentType)
+			var err error
+			switch {
+			case isClaudeCommand(exe):
+				err = registerMCPViaClaude(exe, entry, m.logger)
+			case isCodexCommand(exe):
+				err = registerMCPViaCodex(exe, entry, m.logger)
+			case isGeminiCommand(exe):
+				err = registerMCPViaGemini(exe, entry, m.logger)
+			}
+			if err != nil {
+				m.logger.Printf("WorkerManager: refresh MCP for %s: %v (will retry on spawn)", agentType, err)
+			} else {
+				m.logger.Printf("WorkerManager: stringwork MCP refreshed for %s → %s", agentType, m.mcpServerURL)
+			}
+		}
+	}()
+}
+
 // StartupCheck runs a check after a short delay to pick up pending work after server start.
 // In HTTP mode, it waits for the MCP endpoint to become reachable before spawning workers.
 func (m *WorkerManager) StartupCheck() {

@@ -325,6 +325,9 @@ func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *poli
 	// Update worker manager with actual URL (important when port was 0)
 	if wm != nil {
 		wm.SetMCPServerURL(fmt.Sprintf("%s/mcp", baseURL))
+		// Eagerly refresh stale MCP registrations in worker CLIs.
+		// With port 0, the URL changes on every restart.
+		wm.RefreshMCPRegistrations()
 	}
 
 	logger.Printf("HTTP server on :%d", actualPort)
