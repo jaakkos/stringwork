@@ -43,10 +43,14 @@ Create `~/.config/stringwork/config.yaml` (or keep it per-project):
 # Startup default workspace. Clients can change at runtime via set_presence.
 workspace_root: "/path/to/your/project"
 
-# Port for the background HTTP listener (workers + dashboard).
-# 0 = auto-assign (supports multiple Cursor windows).
-# Fixed port (e.g. 8943) = predictable dashboard URL but only one instance at a time.
-http_port: 0
+# Daemon mode: multiple Cursor windows share one server process.
+daemon:
+  enabled: true
+  grace_period_seconds: 10
+
+# Fixed port for a stable dashboard/worker URL (http://localhost:8943/dashboard).
+# Use 0 for auto-assign (stable within a daemon session, changes on daemon restart).
+http_port: 8943
 
 enabled_tools: ["*"]
 message_retention_max: 1000
@@ -93,19 +97,38 @@ Add to `.cursor/mcp.json` in your project:
 }
 ```
 
-Cursor starts the server as a subprocess via stdio. The server simultaneously starts an HTTP listener in the background for workers and the dashboard -- **no daemon or background setup needed**.
+Cursor starts the server as a subprocess via stdio.
 
-When Cursor closes, the server shuts down. When Cursor opens, it starts fresh.
+### Daemon mode (recommended for multiple Cursor windows)
 
-### Multiple Cursor windows
+With daemon mode enabled, multiple Cursor windows share a **single** server process:
 
-With `http_port: 0` (default), each Cursor window spawns its own server on an auto-assigned port. No port conflicts. All instances share the same SQLite state file, so tasks and messages are visible across windows.
+```yaml
+# In ~/.config/stringwork/config.yaml
+daemon:
+  enabled: true
+  grace_period_seconds: 10  # how long to wait after last window closes
+```
 
-To find the dashboard URL, check the MCP server logs -- the actual port is printed on startup.
+How it works:
+1. The first Cursor window starts a background daemon and connects as a proxy
+2. Subsequent Cursor windows detect the running daemon and connect as proxies
+3. Workers, notifier, and watchdog run once in the daemon (no duplicates)
+4. When the last Cursor window closes, the daemon waits for the grace period then shuts down
+
+Each proxy is a thin stdio-to-HTTP bridge. The daemon serves HTTP on both a TCP port (for workers/dashboard) and a unix socket (for proxies). The HTTP port and dashboard URL stay stable across Cursor reconnects.
+
+Use `--standalone` to bypass daemon mode and run the legacy single-process mode.
+
+### Standalone mode (legacy)
+
+Without daemon mode, each Cursor window spawns its own server. The server runs stdio for the driver and HTTP for workers. When Cursor closes, its server shuts down.
+
+With `http_port: 0` (default), each window gets an auto-assigned port. All instances share the same SQLite state file, so tasks and messages are visible across windows.
 
 ### Claude Code CLI (manual use)
 
-Workers are spawned automatically, but to use Claude Code interactively you'd need to connect via HTTP. The auto-assigned port makes this impractical, so set a fixed `http_port` in config if you need this:
+Workers are spawned automatically, but to use Claude Code interactively you can connect via HTTP. With daemon mode and a fixed `http_port` (e.g. 8943), the URL is permanently available:
 
 ```bash
 claude mcp add-json --scope user stringwork '{
@@ -113,6 +136,8 @@ claude mcp add-json --scope user stringwork '{
   "url": "http://localhost:8943/mcp"
 }'
 ```
+
+The daemon keeps the HTTP endpoint alive across Cursor reconnects, so this registration stays valid as long as the daemon is running.
 
 See [docs/mcp-client-configs/](mcp-client-configs/) for detailed client configuration.
 
@@ -273,6 +298,8 @@ HTTP server on :54321
 ```
 
 With a fixed `http_port` (e.g. 8943), the URL is always `http://localhost:8943/dashboard`.
+
+**Daemon mode advantage**: even with `http_port: 0`, the port is allocated once when the daemon starts and stays stable across Cursor window reconnects. The dashboard URL is printed in the log on daemon startup and remains accessible as long as the daemon is running.
 
 ## Common Issues
 

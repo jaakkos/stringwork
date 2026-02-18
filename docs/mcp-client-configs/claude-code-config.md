@@ -20,7 +20,7 @@ Use `claude mcp --help` for more options (e.g. `--scope project` for current pro
 
 ## Manual setup (interactive use)
 
-If you want to use Claude Code interactively alongside a running Stringwork server, you need a **fixed** `http_port` in your config (e.g. `http_port: 8943`) so the URL is predictable.
+If you want to use Claude Code interactively alongside a running Stringwork server, set a **fixed** `http_port` in your config (e.g. `http_port: 8943`) and register via URL:
 
 ```bash
 claude mcp add-json --scope user stringwork '{
@@ -31,7 +31,9 @@ claude mcp add-json --scope user stringwork '{
 
 Verify with `claude mcp list`. Restart Claude Code to load.
 
-With `http_port: 0` (auto-assign), the port changes each time Cursor starts, making manual setup impractical.
+**With daemon mode** (recommended): the server runs persistently, so the URL stays available across Cursor reconnects. Even with `http_port: 0`, the port is stable for the daemon's lifetime -- but a fixed port gives you a permanent URL that survives daemon restarts too.
+
+**Without daemon mode**: the server stops when Cursor closes, so URL-based registration is only useful while Cursor is open. With `http_port: 0`, the port changes on every Cursor launch.
 
 ## Per-project configuration
 

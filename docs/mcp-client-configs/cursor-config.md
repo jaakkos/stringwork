@@ -2,9 +2,7 @@
 
 ## Setup
 
-Cursor starts the Stringwork server as a subprocess. The server handles stdio for Cursor (driver) and runs an HTTP listener for workers and the dashboard in the background.
-
-**No daemon or background process needed.**
+Cursor starts the Stringwork server as a subprocess. With daemon mode enabled (recommended), the first Cursor window starts a background daemon and subsequent windows connect as lightweight proxies.
 
 ### Project-specific (`.cursor/mcp.json` in your project)
 
@@ -38,11 +36,27 @@ Cursor starts the Stringwork server as a subprocess. The server handles stdio fo
 
 If `mcp-stringwork` is not on your PATH, use the full path (e.g. `~/.local/bin/mcp-stringwork`).
 
-### Multiple Cursor windows
+### Daemon mode (recommended)
 
-With `http_port: 0` (default), each Cursor window spawns its own server on an auto-assigned port. All instances share the same SQLite state, so tasks and messages work across windows.
+Enable daemon mode in your config for the best multi-window experience:
 
-Set a fixed `http_port` (e.g. 8943) only if you need a predictable dashboard URL -- but only one Cursor instance can run at a time with a fixed port.
+```yaml
+daemon:
+  enabled: true
+  grace_period_seconds: 10
+```
+
+With daemon mode:
+- Multiple Cursor windows share a single server process
+- Workers, notifier, and watchdog run once (no duplicates)
+- The HTTP port and dashboard URL stay stable across reconnects
+- When the last window closes, the daemon shuts down after the grace period
+
+Set a fixed `http_port` (e.g. 8943) for a permanent dashboard URL. With `http_port: 0`, the port is assigned once when the daemon starts and stays stable until the daemon restarts.
+
+### Without daemon mode
+
+Each Cursor window spawns its own server. With `http_port: 0`, each gets an auto-assigned port. All instances share the same SQLite state, so tasks and messages work across windows. Set a fixed port only for a predictable dashboard URL, but only one instance can use a given port.
 
 ## Available tools (23)
 
@@ -93,4 +107,4 @@ mcp-stringwork status cursor
 
 - **Server not responding:** Check binary path and execute permission.
 - **Path outside workspace:** Use `set_presence` with the correct workspace path.
-- **Port conflict:** With `http_port: 0`, each instance gets its own port. With a fixed port, only one instance can run.
+- **Port conflict:** With daemon mode, all Cursor windows share one port. Without daemon mode, use `http_port: 0` so each instance gets its own port.

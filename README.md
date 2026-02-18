@@ -75,7 +75,7 @@ Add to `.cursor/mcp.json` in your project:
 }
 ```
 
-Cursor spawns the server as a subprocess via stdio. The server also starts an HTTP listener in the background for workers and the dashboard -- **no daemon or background process needed**.
+Cursor spawns the server as a subprocess via stdio. With daemon mode enabled (recommended), the first Cursor window starts a background daemon and subsequent windows share it automatically.
 
 ### 2. Create a config file
 
@@ -85,9 +85,12 @@ Copy `mcp/config.yaml` and customize. Minimal example:
 workspace_root: "/path/to/your/project"
 enabled_tools: ["*"]
 
-# Port 0 = auto-assign (supports multiple Cursor windows).
-# Set a fixed port (e.g. 8943) for a predictable dashboard URL.
-http_port: 0
+# Daemon mode: multiple Cursor windows share one server.
+daemon:
+  enabled: true
+
+# Fixed port for a stable dashboard URL. Use 0 for auto-assign.
+http_port: 8943
 
 orchestration:
   driver: cursor
@@ -111,9 +114,23 @@ create_task title='Add auth middleware' assigned_to='any' created_by='cursor'
 worker_status
 ```
 
-### Multiple Cursor windows
+### Daemon mode (recommended)
 
-Each Cursor window spawns its own server instance. With `http_port: 0` (default), each gets an auto-assigned port so they don't conflict. All instances share the same SQLite state file, so tasks and messages are visible across all windows.
+Enable daemon mode so multiple Cursor windows share a single server process:
+
+```yaml
+daemon:
+  enabled: true
+  grace_period_seconds: 10
+```
+
+The first Cursor window starts a background daemon. Subsequent windows connect to it as lightweight proxies. Workers, notifier, and watchdog run once -- no duplicates. The HTTP port and dashboard URL stay stable across reconnects. When the last window closes, the daemon waits for the grace period then shuts down.
+
+Use `--standalone` to bypass daemon mode.
+
+### Multiple Cursor windows (without daemon)
+
+Without daemon mode, each Cursor window spawns its own server. With `http_port: 0` (default), each gets an auto-assigned port so they don't conflict. All instances share the same SQLite state file, so tasks and messages are visible across all windows.
 
 ## Configuration
 
@@ -206,7 +223,9 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 ## CLI
 
 ```bash
-mcp-stringwork                          # start MCP server (normal operation)
+mcp-stringwork                          # start server (auto-detects daemon/proxy/standalone)
+mcp-stringwork --daemon                 # force daemon mode
+mcp-stringwork --standalone             # force standalone mode (no daemon)
 mcp-stringwork --version                # print version
 mcp-stringwork status claude-code       # check unread/pending counts for an agent
 ```
@@ -215,7 +234,7 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 
 ```
 .
-├── cmd/mcp-server/          # Server entrypoint, CLI
+├── cmd/mcp-server/          # Server entrypoint, daemon, proxy, CLI
 ├── internal/
 │   ├── domain/              # Core entities (Message, Task, Plan, AgentInstance, ...)
 │   ├── app/                 # Application services (CollabService, WorkerManager, Watchdog, Orchestrator)

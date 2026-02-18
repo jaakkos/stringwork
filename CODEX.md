@@ -228,7 +228,7 @@ brew install --cask codex
 codex mcp add stringwork -- /path/to/mcp-stringwork
 ```
 
-Or for HTTP transport via mcp-remote proxy:
+Or for HTTP transport (requires `http_port: 8943` and daemon mode for a stable URL):
 
 ```bash
 codex mcp add stringwork -- npx -y mcp-remote http://localhost:8943/mcp

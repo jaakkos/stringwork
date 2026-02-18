@@ -1,5 +1,5 @@
 // MCP Stringwork Server
-// Stdio for the driver (Cursor), HTTP for workers and dashboard.
+// Supports three modes: standalone (stdio+HTTP), daemon (HTTP only), and proxy (stdio bridge).
 package main
 
 import (
@@ -33,8 +33,23 @@ import (
 // Version is set by -ldflags at build time.
 var Version = "dev"
 
+// serverBundle holds all initialized server components.
+type serverBundle struct {
+	mcpServer *server.MCPServer
+	cfg       *policy.Config
+	pol       *policy.Policy
+	logger    *log.Logger
+	registry  *app.SessionRegistry
+	sessions  *sessionStore
+	hooks     *server.Hooks
+	svc       *app.CollabService
+	wm        *app.WorkerManager
+	notifier  *app.Notifier
+	watchdog  *app.Watchdog
+	cleanup   func()
+}
+
 func main() {
-	// Handle CLI subcommands before starting MCP server.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "status":
@@ -46,26 +61,79 @@ func main() {
 		}
 	}
 
-	// Load config
+	daemonFlag := hasFlag("--daemon")
+	standaloneFlag := hasFlag("--standalone")
+
 	tmpLogger := log.New(os.Stderr, "[mcp-pair] ", log.LstdFlags|log.Lshortfile)
 	cfg := loadConfig(tmpLogger)
 	pol := policy.New(cfg)
 
-	// Set up logging
+	if daemonFlag {
+		bundle := initializeServer(cfg, pol)
+		runDaemon(bundle)
+		return
+	}
+
+	if standaloneFlag {
+		bundle := initializeServer(cfg, pol)
+		runStandalone(bundle)
+		return
+	}
+
+	socketPath := pol.SocketPath()
+	pidFile := pol.PIDFile()
+	proxyLogger := setupLogger(pol.LogFile())
+
+	// Always connect to an existing daemon if one is running.
+	// Only auto-start a new daemon when daemon mode is enabled in config.
+	if isDaemonRunning(socketPath) {
+		proxyLogger.Println("Daemon already running, connecting as proxy")
+	} else if pol.DaemonEnabled() {
+		proxyLogger.Println("No daemon found, starting one...")
+		if err := startDaemonProcess(socketPath, pidFile, proxyLogger); err != nil {
+			proxyLogger.Printf("Failed to start daemon: %v, falling back to standalone", err)
+			bundle := initializeServer(cfg, pol)
+			runStandalone(bundle)
+			return
+		}
+	} else {
+		bundle := initializeServer(cfg, pol)
+		runStandalone(bundle)
+		return
+	}
+
+	if err := runProxy(socketPath, proxyLogger); err != nil {
+		proxyLogger.Printf("Proxy error: %v", err)
+		os.Exit(1)
+	}
+}
+
+// hasFlag checks if a flag is present in os.Args and removes it.
+func hasFlag(flag string) bool {
+	for i, arg := range os.Args {
+		if arg == flag {
+			os.Args = append(os.Args[:i], os.Args[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// initializeServer creates all server components: MCPServer, services, hooks,
+// tools, notifier, watchdog, and background goroutines. The returned bundle
+// is ready to be wired to a transport (stdio, HTTP, or both).
+func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	logger := setupLogger(pol.LogFile())
 	logger.Println("Starting MCP Stringwork server...")
 	logger.Printf("Log file: %s", pol.LogFile())
 	logger.Printf("Workspace root: %s", cfg.WorkspaceRoot)
 
-	// State repository
 	repo, err := repository.NewStateRepository(pol.StateFile())
 	if err != nil {
 		logger.Fatalf("State repository: %v", err)
 	}
 	svc := app.NewCollabService(repo, pol, logger)
 
-	// Refresh agent heartbeats on startup so the watchdog doesn't immediately
-	// consider persisted agents as stale from a previous server run.
 	if err := svc.Run(func(state *domain.CollabState) error {
 		app.RefreshHeartbeatsOnStartup(state)
 		return nil
@@ -73,24 +141,16 @@ func main() {
 		logger.Printf("Warning: failed to refresh heartbeats on startup: %v", err)
 	}
 
-	// Session registry for multi-client agent tracking
 	registry := app.NewSessionRegistry()
-
-	// Session store for push notifications (holds actual ClientSession objects)
 	sessions := newSessionStore()
 
-	// Build the MCPServer
 	hooks := &server.Hooks{}
 	hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result any) {
-		// Log tool calls
 		if message != nil {
 			logger.Printf("Calling tool: %s", message.Params.Name)
 		}
 	})
 
-	// Clean up session registry when clients disconnect.
-	// Without this, auto-spawned agents (claude-code, codex) leave stale sessions
-	// that prevent future auto-respond from firing.
 	hooks.AddOnUnregisterSession(func(ctx context.Context, session server.ClientSession) {
 		sid := session.SessionID()
 		agent := registry.GetAgent(sid)
@@ -103,238 +163,6 @@ func main() {
 		}
 	})
 
-	mcpServer := server.NewMCPServer(
-		"mcp-stringwork",
-		Version,
-		server.WithInstructions(collab.InstructionsText()),
-		server.WithToolHandlerMiddleware(collab.PiggybackMiddleware(svc, registry)),
-		server.WithHooks(hooks),
-		server.WithResourceCapabilities(false, true), // subscribe=false, listChanged=true
-	)
-
-	// Optional task orchestrator (when orchestration config is present)
-	var taskOrch *app.TaskOrchestrator
-	if o := pol.Orchestration(); o != nil {
-		strategy := o.AssignmentStrategy
-		if strategy == "" {
-			strategy = "least_loaded"
-		}
-		taskOrch = app.NewTaskOrchestrator(svc, strategy)
-	}
-
-	// WorkerManager is created later; register tools after it's available.
-	// Placeholder for tool registration — see below after WorkerManager setup.
-
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Ignore SIGHUP so the server keeps running when daemonized (nohup, launchd, etc.)
-	signal.Ignore(syscall.SIGHUP)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		logger.Printf("Received signal %v, shutting down...", sig)
-		cancel()
-	}()
-
-	// Build push function for the notifier: pushes to all connected sessions.
-	pushFunc := func(method string, params any) error {
-		agents := registry.ConnectedAgents()
-		for _, agent := range agents {
-			sid := registry.GetSessionForAgent(agent)
-			if sid == "" {
-				continue
-			}
-			session := sessions.get(sid)
-			if session == nil {
-				continue
-			}
-			if !session.Initialized() {
-				continue
-			}
-			notification := mcp.JSONRPCNotification{
-				JSONRPC: "2.0",
-				Notification: mcp.Notification{
-					Method: method,
-					Params: mcp.NotificationParams{AdditionalFields: map[string]any{"params": params}},
-				},
-			}
-			ch := session.NotificationChannel()
-			select {
-			case ch <- notification:
-			default:
-				logger.Printf("Notifier: push to %s dropped (channel full)", agent)
-			}
-		}
-		return nil
-	}
-
-	// Build getAgent: returns the first connected agent (for notifier compatibility).
-	getAgent := func() string {
-		agents := registry.ConnectedAgents()
-		if len(agents) > 0 {
-			return agents[0]
-		}
-		return ""
-	}
-
-	// Start notifier with WorkerManager (orchestration-driven worker spawn)
-	var notifierOpts []app.NotifierOption
-	var wm *app.WorkerManager // accessible for cancel_agent tool
-	orchCfg := pol.Orchestration()
-	if orchCfg != nil {
-		wm = app.NewWorkerManager(orchCfg, getAgent, repo, svc.Run, cfg.WorkspaceRoot, logger)
-		wm.SetSessionChecker(func(instanceOrType string) bool {
-			return registry.HasActiveSession(instanceOrType)
-		})
-		// Pass configured MCP servers to worker manager for auto-registration with worker CLIs.
-		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
-			var entries []app.MCPServerEntry
-			for name, sc := range mcpCfg {
-				entries = append(entries, app.MCPServerEntry{
-					Name:    name,
-					URL:     sc.URL,
-					Command: sc.Command,
-					Args:    sc.Args,
-					Env:     sc.Env,
-				})
-			}
-			wm.SetMCPServers(entries)
-			logger.Printf("WorkerManager: %d additional MCP server(s) configured for workers", len(entries))
-		}
-		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
-		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
-		wm.StartupCheck()
-	}
-
-	// Worktree manager (optional, git worktree isolation for workers)
-	var wtManager *worktree.Manager
-	if wtCfg := pol.WorktreeConfig(); wtCfg != nil && wtCfg.Enabled {
-		wtManager = worktree.NewManager(wtCfg, logger)
-		if wm != nil {
-			wm.SetWorktreeManager(wtManager)
-			logger.Printf("WorktreeManager enabled (cleanup=%s, path=%s)", wtCfg.CleanupStrategy, wtCfg.Path)
-		}
-	}
-
-	// Knowledge indexer (optional, FTS5-based project knowledge)
-	var knowledgeStore *knowledge.KnowledgeStore
-	if kCfg := pol.KnowledgeConfig(); kCfg != nil && kCfg.Enabled {
-		var err error
-		knowledgeStore, err = knowledge.NewKnowledgeStore(pol.KnowledgeDBPath())
-		if err != nil {
-			logger.Printf("Warning: knowledge store init failed: %v (feature disabled)", err)
-		} else {
-			syncInterval := 60 * time.Second
-			if kCfg.WatchIntervalSeconds > 0 {
-				syncInterval = time.Duration(kCfg.WatchIntervalSeconds) * time.Second
-			}
-			indexer := knowledge.NewIndexer(knowledgeStore, knowledge.IndexerConfig{
-				WorkspaceRoot:     cfg.WorkspaceRoot,
-				IndexGoSource:     kCfg.IndexGoSource,
-				WatchEnabled:      true,
-				StateSyncInterval: syncInterval,
-			}, newKnowledgeStateAdapter(svc), logger)
-			go indexer.Start(ctx)
-			logger.Printf("Knowledge indexer enabled (go_source=%v, sync=%s, db=%s)", kCfg.IndexGoSource, syncInterval, pol.KnowledgeDBPath())
-		}
-	}
-
-	// Register all tools and prompts (after WorkerManager so cancel_agent can kill processes)
-	var regOpts []collab.RegisterOption
-	if wm != nil {
-		regOpts = append(regOpts, collab.WithCanceller(wm))
-	}
-	if knowledgeStore != nil {
-		regOpts = append(regOpts, collab.WithKnowledgeStore(knowledgeStore))
-	}
-	if wtManager != nil {
-		regOpts = append(regOpts, collab.WithWorktreeProvider(&worktreeAdapter{mgr: wtManager}))
-	}
-	if wm != nil {
-		regOpts = append(regOpts, collab.WithProcessProvider(&processAdapter{wm: wm}))
-	}
-	collab.Register(mcpServer, svc, logger, registry, taskOrch, regOpts...)
-
-	notifier := app.NewNotifier(pol.SignalFilePath(), repo, getAgent, pushFunc, logger, notifierOpts...)
-	svc.SetNotifier(notifier)
-	go notifier.Start(ctx)
-
-	// Start watchdog to monitor agent liveness and recover stuck states
-	watchdog := app.NewWatchdog(svc, registry, logger,
-		app.WithWatchdogNotifier(notifier),
-	)
-	go watchdog.Start(ctx)
-
-	// Start HTTP server in background (for workers, dashboard, and external clients)
-	httpShutdown := startHTTPServer(ctx, mcpServer, cfg, cfg.HTTPPort, logger, registry, sessions, hooks, svc, wm)
-
-	// Run stdio server in foreground (for the driver, e.g. Cursor)
-	logger.Println("Stdio ready (driver connection)")
-	stdioSrv := server.NewStdioServer(mcpServer)
-	if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil {
-		logger.Printf("Stdio server stopped: %v", err)
-	}
-
-	// Driver disconnected -- shut everything down
-	cancel()
-	httpShutdown()
-
-	watchdog.Stop()
-	notifier.Stop()
-
-	// Cleanup worktrees on shutdown
-	if wtManager != nil {
-		if err := wtManager.CleanupAll(cfg.WorkspaceRoot); err != nil {
-			logger.Printf("Warning: worktree cleanup on shutdown: %v", err)
-		}
-	}
-
-	if knowledgeStore != nil {
-		if err := knowledgeStore.Close(); err != nil {
-			logger.Printf("Warning: close knowledge store: %v", err)
-		}
-	}
-
-	if c, ok := repo.(interface{ Close() error }); ok {
-		if err := c.Close(); err != nil {
-			logger.Printf("Warning: close state repository: %v", err)
-		}
-	}
-
-	logger.Println("Server stopped")
-}
-
-// startHTTPServer starts the HTTP server in the background for workers, dashboard,
-// and external clients. Returns a shutdown function. Uses net.Listen to support
-// port 0 (auto-assign) for running multiple instances.
-func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *policy.Config, port int, logger *log.Logger, registry *app.SessionRegistry, sessions *sessionStore, hooks *server.Hooks, svc *app.CollabService, wm *app.WorkerManager) func() {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		logger.Fatalf("HTTP listen: %v", err)
-	}
-	actualPort := ln.Addr().(*net.TCPAddr).Port
-	baseURL := fmt.Sprintf("http://localhost:%d", actualPort)
-
-	// Store dashboard URL so tools can expose it to the driver
-	registry.SetDashboardURL(fmt.Sprintf("%s/dashboard", baseURL))
-
-	// Update worker manager with actual URL (important when port was 0)
-	if wm != nil {
-		wm.SetMCPServerURL(fmt.Sprintf("%s/mcp", baseURL))
-		// Eagerly refresh stale MCP registrations in worker CLIs.
-		// With port 0, the URL changes on every restart.
-		wm.RefreshMCPRegistrations()
-	}
-
-	logger.Printf("HTTP server on :%d", actualPort)
-	logger.Printf("  Workers connect at:      %s/mcp", baseURL)
-	logger.Printf("  Dashboard:               %s/dashboard", baseURL)
-
-	// Session lifecycle hooks for HTTP clients (workers connecting back)
 	hooks.AddBeforeInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest) {
 		if session := server.ClientSessionFromContext(ctx); session != nil {
 			sessions.set(session.SessionID(), session)
@@ -375,9 +203,193 @@ func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *poli
 		}
 	})
 
-	sseSrv := server.NewSSEServer(mcpServer, server.WithBaseURL(baseURL))
-	streamSrv := server.NewStreamableHTTPServer(mcpServer)
-	mockAuth := newMockAuthServer(baseURL, logger)
+	mcpServer := server.NewMCPServer(
+		"mcp-stringwork",
+		Version,
+		server.WithInstructions(collab.InstructionsText()),
+		server.WithToolHandlerMiddleware(collab.PiggybackMiddleware(svc, registry)),
+		server.WithHooks(hooks),
+		server.WithResourceCapabilities(false, true),
+	)
+
+	var taskOrch *app.TaskOrchestrator
+	if o := pol.Orchestration(); o != nil {
+		strategy := o.AssignmentStrategy
+		if strategy == "" {
+			strategy = "least_loaded"
+		}
+		taskOrch = app.NewTaskOrchestrator(svc, strategy)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	signal.Ignore(syscall.SIGHUP)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		logger.Printf("Received signal %v, shutting down...", sig)
+		cancel()
+	}()
+
+	pushFunc := func(method string, params any) error {
+		agents := registry.ConnectedAgents()
+		for _, agent := range agents {
+			sid := registry.GetSessionForAgent(agent)
+			if sid == "" {
+				continue
+			}
+			session := sessions.get(sid)
+			if session == nil || !session.Initialized() {
+				continue
+			}
+			notification := mcp.JSONRPCNotification{
+				JSONRPC: "2.0",
+				Notification: mcp.Notification{
+					Method: method,
+					Params: mcp.NotificationParams{AdditionalFields: map[string]any{"params": params}},
+				},
+			}
+			ch := session.NotificationChannel()
+			select {
+			case ch <- notification:
+			default:
+				logger.Printf("Notifier: push to %s dropped (channel full)", agent)
+			}
+		}
+		return nil
+	}
+
+	getAgent := func() string {
+		agents := registry.ConnectedAgents()
+		if len(agents) > 0 {
+			return agents[0]
+		}
+		return ""
+	}
+
+	var notifierOpts []app.NotifierOption
+	var wm *app.WorkerManager
+	orchCfg := pol.Orchestration()
+	if orchCfg != nil {
+		wm = app.NewWorkerManager(orchCfg, getAgent, repo, svc.Run, cfg.WorkspaceRoot, logger)
+		wm.SetSessionChecker(func(instanceOrType string) bool {
+			return registry.HasActiveSession(instanceOrType)
+		})
+		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
+			var entries []app.MCPServerEntry
+			for name, sc := range mcpCfg {
+				entries = append(entries, app.MCPServerEntry{
+					Name:    name,
+					URL:     sc.URL,
+					Command: sc.Command,
+					Args:    sc.Args,
+					Env:     sc.Env,
+				})
+			}
+			wm.SetMCPServers(entries)
+			logger.Printf("WorkerManager: %d additional MCP server(s) configured for workers", len(entries))
+		}
+		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
+		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
+		wm.StartupCheck()
+	}
+
+	var wtManager *worktree.Manager
+	if wtCfg := pol.WorktreeConfig(); wtCfg != nil && wtCfg.Enabled {
+		wtManager = worktree.NewManager(wtCfg, logger)
+		if wm != nil {
+			wm.SetWorktreeManager(wtManager)
+			logger.Printf("WorktreeManager enabled (cleanup=%s, path=%s)", wtCfg.CleanupStrategy, wtCfg.Path)
+		}
+	}
+
+	var knowledgeStore *knowledge.KnowledgeStore
+	if kCfg := pol.KnowledgeConfig(); kCfg != nil && kCfg.Enabled {
+		knowledgeStore, err = knowledge.NewKnowledgeStore(pol.KnowledgeDBPath())
+		if err != nil {
+			logger.Printf("Warning: knowledge store init failed: %v (feature disabled)", err)
+		} else {
+			syncInterval := 60 * time.Second
+			if kCfg.WatchIntervalSeconds > 0 {
+				syncInterval = time.Duration(kCfg.WatchIntervalSeconds) * time.Second
+			}
+			indexer := knowledge.NewIndexer(knowledgeStore, knowledge.IndexerConfig{
+				WorkspaceRoot:     cfg.WorkspaceRoot,
+				IndexGoSource:     kCfg.IndexGoSource,
+				WatchEnabled:      true,
+				StateSyncInterval: syncInterval,
+			}, newKnowledgeStateAdapter(svc), logger)
+			go indexer.Start(ctx)
+			logger.Printf("Knowledge indexer enabled (go_source=%v, sync=%s, db=%s)", kCfg.IndexGoSource, syncInterval, pol.KnowledgeDBPath())
+		}
+	}
+
+	var regOpts []collab.RegisterOption
+	if wm != nil {
+		regOpts = append(regOpts, collab.WithCanceller(wm))
+	}
+	if knowledgeStore != nil {
+		regOpts = append(regOpts, collab.WithKnowledgeStore(knowledgeStore))
+	}
+	if wtManager != nil {
+		regOpts = append(regOpts, collab.WithWorktreeProvider(&worktreeAdapter{mgr: wtManager}))
+	}
+	if wm != nil {
+		regOpts = append(regOpts, collab.WithProcessProvider(&processAdapter{wm: wm}))
+	}
+	collab.Register(mcpServer, svc, logger, registry, taskOrch, regOpts...)
+
+	notifier := app.NewNotifier(pol.SignalFilePath(), repo, getAgent, pushFunc, logger, notifierOpts...)
+	svc.SetNotifier(notifier)
+	go notifier.Start(ctx)
+
+	watchdog := app.NewWatchdog(svc, registry, logger,
+		app.WithWatchdogNotifier(notifier),
+	)
+	go watchdog.Start(ctx)
+
+	cleanupFunc := func() {
+		cancel()
+		watchdog.Stop()
+		notifier.Stop()
+		if wtManager != nil {
+			if err := wtManager.CleanupAll(cfg.WorkspaceRoot); err != nil {
+				logger.Printf("Warning: worktree cleanup on shutdown: %v", err)
+			}
+		}
+		if knowledgeStore != nil {
+			if err := knowledgeStore.Close(); err != nil {
+				logger.Printf("Warning: close knowledge store: %v", err)
+			}
+		}
+		if c, ok := repo.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				logger.Printf("Warning: close state repository: %v", err)
+			}
+		}
+	}
+
+	return &serverBundle{
+		mcpServer: mcpServer,
+		cfg:       cfg,
+		pol:       pol,
+		logger:    logger,
+		registry:  registry,
+		sessions:  sessions,
+		hooks:     hooks,
+		svc:       svc,
+		wm:        wm,
+		notifier:  notifier,
+		watchdog:  watchdog,
+		cleanup:   cleanupFunc,
+	}
+}
+
+// buildHTTPHandler creates the HTTP handler with all routes (MCP, SSE, dashboard, health, auth).
+func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handler {
+	sseSrv := server.NewSSEServer(bundle.mcpServer, server.WithBaseURL(baseURL))
+	streamSrv := server.NewStreamableHTTPServer(bundle.mcpServer)
+	mockAuth := newMockAuthServer(baseURL, bundle.logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/sse", sseSrv)
@@ -386,32 +398,71 @@ func startHTTPServer(ctx context.Context, mcpServer *server.MCPServer, cfg *poli
 	mux.Handle("/mcp", streamSrv)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","port":%d,"agents":%d}`, actualPort, registry.AgentCount())
+		fmt.Fprintf(w, `{"status":"ok","port":%d,"agents":%d}`, port, bundle.registry.AgentCount())
 	})
 	mockAuth.registerRoutes(mux)
 
 	var dashOpts []dashboard.HandlerOption
-	if wm != nil {
-		dashOpts = append(dashOpts, dashboard.WithWorkerController(wm))
+	if bundle.wm != nil {
+		dashOpts = append(dashOpts, dashboard.WithWorkerController(bundle.wm))
 	}
-	dash := dashboard.NewHandler(svc, registry, dashOpts...)
+	dash := dashboard.NewHandler(bundle.svc, bundle.registry, dashOpts...)
 	dash.RegisterRoutes(mux)
 
-	httpServer := &http.Server{Handler: mux}
+	return mux
+}
+
+// setupAndServeHTTP binds a TCP listener, configures service URLs, builds the
+// handler, and starts serving. Returns the base URL and a shutdown function.
+func setupAndServeHTTP(bundle *serverBundle) (baseURL string, handler http.Handler, shutdown func()) {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", bundle.cfg.HTTPPort))
+	if err != nil {
+		bundle.logger.Fatalf("HTTP listen: %v", err)
+	}
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	baseURL = fmt.Sprintf("http://localhost:%d", actualPort)
+
+	bundle.registry.SetDashboardURL(fmt.Sprintf("%s/dashboard", baseURL))
+	if bundle.wm != nil {
+		bundle.wm.SetMCPServerURL(fmt.Sprintf("%s/mcp", baseURL))
+		bundle.wm.RefreshMCPRegistrations()
+	}
+
+	bundle.logger.Printf("HTTP server on :%d", actualPort)
+	bundle.logger.Printf("  Workers connect at:      %s/mcp", baseURL)
+	bundle.logger.Printf("  Dashboard:               %s/dashboard", baseURL)
+
+	handler = buildHTTPHandler(bundle, baseURL, actualPort)
+	httpServer := &http.Server{Handler: handler}
 
 	go func() {
 		if err := httpServer.Serve(ln); err != http.ErrServerClosed {
-			logger.Fatalf("HTTP server error: %v", err)
+			bundle.logger.Fatalf("HTTP server error: %v", err)
 		}
 	}()
 
-	return func() {
+	return baseURL, handler, func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			logger.Printf("HTTP shutdown error: %v", err)
+			bundle.logger.Printf("HTTP shutdown error: %v", err)
 		}
 	}
+}
+
+// runStandalone runs in legacy single-process mode: stdio for the driver, HTTP for workers.
+func runStandalone(bundle *serverBundle) {
+	_, _, httpShutdown := setupAndServeHTTP(bundle)
+
+	bundle.logger.Println("Stdio ready (driver connection)")
+	stdioSrv := server.NewStdioServer(bundle.mcpServer)
+	if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
+		bundle.logger.Printf("Stdio server stopped: %v", err)
+	}
+
+	httpShutdown()
+	bundle.cleanup()
+	bundle.logger.Println("Server stopped")
 }
 
 // sessionStore holds active ClientSession objects for push notifications.
@@ -443,14 +494,9 @@ func (ss *sessionStore) remove(id string) {
 }
 
 // setupLogger creates a logger that writes to a log file and optionally stderr.
-// When stderr is a terminal (interactive use), logs go to both stderr and the file.
-// When stderr is redirected (daemon mode via nohup), logs go only to the file
-// to avoid duplicate lines since nohup already redirects stderr to the log file.
 func setupLogger(logFilePath string) *log.Logger {
 	var writers []io.Writer
 
-	// Only include stderr when it's an interactive terminal (not redirected).
-	// This prevents duplicate log lines when running as a daemon with nohup >> log 2>&1.
 	stderrIsTerminal := false
 	if info, err := os.Stderr.Stat(); err == nil {
 		stderrIsTerminal = (info.Mode() & os.ModeCharDevice) != 0
@@ -472,7 +518,6 @@ func setupLogger(logFilePath string) *log.Logger {
 		}
 	}
 
-	// Add stderr if it's a terminal, or if there's no log file (always need at least one output).
 	if stderrIsTerminal || !hasLogFile {
 		writers = append(writers, os.Stderr)
 	}
@@ -502,7 +547,6 @@ func loadConfig(logger *log.Logger) *policy.Config {
 	return cfg
 }
 
-// processAdapter bridges WorkerManager to the collab.ProcessInfoProvider interface.
 type processAdapter struct {
 	wm *app.WorkerManager
 }
@@ -521,7 +565,6 @@ func (a *processAdapter) GetProcessInfo() map[string]collab.ProcessInfoSnapshot 
 	return result
 }
 
-// worktreeAdapter bridges worktree.Manager to the collab.WorktreeInfoProvider interface.
 type worktreeAdapter struct {
 	mgr *worktree.Manager
 }
@@ -539,7 +582,6 @@ func (a *worktreeAdapter) ListWorktrees() map[string]collab.WorktreeInfo {
 	return result
 }
 
-// knowledgeStateAdapter bridges CollabService to the knowledge.StateProvider interface.
 type knowledgeStateAdapter struct {
 	svc *app.CollabService
 }
@@ -583,7 +625,6 @@ func (a *knowledgeStateAdapter) CompletedTasks() []knowledge.TaskData {
 	return tasks
 }
 
-// runStatusCommand implements "mcp-stringwork status [agent]".
 func runStatusCommand() {
 	agent := "claude-code"
 	if len(os.Args) > 2 {

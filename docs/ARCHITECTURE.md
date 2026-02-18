@@ -25,7 +25,7 @@ cmd/mcp-server (main, CLI)
 
 | Package | Role |
 |---------|------|
-| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies, runs stdio for the driver and HTTP for workers/dashboard. CLI subcommands (`status`, `--version`). |
+| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies. Supports three modes: **daemon** (HTTP on TCP + unix socket, no stdio), **proxy** (thin stdio-to-HTTP bridge), and **standalone** (legacy stdio + HTTP in one process). CLI subcommands (`status`, `--version`). |
 | **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `FileLock`, `Presence`, `CollabState`. |
 | **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts), `SessionRegistry` (multi-client tracking). Defines `StateRepository` and `Policy` interfaces. |
 | **internal/repository/sqlite** | Implements `StateRepository` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`. |
@@ -86,6 +86,25 @@ type Policy interface {
     ValidatePath(path string) (string, error)
 }
 ```
+
+## Server modes
+
+The server binary (`mcp-stringwork`) supports three operational modes:
+
+| Mode | Flag | Transport | Use case |
+|------|------|-----------|----------|
+| **Daemon** | `--daemon` | HTTP on TCP + unix socket | Background process shared by multiple Cursor windows |
+| **Proxy** | (auto) | Stdio ↔ HTTP bridge | Cursor subprocess that connects to the daemon |
+| **Standalone** | `--standalone` | Stdio + HTTP in one process | Legacy single-process mode |
+
+With daemon mode enabled in config, the binary auto-detects the mode:
+1. If `--daemon` flag: run as daemon
+2. If `--standalone` flag: run standalone
+3. If a daemon is already running (unix socket responds): connect as proxy
+4. If daemon config enabled: start a new daemon, then connect as proxy
+5. Otherwise: run standalone
+
+The daemon tracks connected proxies via unix socket connection counting. When the last proxy disconnects, a configurable grace period starts. If no new proxy connects within the grace period, the daemon shuts down cleanly.
 
 ## Testing
 

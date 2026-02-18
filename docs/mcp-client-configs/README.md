@@ -15,7 +15,7 @@ Configuration examples for connecting to the Stringwork server.
 }
 ```
 
-The server runs stdio for Cursor and starts an HTTP listener for workers and the dashboard. No daemon needed.
+With daemon mode enabled, the first Cursor window starts a background daemon. Subsequent windows share it as lightweight proxies. Without daemon mode, each window runs its own server.
 
 See individual config files:
 

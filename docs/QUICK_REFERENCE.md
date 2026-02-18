@@ -351,11 +351,30 @@ mcp-stringwork status cursor
 ### Server mode
 
 ```bash
-# Start MCP server (normal operation, used by Cursor/Claude Code)
+# Start server (auto-detects daemon/proxy/standalone)
 mcp-stringwork
+
+# Force daemon mode (background process, serves multiple Cursor windows)
+mcp-stringwork --daemon
+
+# Force standalone mode (legacy single-process, no daemon)
+mcp-stringwork --standalone
 
 # With custom config
 MCP_CONFIG=/path/to/config.yaml mcp-stringwork
+```
+
+### Daemon management
+
+```bash
+# Check if daemon is running
+ls ~/.config/stringwork/daemon.pid && echo "Daemon PID: $(cat ~/.config/stringwork/daemon.pid)"
+
+# Find dashboard URL
+grep "Dashboard:" ~/.config/stringwork/mcp-stringwork.log | tail -1
+
+# Stop daemon (Cursor will restart it on next MCP call)
+kill "$(cat ~/.config/stringwork/daemon.pid)"
 ```
 
 ## Auto-Respond Configuration

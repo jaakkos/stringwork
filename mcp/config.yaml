@@ -21,10 +21,22 @@ message_retention_max: 1000
 message_retention_days: 30
 presence_ttl_seconds: 300
 
+# --- Daemon mode (multi-driver support) ---
+# When enabled, multiple Cursor windows share a single server process.
+# The first invocation starts a background daemon; subsequent ones connect
+# to it as thin stdio-to-HTTP proxies. Use --standalone flag to bypass.
+daemon:
+  enabled: true
+  socket_path: ""            # default: ~/.config/stringwork/server.sock
+  pid_file: ""               # default: ~/.config/stringwork/daemon.pid
+  grace_period_seconds: 10   # wait before daemon exits after last driver disconnects
+
 # --- HTTP port (for workers and dashboard) ---
-# The server runs stdio for the driver (Cursor) AND HTTP for workers/dashboard.
-# Set to 0 for auto-assigned port (supports multiple Cursor instances).
-# Set to a fixed port (e.g. 8943) for a predictable dashboard URL.
+# The server always runs an HTTP server for workers/dashboard.
+# In standalone mode it also runs stdio for the driver.
+# Set to 0 for auto-assigned port, or a fixed port (e.g. 8943) for a
+# predictable dashboard URL. With daemon mode, port 0 is recommended since
+# the daemon persists and the port stays stable across driver reconnects.
 http_port: 0
 
 # --- MCP Servers for Workers ---

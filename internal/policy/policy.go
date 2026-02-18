@@ -84,6 +84,16 @@ type WorktreeConfig struct {
 	Path            string   `yaml:"path"`             // worktree directory relative to workspace (default ".stringwork/worktrees")
 }
 
+// DaemonConfig controls the singleton daemon mode for multi-driver support.
+// When enabled, the first invocation starts a background daemon process and
+// subsequent invocations connect to it as thin stdio-to-HTTP proxies.
+type DaemonConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	SocketPath      string `yaml:"socket_path"`
+	PIDFile         string `yaml:"pid_file"`
+	GracePeriodSecs int    `yaml:"grace_period_seconds"`
+}
+
 // FeaturesConfig groups optional feature flags.
 type FeaturesConfig struct {
 	Knowledge *KnowledgeConfig `yaml:"knowledge"`
@@ -104,6 +114,7 @@ type Config struct {
 	Orchestration *OrchestrationConfig       `yaml:"orchestration"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
 	Features      *FeaturesConfig            `yaml:"features"`
+	Daemon        *DaemonConfig              `yaml:"daemon"`
 }
 
 // DefaultConfig returns sensible defaults. Orchestration is always set (driver cursor, no workers).
@@ -304,4 +315,34 @@ func (p *Policy) WorktreeConfig() *WorktreeConfig {
 		return nil
 	}
 	return p.config.Orchestration.Worktrees
+}
+
+// DaemonEnabled returns true if daemon mode is configured.
+func (p *Policy) DaemonEnabled() bool {
+	return p.config.Daemon != nil && p.config.Daemon.Enabled
+}
+
+// SocketPath returns the unix socket path for daemon communication.
+func (p *Policy) SocketPath() string {
+	if p.config.Daemon != nil && p.config.Daemon.SocketPath != "" {
+		return p.config.Daemon.SocketPath
+	}
+	return filepath.Join(GlobalStateDir(), "server.sock")
+}
+
+// PIDFile returns the daemon PID file path.
+func (p *Policy) PIDFile() string {
+	if p.config.Daemon != nil && p.config.Daemon.PIDFile != "" {
+		return p.config.Daemon.PIDFile
+	}
+	return filepath.Join(GlobalStateDir(), "daemon.pid")
+}
+
+// DaemonGracePeriodSeconds returns how long the daemon waits after the last
+// driver disconnects before shutting down.
+func (p *Policy) DaemonGracePeriodSeconds() int {
+	if p.config.Daemon != nil && p.config.Daemon.GracePeriodSecs > 0 {
+		return p.config.Daemon.GracePeriodSecs
+	}
+	return 10
 }
