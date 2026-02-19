@@ -146,12 +146,11 @@ else
     echo "  ✓ Created $CLAUDE_SETTINGS with hooks"
 fi
 
-# 3. Install pair-respond command (if .claude/commands exists or we create it)
-if [ -d "$HOME/.claude/commands" ]; then
-    if [ -f "$REPO_DIR/.claude/commands/pair-respond.md" ]; then
-        cp "$REPO_DIR/.claude/commands/pair-respond.md" "$HOME/.claude/commands/pair-respond.md"
-        echo "  ✓ Installed /pair-respond command"
-    fi
+# 3. Install pair-respond command
+if [ -f "$REPO_DIR/.claude/commands/pair-respond.md" ]; then
+    mkdir -p "$HOME/.claude/commands"
+    cp "$REPO_DIR/.claude/commands/pair-respond.md" "$HOME/.claude/commands/pair-respond.md"
+    echo "  ✓ Installed /pair-respond command"
 fi
 
 echo ""

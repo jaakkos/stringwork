@@ -1,6 +1,6 @@
 ---
 description: Process unread messages and pending tasks from your pair programmer
-allowed-tools: mcp__pair-programmer__*
+allowed-tools: mcp__stringwork__*
 ---
 
 You have been auto-spawned to respond to your pair programmer. Follow these steps exactly:
