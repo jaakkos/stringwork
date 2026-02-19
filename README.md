@@ -220,6 +220,19 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 | `register_agent` | Register a custom agent for collaboration |
 | `list_agents` | List all available agents (built-in and registered) |
 
+## Claude Code Hooks
+
+Claude Code's `CLAUDE.md` instructions are wrapped in a "may or may not be relevant" framing that weakens compliance. Stringwork ships hooks that bypass this limitation:
+
+```bash
+./scripts/install-claude-hooks.sh    # install hooks
+./scripts/uninstall-claude-hooks.sh  # clean removal
+```
+
+Hooks are installed at user level (`~/.claude/settings.json`) so they work across all projects. They inject progress reporting rules as clean system-reminder messages — no disclaimer, survives context compaction. Scripts have a guard and do nothing in non-Stringwork projects.
+
+See [Claude Code config](docs/mcp-client-configs/claude-code-config.md) for details.
+
 ## CLI
 
 ```bash
@@ -245,7 +258,7 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 │   ├── worktree/            # Git worktree manager for worker isolation
 │   └── tools/collab/        # 23 MCP tool handlers
 ├── mcp/                     # Configuration files
-├── scripts/                 # Install script
+├── scripts/                 # Install, dev-install, hook install/uninstall scripts
 ├── docs/                    # Documentation
 ├── .github/workflows/       # CI and release automation
 ├── AGENTS.md                # Cursor agent instructions

@@ -70,7 +70,7 @@ orchestration:
   workers:
     - type: claude-code
       instances: 1
-      command: ["claude", "-p", "You are claude-code in a pair programming session. Your workspace is {workspace}. Steps: 1) set_presence agent='claude-code' status='working' workspace='{workspace}' 2) read_messages for 'claude-code' 3) list_tasks assigned_to='claude-code' 4) Process ALL unread messages and pending tasks. 5) report_progress every 2-3 minutes. 6) send_message from='claude-code' to='cursor' with findings.", "--dangerously-skip-permissions"]
+      command: ["claude", "-p", "You are claude-code, a worker. Workspace: {workspace}. MANDATORY: heartbeat every 60-90s, report_progress every 2-3min, send_message before finishing. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Do the work 5) report_progress 6) send_message with findings.", "--dangerously-skip-permissions"]
       cooldown_seconds: 30
       timeout_seconds: 600
       max_retries: 2
@@ -332,6 +332,36 @@ set_presence agent='cursor' status='working' workspace='/path/to/correct/project
 - [ ] Worker can read/write files in the workspace
 - [ ] Worker can call MCP tools (`heartbeat`, `report_progress`, `send_message`)
 - [ ] Worker logs show activity: `~/.config/stringwork/stringwork-worker-*.log`
+
+## Step 5: Install Claude Code hooks (recommended)
+
+Claude Code's `CLAUDE.md` instructions get a "may or may not be relevant" framing that weakens compliance. Stringwork ships hooks that bypass this by injecting rules as clean system-reminder messages.
+
+```bash
+./scripts/install-claude-hooks.sh    # install
+./scripts/uninstall-claude-hooks.sh  # clean removal
+```
+
+This installs:
+- Hook scripts to `~/.config/stringwork/hooks/`
+- Hook config into `~/.claude/settings.json` (user level — works across all projects)
+- `/pair-respond` command to `~/.claude/commands/`
+
+The scripts have a guard: they only activate when `~/.config/stringwork/state.sqlite` exists, so they're harmless in non-Stringwork projects.
+
+### What the hooks do
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `inject-rules.sh` | `SessionStart` | Injects mandatory rules at startup and after every context compaction |
+| `inject-reminder.sh` | `UserPromptSubmit` | Short reminder on every prompt (~30 tokens) |
+| `stop-check.sh` | `Stop` | Reminds Claude to report findings before finishing |
+
+### For development
+
+```bash
+./scripts/dev-install.sh   # build + install binary + reset db + reinstall hooks + restart daemon
+```
 
 ## Next Steps
 

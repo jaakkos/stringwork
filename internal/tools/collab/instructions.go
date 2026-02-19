@@ -182,10 +182,19 @@ func InstructionsForRole(agent string, driverID string) string {
 - update_work_context to add findings for other workers
 - send_message to '` + driverID + `' with results; update_task status='completed' when done.
 
-## Progress Updates (important!)
-- Send a progress update every 2-3 minutes on longer tasks: what's done, what's left, estimated time
-- The driver may cancel your work if it hasn't heard from you — stay visible
-- Example: send_message from='` + agent + `' to='` + driverID + `' content='Task #X progress: tests done, wiring router. ~2 min left.'
+## Progress Reporting (MANDATORY — server-enforced, violation = cancellation)
+The server monitors your tool calls. Silence triggers escalating consequences:
+- 3 min without report_progress → WARNING to driver
+- 5 min → CRITICAL alert
+- 10 min → Task auto-recovered, you may be CANCELLED
+
+TRIGGER: You are working on any task.
+ACTION: Call BOTH at the required intervals:
+1. heartbeat agent='` + agent + `' progress='what I am doing' — EVERY 60-90 seconds
+2. report_progress agent='` + agent + `' task_id=X description='status' percent_complete=N — EVERY 2-3 minutes
+
+TRIGGER: You are about to finish or stop.
+ACTION: Call send_message from='` + agent + `' to='` + driverID + `' with detailed findings BEFORE stopping.
 
 ## Handling Cancellation
 - The driver can cancel your work at any time using cancel_agent
@@ -221,10 +230,19 @@ func DynamicInstructionsForClient(clientName string) string {
     - Report: send_message from='{agent}' to='{pair}' content='summary of what you did'
     - Complete: update_task id=X status='completed' updated_by='{agent}'
 
-### Progress updates (important!)
-    - The driver may stop waiting if your work takes too long
-    - Send a progress update every 2-3 minutes: what's done, what's left, estimated time
-    - Example: send_message from='{agent}' to='{pair}' content='Task #X progress: tests done, wiring router. ~2 min left.'
+### Progress reporting (MANDATORY — server-enforced, violation = cancellation)
+    The server monitors your tool calls. If you stop reporting, consequences escalate:
+    - 3 min without report_progress → WARNING sent to driver
+    - 5 min without report_progress → CRITICAL alert sent to driver
+    - 10 min without any activity  → Task auto-recovered, you may be CANCELLED
+
+    TRIGGER: You are working on any task.
+    ACTION: Call BOTH of these at the required intervals:
+    1. heartbeat agent='{agent}' progress='what I am doing now' — EVERY 60-90 seconds
+    2. report_progress agent='{agent}' task_id=X description='detailed status' percent_complete=N — EVERY 2-3 minutes
+
+    TRIGGER: You are about to finish or stop.
+    ACTION: Call send_message from='{agent}' to='{pair}' with detailed findings BEFORE stopping.
 
 ### Handling cancellation
     - Your pair can cancel your work using cancel_agent
@@ -304,15 +322,12 @@ func registerPrompts(s *server.MCPServer) {
    - If it's a task assignment, claim it and start working
    - If it's a review request, review the code and send findings
    - If it's an update, acknowledge and continue your work
-4. WHILE WORKING: call heartbeat every 60-90 seconds AND report_progress every 2-3 minutes.
-   The server monitors these calls and alerts the driver if you stop reporting.
-5. Send a reply via send_message summarizing what you did.
-6. Update any task statuses as appropriate.
-
-IMPORTANT: The server enforces progress reporting. While working on any task:
-- Call heartbeat agent='<you>' progress='<what you are doing>' every 60-90 seconds
-- Call report_progress agent='<you>' task_id=X description='<detailed status>' every 2-3 minutes
-Failure to report triggers: WARNING at 3 min, CRITICAL at 5 min, task recovery at 10 min.`,
+4. WHILE WORKING on any task, you MUST do BOTH (server-enforced, non-negotiable):
+   - TRIGGER: Every 60-90 seconds → ACTION: Call heartbeat agent='<you>' progress='<what you are doing>'
+   - TRIGGER: Every 2-3 minutes → ACTION: Call report_progress agent='<you>' task_id=X description='<status>' percent_complete=N
+   Consequence of NOT reporting: WARNING at 3 min, CRITICAL at 5 min, CANCELLED at 10 min.
+5. BEFORE FINISHING: Call send_message from='<you>' to='<pair>' with detailed summary (changes made, files, test results).
+6. Update task statuses with update_task.`,
 						},
 					},
 				},

@@ -11,7 +11,7 @@ This repository is a Go MCP server for pair-programming coordination. It support
 - `internal/policy/`: workspace and safety policy; orchestration config (driver, workers).
 - `mcp/`: runtime config (`config.yaml` with `daemon`, `orchestration` sections).
 - `docs/`: setup, architecture, and workflow docs.
-- `scripts/`: install script and helpers.
+- `scripts/`: install, dev-install, hook install/uninstall scripts.
 
 ## Build, Test, and Development Commands
 - `go build -o mcp-stringwork ./cmd/mcp-server`: build the server binary.
@@ -39,6 +39,12 @@ Git history is not available in this workspace, so adopt this convention:
 - Keep commits focused; separate refactors from behavior changes.
 - PRs should include: purpose, key changes, test evidence (`go test ./...` output), and linked issue/task.
 - Include config or API examples when behavior changes affect MCP clients.
+
+## Local vs Deployed Configuration
+- `mcp/config.yaml` is the **repo default** — shipped as a template for new installs.
+- `~/.config/stringwork/config.yaml` is the **user's live config** — contains personal customizations (MCP servers, worktree settings, env vars, comments). **Never overwrite it** from scripts; only copy it when no config exists yet.
+- `scripts/dev-install.sh` deliberately skips syncing config.yaml for this reason. If worker prompts or orchestration settings change in the repo default, update the user's live config separately (or document the change so users update manually).
+- Claude Code hooks live at user level (`~/.claude/settings.json`, `~/.config/stringwork/hooks/`) so they work across all projects, not just this repo. The `.claude/` directory in this repo only contains command templates. Install with `./scripts/install-claude-hooks.sh`, remove cleanly with `./scripts/uninstall-claude-hooks.sh`.
 
 ## Security & Configuration Tips
 - Do not commit local secrets or machine-specific paths.

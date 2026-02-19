@@ -68,12 +68,48 @@ Verify with `claude mcp list`. Restart Claude Code to load.
 | `get_work_context` | Get task context |
 | `update_work_context` | Add notes to task context |
 
+## Hooks (instruction enforcement)
+
+Claude Code's `CLAUDE.md` instructions get "may or may not be relevant" framing which weakens compliance. Stringwork ships **hooks** that bypass this limitation by injecting rules as clean system-reminder messages (no disclaimer).
+
+### Install / uninstall hooks
+
+```bash
+./scripts/install-claude-hooks.sh    # install
+./scripts/uninstall-claude-hooks.sh  # clean removal
+```
+
+Install copies hook scripts to `~/.config/stringwork/hooks/` and merges hook config into `~/.claude/settings.json` (user level — works for all projects). The scripts have a guard: they only activate when `~/.config/stringwork/state.sqlite` exists, so they're harmless in non-Stringwork projects.
+
+Uninstall removes the hook scripts, strips the `hooks` key from `~/.claude/settings.json` (preserving other settings), and removes the `/pair-respond` command.
+
+### What the hooks do
+
+| Script | Event | Purpose |
+|--------|-------|---------|
+| `inject-rules.sh` | `SessionStart` | Injects mandatory rules at startup and after every context compaction |
+| `inject-reminder.sh` | `UserPromptSubmit` | Short reminder on every prompt (~30 tokens) |
+| `stop-check.sh` | `Stop` | Reminds Claude to report findings before finishing |
+
+`SessionStart` fires on `startup`, `resume`, `clear`, and `compact`, so rules survive context compaction.
+
+### Why hooks instead of CLAUDE.md?
+
+Claude Code wraps CLAUDE.md content in a framing that tells Claude it "may or may not be relevant." Hook output arrives as clean system-reminder messages without this framing, making them significantly more reliable for rules that must always be followed.
+
+## Custom commands
+
+| Command | Purpose |
+|---------|---------|
+| `/pair-respond` | Process unread messages and pending tasks (used by auto-spawn) |
+
 ## Pair programming workflow
 
 - Start: `get_context` for `'claude-code'`
 - Check tasks: `list_tasks` with `assigned_to='claude-code'`
 - Claim: `update_task` with `id=X` `status='in_progress'` `updated_by='claude-code'`
-- Report: `send_message` from `'claude-code'` to `'cursor'` with your summary
+- **While working:** `heartbeat` every 60-90s, `report_progress` every 2-3min (MANDATORY)
+- Report: `send_message` from `'claude-code'` to `'cursor'` with detailed findings
 - Complete: `update_task` with `id=X` `status='completed'` `updated_by='claude-code'`
 
 ## Notifications
