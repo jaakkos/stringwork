@@ -1,0 +1,26 @@
+{
+  "name": "stringwork",
+  "version": "1.0.0",
+  "description": "MCP pair-programming server with driver/worker orchestration for Cursor, Claude Code, Codex, and Gemini",
+  "author": {
+    "name": "jaakkos"
+  },
+  "repository": "https://github.com/jaakkos/stringwork",
+  "license": "MIT",
+  "keywords": [
+    "pair-programming",
+    "mcp",
+    "orchestration",
+    "multi-agent",
+    "collaboration",
+    "driver-worker",
+    "code-review"
+  ],
+  "logo": "logo.svg",
+  "rules": "./cursor-plugin/rules",
+  "skills": "./cursor-plugin/skills",
+  "agents": "./cursor-plugin/agents",
+  "commands": "./cursor-plugin/commands",
+  "hooks": "./cursor-plugin/hooks/hooks.json",
+  "mcpServers": "./cursor-plugin/.mcp.json"
+}

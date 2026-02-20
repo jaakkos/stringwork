@@ -15,7 +15,7 @@ You are `claude-code` in the pair programming system.
 
 1. **Check session context first:**
    ```
-   Use get_context for 'claude-code'
+   Use get_session_context for 'claude-code'
    ```
    This shows unread messages, tasks, presence status, and session notes.
 
@@ -145,11 +145,11 @@ When the server is configured with `orchestration` (in `mcp/config.yaml`), one a
 
 If no orchestration is configured, all agents are peers (legacy mode).
 
-## Available MCP Tools (23 coordination tools)
+## Available MCP Tools (24 coordination tools)
 
-- `get_context` - Full session context (messages, tasks, presence, notes)
+- `get_session_context` - Full session context (messages, tasks, presence, notes)
 - `set_presence` - Update status and workspace; dynamically changes the server's project context
-- `add_note` - Add shared note or decision
+- `append_session_note` - Add shared note or decision
 - `send_message` - Message your pair (optional title, urgent)
 - `read_messages` - Read messages
 - `create_task` - Create task (use assigned_to='any' for auto-assign; optional relevant_files, background, constraints for work context)
@@ -170,6 +170,7 @@ If no orchestration is configured, all agents are peers (legacy mode).
 - `cancel_agent` - (Driver) Cancel a worker's tasks, send STOP signal, and kill its process
 - `get_work_context` - Get task context (relevant files, background, constraints, shared notes)
 - `update_work_context` - Add shared notes to a task's work context
+- `query_knowledge` - Search the FTS5-powered project knowledge base
 
 Use your native tools for files, search, git, and commands.
 
@@ -184,7 +185,7 @@ All agents share the same state via `~/.config/stringwork/state.sqlite`. When or
 
 ## Important
 
-- Always check `get_context` at the start of a session
+- Always check `get_session_context` at the start of a session
 - Communicate findings via `send_message` - your pairs can't see your work otherwise
 - Update task status so your pairs know what's in progress
 - You can delegate to `cursor` or `codex` via `create_task`
@@ -230,7 +231,7 @@ For hands-off pair programming:
 ### ✅ DO: Check context first
 ```
 # Good: Check for messages and tasks first
-Use get_context for 'claude-code'
+Use get_session_context for 'claude-code'
 Use list_tasks with assigned_to='claude-code'
 ```
 
@@ -297,7 +298,7 @@ Use list_tasks  # Missing important context!
 ### ✅ DO: Read messages before proceeding
 ```
 # Good: Stay synchronized
-Use get_context for 'claude-code'  # Includes messages
+Use get_session_context for 'claude-code'  # Includes messages
 Use list_tasks with assigned_to='claude-code'
 ```
 

@@ -167,14 +167,14 @@ orchestration:
 
 See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 
-## Available Tools (23)
+## Available Tools (24)
 
 ### Session
 | Tool | Description |
 |------|-------------|
-| `get_context` | Full session context (messages, tasks, presence, plans) |
+| `get_session_context` | Full session context (messages, tasks, presence, plans) |
 | `set_presence` | Update status and workspace; dynamically changes server's project context |
-| `add_note` | Add shared note or decision |
+| `append_session_note` | Add shared note or decision |
 
 ### Communication
 | Tool | Description |
@@ -219,6 +219,7 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 | `lock_file` | Lock, unlock, check, or list file locks |
 | `register_agent` | Register a custom agent for collaboration |
 | `list_agents` | List all available agents (built-in and registered) |
+| `query_knowledge` | Search the FTS5-powered project knowledge base |
 
 ## Claude Code Hooks
 
@@ -257,6 +258,7 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 │   ├── knowledge/           # FTS5 project knowledge indexer
 │   ├── worktree/            # Git worktree manager for worker isolation
 │   └── tools/collab/        # 23 MCP tool handlers
+├── cursor-plugin/           # Cursor IDE plugin (rules, skills, agents, commands, hooks)
 ├── mcp/                     # Configuration files
 ├── scripts/                 # Install, dev-install, hook install/uninstall scripts
 ├── docs/                    # Documentation
@@ -264,6 +266,70 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 ├── AGENTS.md                # Cursor agent instructions
 └── CLAUDE.md                # Claude Code agent instructions
 ```
+
+## Cursor Plugin
+
+Stringwork ships a [Cursor plugin](https://cursor.com/docs/plugins) that provides workflow rules, skills, agents, and commands for the driver role. The plugin structure is in [cursor-plugin/](cursor-plugin/) and ready for [marketplace submission](https://cursor.com/docs/plugins/building) when the time comes.
+
+### Install from Git
+
+1. **Install the binary** (required):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaakkos/stringwork/main/scripts/install.sh | sh
+```
+
+2. **Add the MCP server** to Cursor — click the deeplink or add manually:
+
+[Install Stringwork MCP Server](cursor://anysphere.cursor-deeplink/mcp/install?name=stringwork&config=eyJjb21tYW5kIjoibWNwLXN0cmluZ3dvcmsifQ==)
+
+Or add to your project's `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "stringwork": {
+      "command": "mcp-stringwork"
+    }
+  }
+}
+```
+
+3. **Install the plugin** (rules, skills, agents, commands) — globally for all projects:
+
+```bash
+git clone https://github.com/jaakkos/stringwork.git /tmp/stringwork
+/tmp/stringwork/scripts/install-cursor-plugin.sh
+```
+
+To uninstall: `./scripts/uninstall-cursor-plugin.sh`
+
+For project-scoped installation instead of global, copy the plugin dirs into your project:
+
+```bash
+cp -r /tmp/stringwork/.cursor-plugin /tmp/stringwork/cursor-plugin your-project/
+```
+
+4. **Configure orchestration** (optional — for spawning workers):
+
+```bash
+mkdir -p ~/.config/stringwork
+cp /tmp/stringwork/mcp/config.yaml ~/.config/stringwork/config.yaml
+# Edit workers section, then start with: MCP_CONFIG=~/.config/stringwork/config.yaml
+```
+
+### What the plugin provides
+
+| Component | Description |
+|-----------|-------------|
+| **MCP server** | Auto-configured `mcp-stringwork` connection |
+| **Rules** (4) | Driver workflow, progress reporting, STOP signals, worker communication |
+| **Skills** (4) | Setup guide, code review, task creation, worker configuration |
+| **Agents** (2) | Pair programming driver, code review coordinator |
+| **Commands** (1) | `/pair-respond` for processing worker messages |
+| **Hooks** (1) | Binary existence check on session start |
+
+The plugin is purely additive — it does not modify any existing project files.
 
 ## Documentation
 

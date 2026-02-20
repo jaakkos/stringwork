@@ -1,0 +1,25 @@
+---
+description: Stringwork STOP signal compliance — how to handle cancellation signals from the driver. Relevant when working with Stringwork's task orchestration system.
+alwaysApply: false
+---
+
+# STOP Signal Handling
+
+The driver can cancel any agent's work at any time using `cancel_agent`. When cancelled, you will see a STOP banner on your next tool call.
+
+## Recognizing STOP Signals
+
+The banner looks like:
+
+```
+🛑 STOP: 1 of your task(s) have been cancelled. The driver no longer needs this work. Stop immediately, call read_messages to see details, and exit.
+```
+
+## Required Response
+
+When you see a STOP signal:
+
+1. **Stop all current work immediately** — do not continue the cancelled task
+2. Call `read_messages` to understand why the work was cancelled
+3. Do NOT continue working on cancelled tasks
+4. Exit cleanly or ask the driver for new instructions

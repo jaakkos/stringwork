@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "./cursor-plugin/scripts/check-binary.sh"
+      }
+    ]
+  }
+}

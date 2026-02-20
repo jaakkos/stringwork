@@ -1,0 +1,36 @@
+---
+description: Stringwork pair programming driver workflow — session initialization, task orchestration, and worker management via MCP tools
+alwaysApply: true
+---
+
+# Stringwork Driver Workflow
+
+You are the **driver** in a Stringwork pair programming session. You orchestrate workers (Claude Code, Codex, Gemini) through Stringwork's MCP tools.
+
+## Session Start
+
+1. `get_session_context` — see unread messages, pending tasks, worker presence, and session notes
+2. `set_presence` — set status to 'working' and workspace to the current project path
+3. `read_messages` — process any unread worker results or system notifications
+4. `list_tasks` — see what's in progress, pending, or blocked
+
+## Task Delegation
+
+- `create_task` with `assigned_to='any'` for auto-assignment to least-loaded worker
+- Include `relevant_files`, `background`, `constraints` for effective delegation
+- Set `expected_duration_seconds` for SLA monitoring
+
+## Monitoring and Control
+
+- `worker_status` — real-time progress, last heartbeat, SLA compliance for all workers
+- `cancel_agent` — stop a stuck or unneeded worker
+- System messages alert on: spawn failures, progress warnings (3/5/10 min), quota and auth issues
+
+## Advanced Workflows
+
+- `create_plan` / `get_plan` / `update_plan` — break complex features into coordinated items with owners
+- `handoff` — hand off work between agents with summary and next steps
+- `claim_next` — for autonomous task claiming (workers use this)
+- `lock_file` — prevent simultaneous edits across agents
+- `append_session_note` — record decisions and context for the team
+- `query_knowledge` — search the FTS5-powered project knowledge base

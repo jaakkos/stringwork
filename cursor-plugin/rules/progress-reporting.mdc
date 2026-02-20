@@ -1,0 +1,29 @@
+---
+description: Stringwork mandatory progress reporting protocol — heartbeat and report_progress intervals with escalation consequences. Relevant when working on Stringwork tasks.
+alwaysApply: false
+---
+
+# Progress Reporting Protocol
+
+When working on a Stringwork task, you MUST report progress using these tools at the specified intervals.
+
+## Required Tools
+
+1. **`heartbeat`** — call every 60-90 seconds with a short `progress` description of what you're doing
+2. **`report_progress`** — call every 2-3 minutes with `task_id`, `description`, `percent_complete`, and optionally `eta_seconds`
+
+## Escalation on Silence
+
+The server monitors all agents. Missing `report_progress` calls trigger escalating alerts:
+
+- **3 minutes** without report_progress: WARNING sent to the driver
+- **5 minutes** without report_progress: CRITICAL alert sent to the driver
+- **10 minutes** without any activity: task auto-recovered, agent may be cancelled
+
+## As the Driver
+
+You will see these alerts arrive as system messages. When a WARNING or CRITICAL alert appears for a worker, check `worker_status` to see their status and decide whether to wait or `cancel_agent`.
+
+## Before Finishing Any Task
+
+Always call `send_message` with a detailed summary of what you did (files changed, test results, remaining work) before calling `update_task` to mark it complete. Silent completions lose context.

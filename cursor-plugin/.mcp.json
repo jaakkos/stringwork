@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "stringwork": {
+      "command": "mcp-stringwork",
+      "args": []
+    }
+  }
+}

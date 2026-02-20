@@ -1,0 +1,40 @@
+---
+description: Stringwork worker communication — messaging, task delegation with work context, code review coordination, and system message interpretation
+alwaysApply: true
+---
+
+# Worker Communication
+
+## Messaging Workers
+
+Use `send_message` to communicate with workers. Include all context they need — workers cannot see your conversation. Messages support markdown.
+
+## Task Delegation
+
+When creating tasks via `create_task`:
+
+- **title** — short, imperative ("Add auth middleware", "Review PR #123")
+- **assigned_to** — `'any'` for auto-assignment, or a specific agent name
+- **description** — detailed instructions: what to do, expected output format
+- **relevant_files** — array of file paths the worker should focus on
+- **background** — architectural context (patterns, related components)
+- **constraints** — guardrails ("do not modify the public API", "read-only investigation")
+- **priority** — 1=critical, 2=high, 3=normal (default), 4=low
+- **expected_duration_seconds** — enables SLA alerts if exceeded
+
+Use `get_work_context` / `update_work_context` to view or add shared notes to a task's context after creation.
+
+## Code Review Coordination
+
+Use `request_review` for lightweight reviews, or `create_task` for deep reviews with specific focus areas. Ask workers to classify findings:
+- **Critical** — security, data loss, crashes (block merge)
+- **Important** — performance, correctness, maintainability (should fix)
+- **Nice-to-have** — style, documentation (optional)
+
+## System Messages
+
+The server sends system messages for:
+- Worker spawn/connect/disconnect events
+- Failure acks with error classification (quota, auth, not-found, transient)
+- Progress alerts (WARNING at 3 min, CRITICAL at 5 min)
+- Watchdog recovery events (stale agents marked offline)
