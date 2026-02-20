@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,11 +24,14 @@ import (
 )
 
 const (
-	defaultWorkerCooldown = 30 * time.Second
-	workerLockfileStale   = 5 * time.Minute
-	defaultWorkerTimeout  = 5 * time.Minute
-	defaultWorkerRetries  = 2
-	defaultWorkerRetryDel = 15 * time.Second
+	defaultWorkerCooldown  = 30 * time.Second
+	workerLockfileStale    = 5 * time.Minute
+	defaultWorkerTimeout   = 5 * time.Minute
+	defaultWorkerRetries   = 2
+	defaultWorkerRetryDel  = 15 * time.Second
+	failureBackoffBase     = 1 * time.Minute
+	failureBackoffMax      = 10 * time.Minute
+	failureBackoffMaxCount = 10 // stop auto-retrying after this many consecutive full failures
 )
 
 // WorkerSpawnConfig is a single spawnable worker (one instance).
@@ -74,6 +80,14 @@ type WorkerManager struct {
 	worktreeManager *worktree.Manager
 	// processActivity tracks when each worker process last produced output.
 	processActivity map[string]*ProcessInfo
+	// consecutiveFailures tracks how many full spawn cycles (all retries exhausted)
+	// have failed in a row for each worker, used for exponential backoff.
+	consecutiveFailures map[string]int
+	// lastFailure tracks when the last full spawn failure occurred per worker.
+	lastFailure map[string]time.Time
+	// backoffUntil holds an explicit "do not retry before" deadline, set when the
+	// worker output contains a parseable retry-after (e.g., quota reset time).
+	backoffUntil map[string]time.Time
 }
 
 // ProcessInfo holds runtime process metadata for a worker instance.
@@ -130,16 +144,19 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		}
 	}
 	return &WorkerManager{
-		configs:         configs,
-		getAgent:        getAgent,
-		repo:            repo,
-		stateMutator:    stateMutator,
-		fallbackDir:     fallbackDir,
-		logger:          logger,
-		lastSpawn:       make(map[string]time.Time),
-		runningWorkers:  make(map[string]context.CancelFunc),
-		mcpRegistered:   make(map[string]bool),
-		processActivity: make(map[string]*ProcessInfo),
+		configs:             configs,
+		getAgent:            getAgent,
+		repo:                repo,
+		stateMutator:        stateMutator,
+		fallbackDir:         fallbackDir,
+		logger:              logger,
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		mcpRegistered:       make(map[string]bool),
+		processActivity:     make(map[string]*ProcessInfo),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
 	}
 }
 
@@ -183,6 +200,145 @@ func (w *activityWriter) Write(p []byte) (int, error) {
 		w.mu.Unlock()
 	}
 	return n, err
+}
+
+// tailBuffer is a ring buffer that retains the last N bytes written to it.
+// Used to capture the tail of worker process output for error diagnostics.
+type tailBuffer struct {
+	buf  []byte
+	size int
+	pos  int
+	full bool
+}
+
+func newTailBuffer(size int) *tailBuffer {
+	return &tailBuffer{buf: make([]byte, size), size: size}
+}
+
+func (tb *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= tb.size {
+		copy(tb.buf, p[n-tb.size:])
+		tb.pos = 0
+		tb.full = true
+		return n, nil
+	}
+	space := tb.size - tb.pos
+	if n <= space {
+		copy(tb.buf[tb.pos:], p)
+	} else {
+		copy(tb.buf[tb.pos:], p[:space])
+		copy(tb.buf, p[space:])
+	}
+	tb.pos = (tb.pos + n) % tb.size
+	if !tb.full && tb.pos < n {
+		tb.full = true
+	}
+	return n, nil
+}
+
+func (tb *tailBuffer) String() string {
+	if !tb.full {
+		return string(tb.buf[:tb.pos])
+	}
+	return string(tb.buf[tb.pos:]) + string(tb.buf[:tb.pos])
+}
+
+// workerErrorClass categorizes worker process failures to decide retry strategy.
+type workerErrorClass int
+
+const (
+	workerErrorTransient      workerErrorClass = iota // unknown/transient — worth retrying
+	workerErrorQuotaExhausted                         // API rate limit / quota exhausted
+	workerErrorAuth                                   // authentication / API key failure
+	workerErrorNotFound                               // binary not found or config error
+)
+
+// workerErrorInfo holds the classification result for a failed worker process.
+type workerErrorInfo struct {
+	Class      workerErrorClass
+	Summary    string        // one-line human-readable summary
+	RetryAfter time.Duration // parsed from output when available; 0 = unknown
+}
+
+func (e workerErrorClass) String() string {
+	switch e {
+	case workerErrorQuotaExhausted:
+		return "quota_exhausted"
+	case workerErrorAuth:
+		return "auth_failure"
+	case workerErrorNotFound:
+		return "not_found"
+	default:
+		return "transient"
+	}
+}
+
+// Terminal returns true if retrying the same command is pointless.
+func (e workerErrorClass) Terminal() bool {
+	return e != workerErrorTransient
+}
+
+var quotaResetRe = regexp.MustCompile(`(?i)quota will reset after\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?`)
+
+// classifyWorkerError inspects the combined stdout/stderr output of a failed
+// worker process and returns a structured classification.
+func classifyWorkerError(output string) workerErrorInfo {
+	lower := strings.ToLower(output)
+
+	// Quota / rate limit
+	if strings.Contains(lower, "quotaerror") ||
+		strings.Contains(lower, "quota") && strings.Contains(lower, "exhausted") ||
+		strings.Contains(lower, "rate limit") && strings.Contains(lower, "exceeded") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(output, "429") && (strings.Contains(lower, "quota") || strings.Contains(lower, "rate")) {
+		info := workerErrorInfo{
+			Class:   workerErrorQuotaExhausted,
+			Summary: "API quota exhausted",
+		}
+		if m := quotaResetRe.FindStringSubmatch(output); m != nil {
+			var d time.Duration
+			if h, _ := strconv.Atoi(m[1]); h > 0 {
+				d += time.Duration(h) * time.Hour
+			}
+			if min, _ := strconv.Atoi(m[2]); min > 0 {
+				d += time.Duration(min) * time.Minute
+			}
+			if s, _ := strconv.Atoi(m[3]); s > 0 {
+				d += time.Duration(s) * time.Second
+			}
+			if d > 0 {
+				info.RetryAfter = d
+				info.Summary = fmt.Sprintf("API quota exhausted (resets in %s)", d.Round(time.Minute))
+			}
+		}
+		return info
+	}
+
+	// Authentication failures
+	if strings.Contains(lower, "api key expired") ||
+		strings.Contains(lower, "invalid api key") ||
+		strings.Contains(lower, "authentication failed") ||
+		strings.Contains(lower, "unauthorized") && strings.Contains(output, "401") ||
+		strings.Contains(lower, "invalid_api_key") ||
+		strings.Contains(lower, "permission denied") && strings.Contains(lower, "api") {
+		return workerErrorInfo{
+			Class:   workerErrorAuth,
+			Summary: "authentication failure (check API key / credentials)",
+		}
+	}
+
+	// Binary / config not found
+	if strings.Contains(lower, "command not found") ||
+		strings.Contains(lower, "no such file or directory") && strings.Contains(lower, "exec") ||
+		strings.Contains(output, "ENOENT") {
+		return workerErrorInfo{
+			Class:   workerErrorNotFound,
+			Summary: "command not found (check worker command configuration)",
+		}
+	}
+
+	return workerErrorInfo{Class: workerErrorTransient}
 }
 
 // SetWorktreeManager sets the worktree manager for per-worker git isolation.
@@ -339,6 +495,7 @@ func (m *WorkerManager) Check() {
 
 	unreadFor := make(map[string]int)
 	pendingFor := make(map[string]int)
+	latestUnread := make(map[string]time.Time)
 	agentTypes := make(map[string]struct{})
 	for _, c := range m.configs {
 		agentTypes[c.AgentType] = struct{}{}
@@ -350,10 +507,16 @@ func (m *WorkerManager) Check() {
 		if msg.To == "all" {
 			for typ := range agentTypes {
 				unreadFor[typ]++
+				if msg.Timestamp.After(latestUnread[typ]) {
+					latestUnread[typ] = msg.Timestamp
+				}
 			}
 			continue
 		}
 		unreadFor[msg.To]++
+		if msg.Timestamp.After(latestUnread[msg.To]) {
+			latestUnread[msg.To] = msg.Timestamp
+		}
 	}
 	for _, t := range state.Tasks {
 		if t.Status != "pending" {
@@ -362,10 +525,16 @@ func (m *WorkerManager) Check() {
 		if t.AssignedTo == "any" {
 			for typ := range agentTypes {
 				pendingFor[typ]++
+				if t.CreatedAt.After(latestUnread[typ]) {
+					latestUnread[typ] = t.CreatedAt
+				}
 			}
 			continue
 		}
 		pendingFor[t.AssignedTo]++
+		if t.CreatedAt.After(latestUnread[t.AssignedTo]) {
+			latestUnread[t.AssignedTo] = t.CreatedAt
+		}
 	}
 
 	workspace := m.resolveWorkspace(state)
@@ -386,6 +555,24 @@ func (m *WorkerManager) Check() {
 		}
 		if !m.cooldownElapsed(c.InstanceID, c.Cooldown) {
 			continue
+		}
+		if blocked, remaining := m.failureBackoffBlocked(c.InstanceID); blocked {
+			newest := latestUnread[c.InstanceID]
+			if t := latestUnread[c.AgentType]; t.After(newest) {
+				newest = t
+			}
+			m.mu.Lock()
+			failTime := m.lastFailure[c.InstanceID]
+			m.mu.Unlock()
+			if !newest.IsZero() && newest.After(failTime) {
+				m.ResetFailureBackoff(c.InstanceID)
+				m.logger.Printf("WorkerManager: %s backoff reset — new work arrived since last failure", c.InstanceID)
+			} else {
+				if remaining == 0 {
+					m.logger.Printf("WorkerManager: %s permanently backed off after %d consecutive failures (use RestartWorkers or send a new message to reset)", c.InstanceID, failureBackoffMaxCount)
+				}
+				continue
+			}
 		}
 		if !m.acquireLock(c.InstanceID) {
 			continue
@@ -463,8 +650,11 @@ func (m *WorkerManager) RestartWorkers() []string {
 		killed = append(killed, id)
 		m.logger.Printf("WorkerManager: restart — killed %s", id)
 	}
-	// Clear cooldown timers so workers can respawn immediately
+	// Clear cooldown timers and failure backoff so workers can respawn immediately
 	m.lastSpawn = make(map[string]time.Time)
+	m.consecutiveFailures = make(map[string]int)
+	m.lastFailure = make(map[string]time.Time)
+	m.backoffUntil = make(map[string]time.Time)
 	m.mu.Unlock()
 
 	// Brief pause for processes to exit before respawning
@@ -511,6 +701,73 @@ func (m *WorkerManager) cooldownElapsed(instanceID string, cooldown time.Duratio
 	return !ok || time.Since(last) >= cooldown
 }
 
+// failureBackoffBlocked returns true (and the remaining wait duration) if the worker
+// is in a failure backoff period and should not be spawned yet.
+func (m *WorkerManager) failureBackoffBlocked(instanceID string) (bool, time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	failures := m.consecutiveFailures[instanceID]
+	if failures == 0 {
+		return false, 0
+	}
+
+	// Explicit deadline (e.g., from a parsed quota reset time) takes priority.
+	if until, ok := m.backoffUntil[instanceID]; ok {
+		remaining := time.Until(until)
+		if remaining > 0 {
+			return true, remaining
+		}
+		// Deadline passed — clear it and allow retry.
+		delete(m.backoffUntil, instanceID)
+		return false, 0
+	}
+
+	if failures >= failureBackoffMaxCount {
+		return true, 0
+	}
+	last, ok := m.lastFailure[instanceID]
+	if !ok {
+		return false, 0
+	}
+	backoff := m.failureBackoffLocked(failures)
+	remaining := backoff - time.Since(last)
+	if remaining <= 0 {
+		return false, 0
+	}
+	return true, remaining
+}
+
+// failureBackoff returns the backoff duration for a worker (lock must NOT be held).
+func (m *WorkerManager) failureBackoff(instanceID string) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failureBackoffLocked(m.consecutiveFailures[instanceID])
+}
+
+func (m *WorkerManager) failureBackoffLocked(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	backoff := failureBackoffBase
+	for i := 1; i < failures; i++ {
+		backoff *= 2
+		if backoff >= failureBackoffMax {
+			return failureBackoffMax
+		}
+	}
+	return backoff
+}
+
+// ResetFailureBackoff clears the failure backoff state for a specific worker,
+// allowing it to be spawned again immediately on the next Check() cycle.
+func (m *WorkerManager) ResetFailureBackoff(instanceID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.consecutiveFailures, instanceID)
+	delete(m.lastFailure, instanceID)
+	delete(m.backoffUntil, instanceID)
+}
+
 func (m *WorkerManager) resolveWorkspace(state *domain.CollabState) string {
 	connected := m.getAgent()
 	if connected != "" {
@@ -534,7 +791,8 @@ func (m *WorkerManager) resolveWorkspace(state *domain.CollabState) string {
 func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 	defer m.releaseLock(c.InstanceID)
 	retryDelay := c.RetryDelay
-	var lastErr error
+	var lastResult runResult
+	attempts := 0
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 0 {
 			m.logger.Printf("WorkerManager: %s retry %d/%d after %s", c.InstanceID, attempt, c.MaxRetries, retryDelay)
@@ -544,17 +802,112 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 				retryDelay = 2 * time.Minute
 			}
 		}
-		lastErr = m.runOnce(c, workspaceDir, attempt)
-		if lastErr == nil {
+		lastResult = m.runOnce(c, workspaceDir, attempt)
+		attempts = attempt + 1
+		if lastResult.Err == nil {
 			m.mu.Lock()
 			m.lastSpawn[c.InstanceID] = time.Now()
+			m.consecutiveFailures[c.InstanceID] = 0
+			delete(m.lastFailure, c.InstanceID)
+			delete(m.backoffUntil, c.InstanceID)
 			m.mu.Unlock()
 			return
 		}
-		m.logger.Printf("WorkerManager: %s attempt %d failed: %v", c.InstanceID, attempt+1, lastErr)
+
+		errInfo := classifyWorkerError(lastResult.Output)
+		if lastResult.Output != "" {
+			m.logger.Printf("WorkerManager: %s attempt %d failed: %v\n--- output tail ---\n%s", c.InstanceID, attempt+1, lastResult.Err, lastResult.Output)
+		} else {
+			m.logger.Printf("WorkerManager: %s attempt %d failed: %v", c.InstanceID, attempt+1, lastResult.Err)
+		}
+
+		if errInfo.Class.Terminal() {
+			m.logger.Printf("WorkerManager: %s terminal error (%s): %s — skipping remaining retries", c.InstanceID, errInfo.Class, errInfo.Summary)
+			m.recordTerminalFailure(c.InstanceID, errInfo)
+			m.sendTerminalFailureAck(c.InstanceID, errInfo, attempts)
+			return
+		}
 	}
-	m.logger.Printf("WorkerManager: %s failed after %d attempts", c.InstanceID, c.MaxRetries+1)
-	m.sendFailureAck(c.InstanceID, lastErr, c.MaxRetries+1)
+
+	m.mu.Lock()
+	m.consecutiveFailures[c.InstanceID]++
+	failures := m.consecutiveFailures[c.InstanceID]
+	m.lastFailure[c.InstanceID] = time.Now()
+	m.mu.Unlock()
+
+	nextBackoff := m.failureBackoff(c.InstanceID)
+	logPath := filepath.Join(policy.GlobalStateDir(), fmt.Sprintf("stringwork-worker-%s.log", strings.ReplaceAll(c.InstanceID, "/", "-")))
+	if failures >= failureBackoffMaxCount {
+		m.logger.Printf("WorkerManager: %s failed %d consecutive times, giving up (manual restart required; full log: %s)", c.InstanceID, failures, logPath)
+	} else {
+		m.logger.Printf("WorkerManager: %s failed after %d attempts (%d consecutive failures, next retry in %s; full log: %s)", c.InstanceID, c.MaxRetries+1, failures, nextBackoff.Round(time.Second), logPath)
+	}
+	m.sendFailureAck(c.InstanceID, lastResult.Err, attempts)
+}
+
+// recordTerminalFailure sets the backoff state for a terminal error.
+// If the error includes a retry-after duration, that's used as the backoff deadline.
+// Otherwise the worker is permanently blocked until manually reset.
+func (m *WorkerManager) recordTerminalFailure(instanceID string, info workerErrorInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastFailure[instanceID] = time.Now()
+	if info.RetryAfter > 0 {
+		m.backoffUntil[instanceID] = time.Now().Add(info.RetryAfter)
+		m.consecutiveFailures[instanceID] = 1 // allow auto-retry after the deadline
+	} else {
+		m.consecutiveFailures[instanceID] = failureBackoffMaxCount // permanent block
+	}
+}
+
+// sendTerminalFailureAck sends a clear, actionable message to the driver about
+// a terminal worker error (quota, auth, missing binary, etc.).
+func (m *WorkerManager) sendTerminalFailureAck(instanceID string, info workerErrorInfo, attempts int) {
+	if m.stateMutator == nil {
+		return
+	}
+	var content string
+	switch info.Class {
+	case workerErrorQuotaExhausted:
+		if info.RetryAfter > 0 {
+			content = fmt.Sprintf("⏸️ **%s** is rate-limited: %s. Will auto-retry after cooldown. No action needed unless urgent.",
+				instanceID, info.Summary)
+		} else {
+			content = fmt.Sprintf("⏸️ **%s** is rate-limited: %s. Will not auto-retry (reset time unknown). Use `RestartWorkers` when quota resets.",
+				instanceID, info.Summary)
+		}
+	case workerErrorAuth:
+		content = fmt.Sprintf("🔑 **%s** has an auth problem: %s. Fix credentials and use `RestartWorkers` to retry.",
+			instanceID, info.Summary)
+	case workerErrorNotFound:
+		content = fmt.Sprintf("⚙️ **%s** configuration error: %s. Fix the worker command in config and use `RestartWorkers`.",
+			instanceID, info.Summary)
+	default:
+		content = fmt.Sprintf("❌ **%s** failed after %d attempt(s): %s", instanceID, attempts, info.Summary)
+	}
+
+	_ = m.stateMutator(func(s *domain.CollabState) error {
+		recipient := ""
+		for i := len(s.Messages) - 1; i >= 0; i-- {
+			msg := s.Messages[i]
+			if (msg.To == instanceID || msg.To == "all") && !msg.Read && msg.From != "system" {
+				recipient = msg.From
+				break
+			}
+		}
+		if recipient == "" {
+			recipient = "cursor"
+		}
+		s.Messages = append(s.Messages, domain.Message{
+			ID:        s.NextMsgID,
+			From:      "system",
+			To:        recipient,
+			Content:   content,
+			Timestamp: time.Now(),
+		})
+		s.NextMsgID++
+		return nil
+	})
 }
 
 // buildWorkerEnv constructs the environment for a spawned worker process.
@@ -985,7 +1338,13 @@ func registerMCPViaGemini(exe string, entry MCPServerEntry, logger *log.Logger) 
 	return nil
 }
 
-func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attempt int) error {
+// runResult is returned by runOnce so spawn() can inspect the output for error classification.
+type runResult struct {
+	Err    error  // nil on success
+	Output string // tail of stdout+stderr (trimmed); empty on success
+}
+
+func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attempt int) runResult {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
@@ -1000,7 +1359,7 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 	}()
 	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir)
 	if len(args) == 0 {
-		return fmt.Errorf("empty command")
+		return runResult{Err: fmt.Errorf("empty command")}
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workspaceDir
@@ -1032,9 +1391,12 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		m.mu.Unlock()
 	}()
 
+	tail := newTailBuffer(4096)
+
 	if err != nil {
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
+		mw := io.MultiWriter(os.Stderr, tail)
+		cmd.Stdout = mw
+		cmd.Stderr = mw
 	} else {
 		defer logFile.Close()
 		label := "spawn"
@@ -1044,19 +1406,31 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		fmt.Fprintf(logFile, "\n=== Worker %s [%s] at %s (dir=%s) ===\n", c.InstanceID, label, time.Now().Format(time.RFC3339), workspaceDir)
 		fmt.Fprintf(logFile, "Command: %v\n", args)
 		aw := &activityWriter{inner: logFile, mu: &m.mu, info: pInfo}
-		cmd.Stdout = aw
-		cmd.Stderr = aw
+		mw := io.MultiWriter(aw, tail)
+		cmd.Stdout = mw
+		cmd.Stderr = mw
 	}
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
+		elapsed := time.Since(start).Round(time.Millisecond)
+		output := strings.TrimSpace(tail.String())
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("timed out after %s", c.Timeout)
+			if output != "" {
+				return runResult{Err: fmt.Errorf("timed out after %s", c.Timeout), Output: output}
+			}
+			return runResult{Err: fmt.Errorf("timed out after %s", c.Timeout)}
 		}
-		return fmt.Errorf("exited after %s: %w", time.Since(start).Round(time.Millisecond), err)
+		if output != "" {
+			return runResult{
+				Err:    fmt.Errorf("exited after %s: %w", elapsed, err),
+				Output: output,
+			}
+		}
+		return runResult{Err: fmt.Errorf("exited after %s: %w", elapsed, err)}
 	}
 	m.logger.Printf("WorkerManager: %s completed in %s", c.InstanceID, time.Since(start).Round(time.Millisecond))
 	m.reconcileAfterExit(c)
-	return nil
+	return runResult{}
 }
 
 // reconcileAfterExit checks for tasks stuck in "in_progress" after a worker exits.
