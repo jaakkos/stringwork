@@ -184,6 +184,11 @@ When orchestration is configured:
 
 ### Worker types
 
+> **Important:** The server spawns workers as child processes without sourcing shell
+> profiles (`.bashrc`, `.zshrc`). If your CLI tools are installed via version managers
+> (nvm, pyenv, etc.), use **full paths** in the `command` array (e.g.
+> `/Users/you/.local/bin/claude` instead of `claude`). Find the path with `which <tool>`.
+
 #### Claude Code workers
 
 Claude Code with `--dangerously-skip-permissions` has full filesystem and network access:
@@ -227,6 +232,20 @@ workers:
 ```
 
 `--yolo` auto-approves all tool executions (no interactive prompts). `--prompt` runs in non-interactive headless mode.
+
+> **nvm users:** The Gemini CLI is a Node.js script (`#!/usr/bin/env node`). Since the
+> server spawns workers without sourcing shell profiles, both `gemini` and `node` must
+> be resolvable. Use the full path to the binary **and** prepend the nvm bin directory
+> to PATH:
+>
+> ```yaml
+> command: ["/Users/you/.nvm/versions/node/v22.x.x/bin/gemini", "--yolo", "--prompt", "..."]
+> env:
+>   PATH: "/Users/you/.nvm/versions/node/v22.x.x/bin:${PATH}"
+>   GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+> ```
+>
+> Find your path with `which gemini` in a terminal where nvm is loaded.
 
 ### Worker environment variables
 

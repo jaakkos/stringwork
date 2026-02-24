@@ -96,6 +96,14 @@ orchestration:
   #   base_branch: ""                  # empty = current HEAD
   #   cleanup_strategy: "on_cancel"    # on_cancel | on_exit | manual
   #   path: ".stringwork/worktrees"
+  # NOTE: Worker commands use bare names (claude, codex, gemini) as defaults.
+  # The server spawns workers WITHOUT sourcing shell profiles, so tools
+  # installed via version managers (nvm, pyenv) may not be on PATH.
+  # In your live config (~/.config/stringwork/config.yaml), use full paths:
+  #   command: ["/Users/you/.local/bin/claude", ...]
+  # For nvm-installed tools (gemini), also set PATH in env:
+  #   env:
+  #     PATH: "/Users/you/.nvm/versions/node/vXX/bin:${PATH}"
   workers:
     - type: claude-code
       instances: 1
