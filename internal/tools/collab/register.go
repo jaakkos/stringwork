@@ -81,7 +81,7 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	// Task tools (3)
 	registerCreateTask(s, svc, logger, orch)
 	registerListTasks(s, svc, logger)
-	registerUpdateTask(s, svc, logger)
+	registerUpdateTask(s, svc, logger, orch)
 
 	// Planning tools (3)
 	registerCreatePlan(s, svc, logger)

@@ -258,7 +258,7 @@ func checkDependenciesCompleteState(state *domain.CollabState, taskID int) []int
 }
 
 // registerUpdateTask registers the update_task tool.
-func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger) {
+func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator) {
 	s.AddTool(
 		mcp.NewTool("update_task",
 			mcp.WithDescription("Update a shared task's status, assignment, priority, or dependencies."),
@@ -342,6 +342,39 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 						task.BlockedBy = v
 						if v != "" && task.Status != "blocked" {
 							task.Status = "blocked"
+						}
+						if v != "" && orch != nil {
+							blockerType := updatedBy
+							if inst, ok := state.AgentInstances[updatedBy]; ok && inst != nil {
+								blockerType = inst.AgentType
+							}
+							removeTaskFromInstance(state, taskID, oldAssignee)
+
+							newAssignee := orch.ReassignTask(task, state, []string{blockerType})
+							driver := state.DriverID
+							if driver == "" {
+								driver = "cursor"
+							}
+							if newAssignee != "" {
+								task.Status = "pending"
+								state.Messages = append(state.Messages, domain.Message{
+									ID:        state.NextMsgID,
+									From:      "system",
+									To:        driver,
+									Content:   fmt.Sprintf("🔄 **Task #%d reassigned**: %s blocked by %q — reassigned to **%s**.", taskID, updatedBy, v, newAssignee),
+									Timestamp: time.Now(),
+								})
+								state.NextMsgID++
+							} else {
+								state.Messages = append(state.Messages, domain.Message{
+									ID:        state.NextMsgID,
+									From:      "system",
+									To:        driver,
+									Content:   fmt.Sprintf("⊘ **Task #%d blocked**: %s blocked by %q — no alternative worker available.", taskID, updatedBy, v),
+									Timestamp: time.Now(),
+								})
+								state.NextMsgID++
+							}
 						}
 					}
 					if depID, ok := args["add_dependency"].(float64); ok {

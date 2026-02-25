@@ -21,6 +21,14 @@ func testServer(svc *app.CollabService, logger *log.Logger) *server.MCPServer {
 	return s
 }
 
+// testServerWithOrch creates a MCPServer with an orchestrator for testing reassignment.
+func testServerWithOrch(svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator) *server.MCPServer {
+	s := server.NewMCPServer("test", "1.0.0")
+	registry := app.NewSessionRegistry()
+	Register(s, svc, logger, registry, orch)
+	return s
+}
+
 // callTool calls a registered tool via the MCPServer's HandleMessage.
 // Returns the parsed CallToolResult or an error.
 func callTool(t *testing.T, s *server.MCPServer, name string, args map[string]any) (*mcp.CallToolResult, error) {

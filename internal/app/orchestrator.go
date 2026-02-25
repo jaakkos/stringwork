@@ -145,3 +145,69 @@ func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabSta
 	inst.LastHeartbeat = time.Now()
 	return inst.InstanceID
 }
+
+// ReassignTask finds a different worker for a task, excluding the given agent types.
+// Used when a worker marks a task as blocked — the task should move to another worker type.
+// Returns the new instance ID, or "" if no alternative worker is available.
+func (o *TaskOrchestrator) ReassignTask(task *domain.Task, state *domain.CollabState, excludeTypes []string) string {
+	if state.DriverID == "" {
+		return ""
+	}
+	inst := selectWithExclusions(task, state, excludeTypes)
+	if inst == nil {
+		return ""
+	}
+	task.AssignedTo = inst.InstanceID
+	inst.CurrentTasks = append(inst.CurrentTasks, task.ID)
+	inst.Status = "busy"
+	inst.LastHeartbeat = time.Now()
+	return inst.InstanceID
+}
+
+// selectWithExclusions picks the least-loaded worker that matches task capabilities
+// but is not one of the excluded agent types.
+func selectWithExclusions(task *domain.Task, state *domain.CollabState, excludeTypes []string) *domain.AgentInstance {
+	excluded := make(map[string]bool, len(excludeTypes))
+	for _, t := range excludeTypes {
+		excluded[t] = true
+	}
+
+	var best *domain.AgentInstance
+	for _, inst := range state.AgentInstances {
+		if inst == nil || inst.Role != domain.RoleWorker {
+			continue
+		}
+		if excluded[inst.AgentType] {
+			continue
+		}
+		if task.WorkerType != "" && inst.AgentType != task.WorkerType {
+			continue
+		}
+		if len(task.Capabilities) > 0 {
+			hasAll := true
+			for _, need := range task.Capabilities {
+				found := false
+				for _, c := range inst.Capabilities {
+					if c == need {
+						found = true
+						break
+					}
+				}
+				if !found {
+					hasAll = false
+					break
+				}
+			}
+			if !hasAll {
+				continue
+			}
+		}
+		if len(inst.CurrentTasks) >= inst.MaxTasks {
+			continue
+		}
+		if best == nil || len(inst.CurrentTasks) < len(best.CurrentTasks) {
+			best = inst
+		}
+	}
+	return best
+}

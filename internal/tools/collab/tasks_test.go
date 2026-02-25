@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
 
@@ -617,6 +618,141 @@ func TestUpdateTask_InProgressAfterDependencyComplete(t *testing.T) {
 
 	if repo.state.Tasks[1].Status != "in_progress" {
 		t.Error("task should be in_progress")
+	}
+}
+
+func TestUpdateTask_BlockedByReassignsToOtherWorker(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	orch := app.NewTaskOrchestrator(svc, "least_loaded")
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", MaxTasks: 5},
+		"gemini":      {InstanceID: "gemini", AgentType: "gemini", Role: domain.RoleWorker, Status: "busy", MaxTasks: 3, CurrentTasks: []int{1}},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", MaxTasks: 3},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Review code", Status: "in_progress", AssignedTo: "gemini", CreatedBy: "cursor"},
+	}
+	repo.state.NextMsgID = 1
+
+	srv := testServerWithOrch(svc, logger, orch)
+
+	args := map[string]any{
+		"id":         float64(1),
+		"blocked_by": "Cannot access repository",
+		"updated_by": "gemini",
+	}
+
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if task.AssignedTo != "claude-code" {
+		t.Errorf("task should be reassigned to claude-code, got %q", task.AssignedTo)
+	}
+	if task.Status != "pending" {
+		t.Errorf("status should be 'pending' after reassignment, got %q", task.Status)
+	}
+	if task.BlockedBy != "Cannot access repository" {
+		t.Errorf("blocked_by should be preserved, got %q", task.BlockedBy)
+	}
+
+	found := false
+	for _, msg := range repo.state.Messages {
+		if msg.From == "system" && msg.To == "cursor" && strings.Contains(msg.Content, "reassigned") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("driver should receive a system message about the reassignment")
+	}
+}
+
+func TestUpdateTask_BlockedByNoAlternativeWorker(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	orch := app.NewTaskOrchestrator(svc, "least_loaded")
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor": {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", MaxTasks: 5},
+		"gemini": {InstanceID: "gemini", AgentType: "gemini", Role: domain.RoleWorker, Status: "busy", MaxTasks: 3, CurrentTasks: []int{1}},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Review code", Status: "in_progress", AssignedTo: "gemini", CreatedBy: "cursor"},
+	}
+	repo.state.NextMsgID = 1
+
+	srv := testServerWithOrch(svc, logger, orch)
+
+	args := map[string]any{
+		"id":         float64(1),
+		"blocked_by": "Cannot access repository",
+		"updated_by": "gemini",
+	}
+
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if task.Status != "blocked" {
+		t.Errorf("status should remain 'blocked' when no alternative, got %q", task.Status)
+	}
+	if task.BlockedBy != "Cannot access repository" {
+		t.Errorf("blocked_by should be set, got %q", task.BlockedBy)
+	}
+
+	found := false
+	for _, msg := range repo.state.Messages {
+		if msg.From == "system" && msg.To == "cursor" && strings.Contains(msg.Content, "no alternative") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("driver should receive a system message about no alternative worker")
+	}
+}
+
+func TestUpdateTask_BlockedByNilOrchestrator(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", MaxTasks: 5},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", MaxTasks: 3},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Review code", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+	}
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"id":         float64(1),
+		"blocked_by": "Waiting for API key",
+		"updated_by": "claude-code",
+	}
+
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if task.Status != "blocked" {
+		t.Errorf("status should be 'blocked' without orchestrator, got %q", task.Status)
+	}
+	if task.AssignedTo != "claude-code" {
+		t.Errorf("assignee should not change without orchestrator, got %q", task.AssignedTo)
 	}
 }
 
