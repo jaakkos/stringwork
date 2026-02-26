@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Stringwork Settings</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.6;
+      padding: 32px;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 20px;
+      margin-bottom: 24px;
+      font-weight: 600;
+    }
+    .field {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+    input[type="text"], select {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent);
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .toggle-row label {
+      margin-bottom: 0;
+      color: var(--text);
+      cursor: pointer;
+    }
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+    button {
+      padding: 8px 20px;
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button:hover { opacity: 0.9; }
+    .saved {
+      color: var(--green);
+      font-size: 13px;
+      margin-left: 12px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .saved.show { opacity: 1; }
+    .actions {
+      display: flex;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Stringwork Settings</h1>
+
+  <div class="field">
+    <label for="server-url">Server URL</label>
+    <input type="text" id="server-url" placeholder="http://localhost:8943">
+    <div class="hint">Set <code>http_port: 8943</code> in <code>~/.config/stringwork/config.yaml</code> for a fixed port.</div>
+  </div>
+
+  <div class="field">
+    <label for="poll-interval">Background poll interval</label>
+    <select id="poll-interval">
+      <option value="60">1 minute</option>
+      <option value="120">2 minutes</option>
+    </select>
+    <div class="hint">Chrome MV3 requires a minimum alarm interval of 1 minute. Active polling while the popup is open is always 5 seconds.</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <input type="checkbox" id="notifications" checked>
+      <label for="notifications">Desktop notifications</label>
+    </div>
+    <div class="hint">Get notified when workers go offline, tasks are blocked, or SLAs are exceeded.</div>
+  </div>
+
+  <div class="actions">
+    <button id="save-btn">Save</button>
+    <span id="saved-msg" class="saved">Saved</span>
+  </div>
+
+  <script src="shared.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

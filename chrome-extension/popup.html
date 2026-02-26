@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Stringwork</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Offline overlay (hidden by default) -->
+  <div id="offline" class="offline-msg" style="display:none">
+    <div class="icon">&#x26A0;</div>
+    <h2>Server unreachable</h2>
+    <p id="offline-url"></p>
+    <a href="#" id="open-options">Open settings</a>
+  </div>
+
+  <!-- Main content (shown when connected) -->
+  <div id="main">
+    <!-- Status bar -->
+    <div class="status-bar">
+      <span id="conn-dot" class="conn-dot"></span>
+      <span id="workspace" class="workspace"></span>
+      <a href="#" id="open-dashboard">Dashboard</a>
+    </div>
+
+    <!-- Workers -->
+    <div class="section">
+      <div class="section-header">Workers <span id="worker-count" class="count">0</span></div>
+      <div id="workers" class="section-body"></div>
+    </div>
+
+    <!-- Tasks -->
+    <div class="section">
+      <div class="section-header">
+        Tasks <span id="task-count" class="count">0</span>
+      </div>
+      <div id="tasks" class="section-body"></div>
+    </div>
+
+    <!-- Messages (collapsed) -->
+    <div class="section">
+      <button id="msg-toggle" class="section-header collapsible" aria-expanded="false" aria-controls="messages">
+        Messages <span id="msg-count" class="count">0</span>
+      </button>
+      <div id="messages" class="section-body collapsed"></div>
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="bottom-bar">
+      <button id="restart-btn" class="btn">Restart Workers</button>
+      <span class="spacer"></span>
+      <button id="gear-btn" class="gear-btn" title="Settings" aria-label="Settings">&#x2699;</button>
+    </div>
+  </div>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

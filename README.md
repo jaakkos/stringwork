@@ -258,6 +258,7 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 │   ├── knowledge/           # FTS5 project knowledge indexer
 │   ├── worktree/            # Git worktree manager for worker isolation
 │   └── tools/collab/        # 23 MCP tool handlers
+├── chrome-extension/         # Chrome extension for toolbar monitoring (alpha)
 ├── cursor-plugin/           # Cursor IDE plugin (rules, skills, agents, commands, hooks)
 ├── mcp/                     # Configuration files
 ├── scripts/                 # Install, dev-install, hook install/uninstall scripts
@@ -330,6 +331,36 @@ cp /tmp/stringwork/mcp/config.yaml ~/.config/stringwork/config.yaml
 | **Hooks** (1) | Binary existence check on session start |
 
 The plugin is purely additive — it does not modify any existing project files.
+
+## Chrome Extension (alpha)
+
+A browser extension that brings Stringwork monitoring to your toolbar -- see worker status, task progress, and receive desktop notifications without switching to the dashboard.
+
+**What it does:**
+
+- **Badge counter** on the toolbar icon shows attention-needed items (blocked tasks, offline workers, SLA violations, unread messages)
+- **Popup dashboard** with live worker status, active tasks with progress bars, and recent messages -- polls every 5 seconds while open
+- **Desktop notifications** when workers go offline, tasks get blocked, SLAs are exceeded, or progress stalls
+- **Quick actions** -- restart workers (with confirmation) and jump to the full dashboard
+
+**Architecture:** The extension is built on Manifest V3 with a service worker that polls `/api/state`. All API access is centralized in the service worker; the popup communicates via `chrome.runtime.sendMessage`. State is persisted in `chrome.storage.local` to survive MV3 service worker termination. Background polling uses `chrome.alarms` (1-minute minimum); active polling at 5-second intervals only runs while the popup is open.
+
+**Install (unpacked, developer mode):**
+
+1. Set a fixed HTTP port in your config (required -- auto-assigned ports change on restart):
+   ```yaml
+   # ~/.config/stringwork/config.yaml
+   http_port: 8943
+   ```
+
+2. Load the extension in Chrome:
+   - Navigate to `chrome://extensions/`
+   - Enable **Developer mode** (toggle in top-right)
+   - Click **Load unpacked** and select the `chrome-extension/` directory from this repo
+
+3. Click the Stringwork icon in your toolbar. Configure the server URL in the extension options if needed (default: `http://localhost:8943`).
+
+> **Note:** This is alpha software. The extension is functional but has not been published to the Chrome Web Store. After pulling code changes, reload the extension from `chrome://extensions/` to pick them up.
 
 ## Documentation
 

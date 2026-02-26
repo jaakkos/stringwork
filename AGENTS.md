@@ -11,6 +11,7 @@ This repository is a Go MCP server for pair-programming coordination. It support
 - `internal/policy/`: workspace and safety policy; orchestration config (driver, workers).
 - `mcp/`: runtime config (`config.yaml` with `daemon`, `orchestration` sections).
 - `docs/`: setup, architecture, and workflow docs.
+- `chrome-extension/`: Chrome browser extension (alpha) — toolbar popup, badge counter, desktop notifications. Vanilla JS, Manifest V3.
 - `scripts/`: install, dev-install, hook install/uninstall scripts.
 
 ## Build, Test, and Development Commands
