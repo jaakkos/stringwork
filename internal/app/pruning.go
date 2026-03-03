@@ -33,6 +33,22 @@ func PruneMessages(state *domain.CollabState, maxCount, maxAgeDays int) int {
 	return pruned
 }
 
+// PruneAuditEntries removes audit logs older than the given days.
+func PruneAuditEntries(writer AuditWriter, logger interface{ Printf(string, ...interface{}) }, maxAgeDays int) {
+	if writer == nil || maxAgeDays <= 0 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
+	count, err := writer.PruneAudit(cutoff)
+	if err != nil {
+		logger.Printf("Warning: failed to prune audit logs: %v", err)
+		return
+	}
+	if count > 0 {
+		logger.Printf("Pruned %d audit logs older than %d days", count, maxAgeDays)
+	}
+}
+
 // EnsureStateMaps initializes nil maps/slices on state for backward compatibility.
 func EnsureStateMaps(state *domain.CollabState) {
 	if state == nil {

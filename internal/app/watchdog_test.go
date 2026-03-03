@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -705,6 +706,194 @@ func TestWatchdog_RefreshHeartbeatsOnStartup(t *testing.T) {
 	if state.AgentInstances["cursor"].Status != "idle" {
 		t.Errorf("driver status should be preserved, got %q", state.AgentInstances["cursor"].Status)
 	}
+}
+
+// ========== DLQ auto-block tests ==========
+
+func TestWatchdog_DLQ_FailureCountIncrements(t *testing.T) {
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Flaky task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(3),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 1 {
+			t.Errorf("FailureCount = %d, want 1", task.FailureCount)
+		}
+		if task.Status != "pending" {
+			t.Errorf("Status = %q, want pending (below max failures)", task.Status)
+		}
+		if task.FailureReason == "" {
+			t.Error("FailureReason should be set")
+		}
+		if task.LastFailure.IsZero() {
+			t.Error("LastFailure should be set")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_DLQ_AutoBlockAfterMaxFailures(t *testing.T) {
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	// Task already at threshold - 1
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Repeatedly failing", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount:  2, // one more will hit max of 3
+		FailureReason: "previous failure",
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(3),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 3 {
+			t.Errorf("FailureCount = %d, want 3", task.FailureCount)
+		}
+		if task.Status != "blocked" {
+			t.Errorf("Status = %q, want blocked (at max failures)", task.Status)
+		}
+		if task.BlockedBy == "" {
+			t.Error("BlockedBy should explain the auto-block")
+		}
+		if !strings.Contains(task.BlockedBy, "3 failures") {
+			t.Errorf("BlockedBy should mention failure count: %q", task.BlockedBy)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_DLQ_CustomMaxFailures(t *testing.T) {
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Custom threshold", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(1), // block on first failure
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.Status != "blocked" {
+			t.Errorf("Status = %q, want blocked (maxTaskFailures=1)", task.Status)
+		}
+		if task.FailureCount != 1 {
+			t.Errorf("FailureCount = %d, want 1", task.FailureCount)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_DLQ_BelowMaxNotBlocked(t *testing.T) {
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "First failure", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(5),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.Status != "pending" {
+			t.Errorf("Status = %q, want pending (failure 1 of 5)", task.Status)
+		}
+		return nil
+	})
 }
 
 // mockTriggerable records Trigger calls.

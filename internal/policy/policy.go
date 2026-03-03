@@ -54,7 +54,8 @@ type OrchestrationConfig struct {
 	AssignmentStrategy       string          `yaml:"assignment_strategy"` // least_loaded (default), capability_match, round_robin
 	HeartbeatIntervalSeconds int             `yaml:"heartbeat_interval_seconds"`
 	WorkerTimeoutSeconds     int             `yaml:"worker_timeout_seconds"`
-	Worktrees                *WorktreeConfig `yaml:"worktrees"` // optional git worktree isolation
+	MaxTaskFailures          int             `yaml:"max_task_failures"` // DLQ: auto-block task after N watchdog failures
+	Worktrees                *WorktreeConfig `yaml:"worktrees"`         // optional git worktree isolation
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with
@@ -102,6 +103,15 @@ type Config struct {
 	Orchestration *OrchestrationConfig       `yaml:"orchestration"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
 	Daemon        *DaemonConfig              `yaml:"daemon"`
+	Audit         *AuditConfig               `yaml:"audit"`
+}
+
+// AuditConfig controls audit logging behavior.
+// Uses `disabled: true` in config to turn off; omitting the section or field keeps audit ON.
+type AuditConfig struct {
+	Disabled      bool `yaml:"disabled"`
+	ArgsMaxLen    int  `yaml:"args_max_len"`
+	RetentionDays int  `yaml:"retention_days"`
 }
 
 // DefaultConfig returns sensible defaults. Orchestration is always set (driver cursor, no workers).
@@ -274,6 +284,14 @@ func (p *Policy) Orchestration() *OrchestrationConfig {
 	return p.config.Orchestration
 }
 
+// MaxTaskFailures returns the failure threshold before a task is auto-blocked (default: 3).
+func (p *Policy) MaxTaskFailures() int {
+	if p.config.Orchestration != nil && p.config.Orchestration.MaxTaskFailures > 0 {
+		return p.config.Orchestration.MaxTaskFailures
+	}
+	return 3
+}
+
 // MCPServers returns the configured MCP servers that should be auto-registered
 // with worker CLIs. Returns nil if no servers are configured.
 func (p *Policy) MCPServers() map[string]MCPServerConfig {
@@ -317,4 +335,29 @@ func (p *Policy) DaemonGracePeriodSeconds() int {
 		return p.config.Daemon.GracePeriodSecs
 	}
 	return 10
+}
+
+// AuditEnabled returns whether audit logging is active (default: true).
+// Uses a `disabled` field so the Go zero value (false) means "not disabled" = enabled.
+func (p *Policy) AuditEnabled() bool {
+	if p.config.Audit == nil {
+		return true
+	}
+	return !p.config.Audit.Disabled
+}
+
+// AuditArgsMaxLen returns the max length for audit arg summaries (default: 1000).
+func (p *Policy) AuditArgsMaxLen() int {
+	if p.config.Audit != nil && p.config.Audit.ArgsMaxLen > 0 {
+		return p.config.Audit.ArgsMaxLen
+	}
+	return 1000
+}
+
+// AuditRetentionDays returns how many days of audit logs to keep (default: 7).
+func (p *Policy) AuditRetentionDays() int {
+	if p.config.Audit != nil && p.config.Audit.RetentionDays > 0 {
+		return p.config.Audit.RetentionDays
+	}
+	return 7
 }

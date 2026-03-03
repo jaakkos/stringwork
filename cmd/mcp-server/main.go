@@ -54,6 +54,12 @@ func main() {
 		case "status":
 			runStatusCommand()
 			return
+		case "audit":
+			runAuditCommand()
+			return
+		case "discover":
+			runDiscoverCommand()
+			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
 			return
@@ -133,6 +139,17 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	}
 	svc := app.NewCollabService(repo, pol, logger)
 
+	var auditWriter app.AuditWriter
+	if pol.AuditEnabled() {
+		if aw, ok := repo.(app.AuditWriter); ok {
+			auditWriter = aw
+			app.PruneAuditEntries(auditWriter, logger, pol.AuditRetentionDays())
+			logger.Printf("Audit logging enabled (args_max_len=%d, retention=%dd)", pol.AuditArgsMaxLen(), pol.AuditRetentionDays())
+		}
+	} else {
+		logger.Println("Audit logging disabled via config")
+	}
+
 	if err := svc.Run(func(state *domain.CollabState) error {
 		app.RefreshHeartbeatsOnStartup(state)
 		return nil
@@ -206,7 +223,11 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		"mcp-stringwork",
 		Version,
 		server.WithInstructions(collab.InstructionsText()),
-		server.WithToolHandlerMiddleware(collab.PiggybackMiddleware(svc, registry)),
+		server.WithToolHandlerMiddleware(func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+			audit := collab.AuditMiddleware(auditWriter, registry, pol.AuditArgsMaxLen())
+			piggy := collab.PiggybackMiddleware(svc, registry)
+			return audit(piggy(next))
+		}),
 		server.WithHooks(hooks),
 		server.WithResourceCapabilities(false, true),
 	)
@@ -329,6 +350,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 
 	watchdog := app.NewWatchdog(svc, registry, logger,
 		app.WithWatchdogNotifier(notifier),
+		app.WithPolicy(pol),
 	)
 	go watchdog.Start(ctx)
 
@@ -602,4 +624,106 @@ func runStatusCommand() {
 	}
 
 	fmt.Printf("unread=%d pending=%d\n", unread, pending)
+}
+
+func runAuditCommand() {
+	logger := log.New(os.Stderr, "", 0)
+	cfg := loadConfig(logger)
+	pol := policy.New(cfg)
+
+	repo, err := repository.NewStateRepository(pol.StateFile())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	reader, ok := repo.(app.AuditReader)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Audit not supported by repository\n")
+		os.Exit(1)
+	}
+
+	filter := app.AuditFilter{}
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--agent=") {
+			filter.Agent = strings.TrimPrefix(arg, "--agent=")
+		} else if strings.HasPrefix(arg, "--tool=") {
+			filter.ToolName = strings.TrimPrefix(arg, "--tool=")
+		} else if strings.HasPrefix(arg, "--session=") {
+			filter.SessionID = strings.TrimPrefix(arg, "--session=")
+		}
+	}
+
+	entries, err := reader.ReadAudit(filter)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading audit: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%-20s %-15s %-25s %8s  %s\n", "TIMESTAMP", "AGENT", "TOOL", "MS", "ERROR")
+	fmt.Println(strings.Repeat("-", 90))
+	for _, e := range entries {
+		fmt.Printf("%-20s %-15s %-25s %8d  %s\n",
+			e.Timestamp.Format("2006-01-02 15:04:05"),
+			e.Agent,
+			e.ToolName,
+			e.DurationMs,
+			e.Error)
+	}
+}
+
+func runDiscoverCommand() {
+	fmt.Println("Scanning for AI agent CLIs...")
+	fmt.Println()
+
+	type agentInfo struct {
+		name     string
+		binaries []string
+		desc     string
+	}
+
+	agents := []agentInfo{
+		{"claude-code", []string{"claude"}, "Anthropic Claude Code CLI"},
+		{"codex", []string{"codex"}, "OpenAI Codex CLI"},
+		{"gemini", []string{"gemini"}, "Google Gemini CLI"},
+	}
+
+	fmt.Printf("%-15s %-10s %-45s %s\n", "AGENT", "STATUS", "PATH", "DESCRIPTION")
+	fmt.Println(strings.Repeat("-", 90))
+
+	var foundAgents []agentInfo
+	for _, a := range agents {
+		found := false
+		for _, bin := range a.binaries {
+			for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+				path := filepath.Join(dir, bin)
+				if info, err := os.Stat(path); err == nil && !info.IsDir() {
+					fmt.Printf("%-15s %-10s %-45s %s\n", a.name, "FOUND", path, a.desc)
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			fmt.Printf("%-15s %-10s %-45s %s\n", a.name, "not found", "", a.desc)
+		} else {
+			foundAgents = append(foundAgents, a)
+		}
+	}
+
+	if len(foundAgents) > 0 {
+		fmt.Println("\nSuggested orchestration.workers config:")
+		fmt.Println()
+		fmt.Println("orchestration:")
+		fmt.Println("  workers:")
+		for _, a := range foundAgents {
+			fmt.Printf("    - type: %s\n", a.name)
+			fmt.Printf("      instances: 1\n")
+			fmt.Printf("      timeout_seconds: 600\n")
+		}
+	}
 }

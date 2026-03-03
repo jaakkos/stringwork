@@ -376,6 +376,155 @@ workspace_root: /test
 	}
 }
 
+// ========== Audit config tests ==========
+
+func TestAuditEnabled_DefaultTrue(t *testing.T) {
+	pol := New(&Config{})
+	if !pol.AuditEnabled() {
+		t.Error("AuditEnabled() should default to true when Audit section is nil")
+	}
+}
+
+func TestAuditEnabled_ExplicitlyDisabled(t *testing.T) {
+	pol := New(&Config{
+		Audit: &AuditConfig{Disabled: true},
+	})
+	if pol.AuditEnabled() {
+		t.Error("AuditEnabled() should be false when Disabled=true")
+	}
+}
+
+func TestAuditEnabled_SectionPresentNotDisabled(t *testing.T) {
+	pol := New(&Config{
+		Audit: &AuditConfig{},
+	})
+	if !pol.AuditEnabled() {
+		t.Error("AuditEnabled() should be true when Audit section exists but Disabled is zero-value (false)")
+	}
+}
+
+func TestAuditEnabled_FromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name   string
+		yaml   string
+		wantOn bool
+	}{
+		{
+			name:   "no audit section",
+			yaml:   "workspace_root: /test\n",
+			wantOn: true,
+		},
+		{
+			name:   "empty audit section",
+			yaml:   "workspace_root: /test\naudit: {}\n",
+			wantOn: true,
+		},
+		{
+			name:   "disabled true",
+			yaml:   "workspace_root: /test\naudit:\n  disabled: true\n",
+			wantOn: false,
+		},
+		{
+			name:   "disabled false",
+			yaml:   "workspace_root: /test\naudit:\n  disabled: false\n",
+			wantOn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(tmpDir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			pol := New(cfg)
+			if pol.AuditEnabled() != tt.wantOn {
+				t.Errorf("AuditEnabled() = %v, want %v", pol.AuditEnabled(), tt.wantOn)
+			}
+		})
+	}
+}
+
+func TestAuditArgsMaxLen_Default(t *testing.T) {
+	pol := New(&Config{})
+	if pol.AuditArgsMaxLen() != 1000 {
+		t.Errorf("AuditArgsMaxLen() = %d, want 1000", pol.AuditArgsMaxLen())
+	}
+}
+
+func TestAuditArgsMaxLen_Custom(t *testing.T) {
+	pol := New(&Config{
+		Audit: &AuditConfig{ArgsMaxLen: 500},
+	})
+	if pol.AuditArgsMaxLen() != 500 {
+		t.Errorf("AuditArgsMaxLen() = %d, want 500", pol.AuditArgsMaxLen())
+	}
+}
+
+func TestAuditRetentionDays_Default(t *testing.T) {
+	pol := New(&Config{})
+	if pol.AuditRetentionDays() != 7 {
+		t.Errorf("AuditRetentionDays() = %d, want 7", pol.AuditRetentionDays())
+	}
+}
+
+func TestAuditRetentionDays_Custom(t *testing.T) {
+	pol := New(&Config{
+		Audit: &AuditConfig{RetentionDays: 30},
+	})
+	if pol.AuditRetentionDays() != 30 {
+		t.Errorf("AuditRetentionDays() = %d, want 30", pol.AuditRetentionDays())
+	}
+}
+
+func TestMaxTaskFailures_Default(t *testing.T) {
+	pol := New(&Config{})
+	if pol.MaxTaskFailures() != 3 {
+		t.Errorf("MaxTaskFailures() = %d, want 3", pol.MaxTaskFailures())
+	}
+}
+
+func TestMaxTaskFailures_Custom(t *testing.T) {
+	pol := New(&Config{
+		Orchestration: &OrchestrationConfig{MaxTaskFailures: 5},
+	})
+	if pol.MaxTaskFailures() != 5 {
+		t.Errorf("MaxTaskFailures() = %d, want 5", pol.MaxTaskFailures())
+	}
+}
+
+func TestMaxTaskFailures_FromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := `
+workspace_root: /test
+orchestration:
+  driver: cursor
+  max_task_failures: 10
+  workers:
+    - type: claude-code
+      instances: 1
+`
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	pol := New(cfg)
+	if pol.MaxTaskFailures() != 10 {
+		t.Errorf("MaxTaskFailures() = %d, want 10", pol.MaxTaskFailures())
+	}
+}
+
 func TestMCPServers_EmptyMap(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

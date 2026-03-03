@@ -29,6 +29,7 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithString("parent_context_id", mcp.Description("Parent work context ID for subtask inheritance")),
 			mcp.WithArray("depends_on", mcp.Description("Task IDs this task depends on")),
 			mcp.WithNumber("expected_duration_seconds", mcp.Description("Expected task duration in seconds. The watchdog alerts the driver if this SLA is exceeded. Example: 300 for a 5-minute task.")),
+			mcp.WithBoolean("requires_review", mcp.Description("Whether this task requires manual review approval before it can be marked completed")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -114,6 +115,11 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					}
 				}
 
+				requiresReview, _ := args["requires_review"].(bool)
+				reviewStatus := ""
+				if requiresReview {
+					reviewStatus = "pending"
+				}
 				task := domain.Task{
 					ID:                  state.NextTaskID,
 					Title:               title,
@@ -126,6 +132,8 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					Priority:            priority,
 					Dependencies:        dependencies,
 					ExpectedDurationSec: expectedDurationSec,
+					RequiresReview:      requiresReview,
+					ReviewStatus:        reviewStatus,
 				}
 				state.Tasks = append(state.Tasks, task)
 				taskID = state.NextTaskID
@@ -197,6 +205,24 @@ func registerListTasks(s *server.MCPServer, svc *app.CollabService, logger *log.
 					result += fmt.Sprintf("Task #%d [%s] - %s\n", task.ID, task.Status, task.Title)
 					if task.Description != "" {
 						result += fmt.Sprintf("  Description: %s\n", task.Description)
+					}
+					if len(task.Dependencies) > 0 {
+						incomplete := checkDependenciesCompleteState(state, task.ID)
+						if len(incomplete) > 0 {
+							result += fmt.Sprintf("  Blocked by deps: %v\n", incomplete)
+						} else {
+							result += "  Dependencies satisfied\n"
+						}
+					}
+					if task.RequiresReview {
+						if task.ReviewedBy != "" {
+							result += fmt.Sprintf("  Review: %s (by %s)\n", task.ReviewStatus, task.ReviewedBy)
+						} else {
+							result += fmt.Sprintf("  Review: %s\n", task.ReviewStatus)
+						}
+					}
+					if task.FailureCount > 0 {
+						result += fmt.Sprintf("  Failures: %d (last: %s)\n", task.FailureCount, task.FailureReason)
 					}
 					result += fmt.Sprintf("  Assigned to: %s, Created by: %s\n\n", task.AssignedTo, task.CreatedBy)
 					count++
@@ -270,6 +296,8 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithNumber("add_dependency", mcp.Description("Task ID to add as dependency")),
 			mcp.WithNumber("remove_dependency", mcp.Description("Task ID to remove from dependencies")),
 			mcp.WithString("blocked_by", mcp.Description("External blocker description (set to empty to clear)")),
+			mcp.WithBoolean("requires_review", mcp.Description("Whether this task requires manual review before completion")),
+			mcp.WithString("review_status", mcp.Description("New review status"), mcp.Enum("pending", "approved", "rejected")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -305,7 +333,26 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 								return fmt.Errorf("cannot start: dependencies not complete: %v", incomplete)
 							}
 						}
+						if v == "completed" && task.RequiresReview && task.ReviewStatus != "approved" {
+							return fmt.Errorf("cannot complete task: review required (current status: %s)", task.ReviewStatus)
+						}
 						task.Status = v
+					}
+					if v, ok := args["requires_review"].(bool); ok {
+						task.RequiresReview = v
+						if v && task.ReviewStatus == "" {
+							task.ReviewStatus = "pending"
+						}
+					}
+					if v, ok := args["review_status"].(string); ok {
+						if v == "approved" && task.AssignedTo == updatedBy {
+							return fmt.Errorf("assignee cannot approve their own task")
+						}
+						task.ReviewStatus = v
+						task.ReviewedBy = updatedBy
+						if v == "rejected" {
+							task.Status = "pending" // Re-open for fixes
+						}
 					}
 					if v, ok := args["assigned_to"].(string); ok {
 						if err := app.ValidateAgent(v, state, true, false, extra...); err != nil {
@@ -424,6 +471,83 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 
 			logger.Printf("Task #%d updated by %s", taskID, updatedBy)
 			return mcp.NewToolResultText(fmt.Sprintf("Task #%d updated", taskID)), nil
+		},
+	)
+}
+
+// registerReplayTask registers the replay_task tool.
+func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger) {
+	s.AddTool(
+		mcp.NewTool("replay_task",
+			mcp.WithDescription("Reset failure tracking and re-queue a blocked task. Only works on blocked or pending tasks (rejects in_progress to avoid races)."),
+			mcp.WithNumber("id", mcp.Required(), mcp.Description("Task ID to replay")),
+			mcp.WithString("updated_by", mcp.Required(), mcp.Description("Who is replaying the task")),
+			mcp.WithString("reassign_to", mcp.Description("Who to assign the replayed task to. Default: 'any' (let orchestrator pick). Use 'keep' to preserve the current assignee.")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := req.GetArguments()
+			id, err := requireFloat64(args, "id")
+			if err != nil {
+				return nil, err
+			}
+			updatedBy, err := requireString(args, "updated_by")
+			if err != nil {
+				return nil, err
+			}
+			reassignTo, _ := args["reassign_to"].(string)
+			if reassignTo == "" {
+				reassignTo = "any"
+			}
+
+			taskID := int(id)
+			var effectiveAssignee string
+			if err := svc.Run(func(state *domain.CollabState) error {
+				extra := app.RegisteredAgentNames(state)
+				if err := app.ValidateAgent(updatedBy, state, false, false, extra...); err != nil {
+					return err
+				}
+				if reassignTo != "keep" {
+					if err := app.ValidateAgent(reassignTo, state, true, false, extra...); err != nil {
+						return err
+					}
+				}
+				for i := range state.Tasks {
+					if state.Tasks[i].ID != taskID {
+						continue
+					}
+					task := &state.Tasks[i]
+					if task.Status != "blocked" && task.Status != "pending" {
+						return fmt.Errorf("cannot replay task #%d: status is '%s' (only blocked or pending tasks can be replayed)", taskID, task.Status)
+					}
+					task.Status = "pending"
+					task.FailureCount = 0
+					task.FailureReason = ""
+					task.LastFailure = time.Time{}
+					task.BlockedBy = ""
+					task.ResultSummary = ""
+					task.ProgressDescription = ""
+					task.ProgressPercent = 0
+					task.UpdatedAt = time.Now()
+					if task.RequiresReview {
+						task.ReviewStatus = "pending"
+						task.ReviewedBy = ""
+					} else {
+						task.ReviewStatus = ""
+						task.ReviewedBy = ""
+					}
+					if reassignTo != "keep" {
+						task.AssignedTo = reassignTo
+					}
+					effectiveAssignee = task.AssignedTo
+					return nil
+				}
+				return fmt.Errorf("task #%d not found", taskID)
+			}); err != nil {
+				return nil, err
+			}
+
+			logger.Printf("Task #%d replayed by %s (assigned to: %s)", taskID, updatedBy, effectiveAssignee)
+			return mcp.NewToolResultText(fmt.Sprintf("Task #%d replayed and reset to pending (assigned to: %s)", taskID, effectiveAssignee)), nil
 		},
 	)
 }

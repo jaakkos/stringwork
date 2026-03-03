@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
 
@@ -212,6 +213,264 @@ func TestSelfHealingIDs_EmptyState(t *testing.T) {
 	}
 	if loaded.NextNoteID != 1 {
 		t.Errorf("NextNoteID = %d, want 1 (empty state)", loaded.NextNoteID)
+	}
+}
+
+// ========== Audit log store tests ==========
+
+func TestWriteAudit_Basic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	entry := domain.AuditEntry{
+		Timestamp:   time.Now(),
+		Agent:       "cursor",
+		ToolName:    "create_task",
+		ArgsSummary: `{"title":"test"}`,
+		DurationMs:  42,
+		SessionID:   "sess-1",
+	}
+
+	if err := st.WriteAudit(entry); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Agent != "cursor" {
+		t.Errorf("Agent = %q, want cursor", entries[0].Agent)
+	}
+	if entries[0].ToolName != "create_task" {
+		t.Errorf("ToolName = %q, want create_task", entries[0].ToolName)
+	}
+	if entries[0].DurationMs != 42 {
+		t.Errorf("DurationMs = %d, want 42", entries[0].DurationMs)
+	}
+	if entries[0].SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want sess-1", entries[0].SessionID)
+	}
+}
+
+func TestWriteAudit_WithError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	entry := domain.AuditEntry{
+		Timestamp:  time.Now(),
+		Agent:      "claude-code",
+		ToolName:   "update_task",
+		DurationMs: 10,
+		Error:      "task not found",
+	}
+	if err := st.WriteAudit(entry); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if entries[0].Error != "task not found" {
+		t.Errorf("Error = %q, want 'task not found'", entries[0].Error)
+	}
+}
+
+func TestReadAudit_FilterByAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	now := time.Now()
+	for _, agent := range []string{"cursor", "claude-code", "cursor", "codex"} {
+		_ = st.WriteAudit(domain.AuditEntry{Timestamp: now, Agent: agent, ToolName: "test", DurationMs: 1})
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{Agent: "cursor"})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 cursor entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Agent != "cursor" {
+			t.Errorf("unexpected agent %q in filtered results", e.Agent)
+		}
+	}
+}
+
+func TestReadAudit_FilterByToolName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	now := time.Now()
+	for _, tool := range []string{"create_task", "list_tasks", "create_task", "heartbeat"} {
+		_ = st.WriteAudit(domain.AuditEntry{Timestamp: now, Agent: "a", ToolName: tool, DurationMs: 1})
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{ToolName: "create_task"})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 create_task entries, got %d", len(entries))
+	}
+}
+
+func TestReadAudit_DefaultLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		_ = st.WriteAudit(domain.AuditEntry{Timestamp: now.Add(time.Duration(i) * time.Second), Agent: "a", ToolName: "t", DurationMs: 1})
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Errorf("expected 5 entries with default limit, got %d", len(entries))
+	}
+}
+
+func TestReadAudit_CustomLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		_ = st.WriteAudit(domain.AuditEntry{Timestamp: now.Add(time.Duration(i) * time.Second), Agent: "a", ToolName: "t", DurationMs: 1})
+	}
+
+	entries, err := st.ReadAudit(app.AuditFilter{Limit: 3})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("expected 3 entries with limit=3, got %d", len(entries))
+	}
+}
+
+func TestReadAudit_FilterByTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	base := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: base, Agent: "a", ToolName: "t1", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: base.Add(1 * time.Hour), Agent: "a", ToolName: "t2", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: base.Add(2 * time.Hour), Agent: "a", ToolName: "t3", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: base.Add(3 * time.Hour), Agent: "a", ToolName: "t4", DurationMs: 1})
+
+	entries, err := st.ReadAudit(app.AuditFilter{
+		From: base.Add(30 * time.Minute),
+		To:   base.Add(2*time.Hour + 30*time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries in time range, got %d", len(entries))
+	}
+}
+
+func TestPruneAudit_RemovesOldEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	st := store.(*Store)
+	now := time.Now()
+
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: now.Add(-10 * 24 * time.Hour), Agent: "a", ToolName: "old1", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: now.Add(-8 * 24 * time.Hour), Agent: "a", ToolName: "old2", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: now.Add(-1 * 24 * time.Hour), Agent: "a", ToolName: "recent1", DurationMs: 1})
+	_ = st.WriteAudit(domain.AuditEntry{Timestamp: now, Agent: "a", ToolName: "recent2", DurationMs: 1})
+
+	pruned, err := st.PruneAudit(now.Add(-7 * 24 * time.Hour))
+	if err != nil {
+		t.Fatalf("PruneAudit: %v", err)
+	}
+	if pruned != 2 {
+		t.Errorf("pruned = %d, want 2", pruned)
+	}
+
+	remaining, err := st.ReadAudit(app.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("expected 2 remaining entries, got %d", len(remaining))
+	}
+}
+
+func TestReadAudit_EmptyTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.sqlite")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	entries, err := store.(*Store).ReadAudit(app.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if entries != nil {
+		t.Errorf("expected nil for empty table, got %d entries", len(entries))
 	}
 }
 

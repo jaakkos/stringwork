@@ -15,4 +15,8 @@ type Policy interface {
 	IsToolEnabled(name string) bool
 	ValidatePath(path string) (string, error)
 	Orchestration() *policy.OrchestrationConfig
+	MaxTaskFailures() int
+	AuditEnabled() bool
+	AuditArgsMaxLen() int
+	AuditRetentionDays() int
 }

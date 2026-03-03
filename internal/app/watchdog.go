@@ -32,6 +32,10 @@ const (
 	// defaultProgressCriticalThreshold is how long without progress before
 	// a critical alert is sent to the driver.
 	defaultProgressCriticalThreshold = 5 * time.Minute
+
+	// defaultMaxTaskFailures is the number of watchdog-detected failures
+	// before a task is auto-blocked (DLQ behavior).
+	defaultMaxTaskFailures = 3
 )
 
 // Watchdog monitors agent liveness and recovers from stuck states.
@@ -50,16 +54,23 @@ type Watchdog struct {
 	sessionStaleThresh     time.Duration
 	progressWarningThresh  time.Duration
 	progressCriticalThresh time.Duration
+	maxTaskFailures        int
 	notifier               Triggerable
 	stopCh                 chan struct{}
 	doneCh                 chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
 	// Key: taskID, Value: "warning" or "critical".
 	alertedTasks map[int]string
+	pol          Policy
 }
 
 // WatchdogOption configures the watchdog.
 type WatchdogOption func(*Watchdog)
+
+// WithPolicy sets the policy for the watchdog to use for thresholds.
+func WithPolicy(p Policy) WatchdogOption {
+	return func(w *Watchdog) { w.pol = p }
+}
 
 // WithWatchdogInterval sets the check interval.
 func WithWatchdogInterval(d time.Duration) WatchdogOption {
@@ -91,6 +102,11 @@ func WithProgressCriticalThreshold(d time.Duration) WatchdogOption {
 	return func(w *Watchdog) { w.progressCriticalThresh = d }
 }
 
+// WithMaxTaskFailures sets the failure threshold before a task is auto-blocked.
+func WithMaxTaskFailures(n int) WatchdogOption {
+	return func(w *Watchdog) { w.maxTaskFailures = n }
+}
+
 // WithWatchdogNotifier sets the notifier to trigger after recovery actions.
 func WithWatchdogNotifier(n Triggerable) WatchdogOption {
 	return func(w *Watchdog) { w.notifier = n }
@@ -108,12 +124,29 @@ func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logg
 		sessionStaleThresh:     defaultSessionStaleThreshold,
 		progressWarningThresh:  defaultProgressWarningThreshold,
 		progressCriticalThresh: defaultProgressCriticalThreshold,
+		maxTaskFailures:        defaultMaxTaskFailures,
 		stopCh:                 make(chan struct{}),
 		doneCh:                 make(chan struct{}),
 		alertedTasks:           make(map[int]string),
 	}
 	for _, o := range opts {
 		o(w)
+	}
+	// Use thresholds from policy if provided
+	if w.pol != nil {
+		if o := w.pol.Orchestration(); o != nil {
+			if o.HeartbeatIntervalSeconds > 0 {
+				w.interval = time.Duration(o.HeartbeatIntervalSeconds) * time.Second
+			}
+			if o.WorkerTimeoutSeconds > 0 {
+				w.heartbeatStaleThresh = time.Duration(o.WorkerTimeoutSeconds) * time.Second
+				w.sessionStaleThresh = w.heartbeatStaleThresh
+				w.taskStuckThresh = w.heartbeatStaleThresh * 2
+			}
+		}
+		if mf := w.pol.MaxTaskFailures(); mf > 0 {
+			w.maxTaskFailures = mf
+		}
 	}
 	return w
 }
@@ -256,10 +289,23 @@ func (w *Watchdog) check() {
 				t.ID, t.Title, t.AssignedTo, reason)
 
 			oldAssignee := t.AssignedTo
-			t.Status = "pending"
+			t.FailureCount++
+			t.LastFailure = now
+			t.FailureReason = reason
 			t.UpdatedAt = now
-			if t.ResultSummary == "" {
-				t.ResultSummary = fmt.Sprintf("Watchdog: reset to pending — %s", reason)
+
+			if t.FailureCount >= w.maxTaskFailures {
+				t.Status = "blocked"
+				t.BlockedBy = fmt.Sprintf("Watchdog: auto-blocked after %d failures. Last reason: %s", t.FailureCount, reason)
+				if t.ResultSummary == "" {
+					t.ResultSummary = t.BlockedBy
+				}
+				w.logger.Printf("Watchdog: task #%d auto-blocked after %d failures", t.ID, t.FailureCount)
+			} else {
+				t.Status = "pending"
+				if t.ResultSummary == "" {
+					t.ResultSummary = fmt.Sprintf("Watchdog: reset to pending (failure %d/%d) — %s", t.FailureCount, w.maxTaskFailures, reason)
+				}
 			}
 
 			// Clean up the agent instance's task list

@@ -126,6 +126,18 @@ CREATE TABLE IF NOT EXISTS file_locks (
 	locked_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	timestamp TEXT NOT NULL,
+	agent TEXT NOT NULL,
+	tool_name TEXT NOT NULL,
+	args_summary TEXT NOT NULL,
+	duration_ms INTEGER NOT NULL,
+	error TEXT NOT NULL DEFAULT '',
+	session_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent);
 CREATE TABLE IF NOT EXISTS registered_agents (
 	name TEXT PRIMARY KEY,
 	display_name TEXT NOT NULL DEFAULT '',
@@ -189,6 +201,9 @@ func New(path string) (app.StateRepository, error) {
 // silently ignored because some may already be applied.
 func runMigrations(db *sql.DB) error {
 	_, _ = db.Exec("ALTER TABLE presence ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN dependencies TEXT NOT NULL DEFAULT '[]'")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN context_id TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN worker_type TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
@@ -197,13 +212,24 @@ func runMigrations(db *sql.DB) error {
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN progress_description TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN last_progress_at TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN last_failure_at TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN requires_review INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN review_status TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaAgentInstances)
+	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_step INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_total_steps INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_updated_at TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaWorkContexts)
 	_, _ = db.Exec(schemaRegisteredAgents)
+	_, _ = db.Exec("ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN acceptance TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]'")
 	return nil
 }
 
@@ -348,17 +374,19 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("messages iteration: %w", err)
 	}
 
-	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at FROM tasks ORDER BY id")
+	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by FROM tasks ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("tasks: %w", err)
 	}
 	for rows.Next() {
 		var t domain.Task
-		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt string
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt); err != nil {
+		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt string
+		var requiresReview int
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
+		t.RequiresReview = requiresReview != 0
 		t.ContextID = contextID
 		t.WorkerType = workerType
 		t.ResultSummary = resultSummary
@@ -375,6 +403,11 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		if lastProgressAt != "" {
 			if t.LastProgressAt, err = parseTime(lastProgressAt, "tasks last_progress_at"); err != nil {
 				t.LastProgressAt = time.Time{}
+			}
+		}
+		if lastFailureAt != "" {
+			if t.LastFailure, err = parseTime(lastFailureAt, "tasks last_failure_at"); err != nil {
+				t.LastFailure = time.Time{}
 			}
 		}
 		if err := parseJSON([]byte(deps), &t.Dependencies, "tasks dependencies"); err != nil {
@@ -743,8 +776,16 @@ func (s *Store) Save(state *domain.CollabState) error {
 		if !t.LastProgressAt.IsZero() {
 			lastProgressAt = t.LastProgressAt.Format(time.RFC3339Nano)
 		}
-		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt); err != nil {
+		lastFailureAt := ""
+		if !t.LastFailure.IsZero() {
+			lastFailureAt = t.LastFailure.Format(time.RFC3339Nano)
+		}
+		requiresReview := 0
+		if t.RequiresReview {
+			requiresReview = 1
+		}
+		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy); err != nil {
 			return err
 		}
 	}
@@ -848,4 +889,80 @@ func (s *Store) Save(state *domain.CollabState) error {
 	}
 
 	return tx.Commit()
+}
+
+// WriteAudit records a tool call. Uses a direct INSERT outside the Load/Save
+// cycle so audit rows are never wiped by Save()'s DELETE+INSERT pattern.
+func (s *Store) WriteAudit(entry domain.AuditEntry) error {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+	_, err := s.db.Exec("INSERT INTO audit_log (timestamp, agent, tool_name, args_summary, duration_ms, error, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		entry.Timestamp.Format(time.RFC3339Nano), entry.Agent, entry.ToolName, entry.ArgsSummary, entry.DurationMs, entry.Error, entry.SessionID)
+	return err
+}
+
+// ReadAudit queries recorded audit logs with filters.
+func (s *Store) ReadAudit(filter app.AuditFilter) ([]domain.AuditEntry, error) {
+	query := "SELECT id, timestamp, agent, tool_name, args_summary, duration_ms, error, session_id FROM audit_log WHERE 1=1"
+	var args []interface{}
+
+	if filter.Agent != "" {
+		query += " AND agent = ?"
+		args = append(args, filter.Agent)
+	}
+	if filter.ToolName != "" {
+		query += " AND tool_name = ?"
+		args = append(args, filter.ToolName)
+	}
+	if filter.SessionID != "" {
+		query += " AND session_id = ?"
+		args = append(args, filter.SessionID)
+	}
+	if !filter.From.IsZero() {
+		query += " AND timestamp >= ?"
+		args = append(args, filter.From.Format(time.RFC3339Nano))
+	}
+	if !filter.To.IsZero() {
+		query += " AND timestamp <= ?"
+		args = append(args, filter.To.Format(time.RFC3339Nano))
+	}
+	query += " ORDER BY timestamp DESC"
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []domain.AuditEntry
+	for rows.Next() {
+		var e domain.AuditEntry
+		var ts string
+		if err := rows.Scan(&e.ID, &ts, &e.Agent, &e.ToolName, &e.ArgsSummary, &e.DurationMs, &e.Error, &e.SessionID); err != nil {
+			return nil, err
+		}
+		e.Timestamp, _ = parseTime(ts, "audit_log")
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// PruneAudit removes logs older than the given time.
+func (s *Store) PruneAudit(olderThan time.Time) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM audit_log WHERE timestamp < ?", olderThan.Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

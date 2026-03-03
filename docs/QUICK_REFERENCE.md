@@ -1,6 +1,6 @@
 # Quick Reference
 
-Command examples for the MCP stringwork coordination tools (23 tools). Use your native IDE/CLI tools for files, search, git, and terminal.
+Command examples for the MCP stringwork coordination tools (24 tools). Use your native IDE/CLI tools for files, search, git, and terminal.
 
 ## Session & context
 
@@ -90,6 +90,37 @@ Use update_task with id=5 status='cancelled' updated_by='cursor'
 ```
 
 Completing a task notifies the creator automatically. Task status can be: `pending`, `in_progress`, `completed`, `blocked`, `cancelled`.
+
+### Create task with review gate
+
+```
+Use create_task with
+  title='Security audit for auth module'
+  assigned_to='claude-code'
+  created_by='cursor'
+  requires_review=true
+```
+
+When `requires_review=true`, completion is blocked until a non-assignee approves.
+
+### Approve / reject review
+
+```
+Use update_task with id=5 review_status='approved' updated_by='cursor'
+Use update_task with id=5 review_status='rejected' updated_by='cursor'
+```
+
+Only non-assignees can approve. Rejection sets status back to `pending`.
+
+### Replay a blocked task (DLQ recovery)
+
+```
+Use replay_task with id=5 updated_by='cursor'
+Use replay_task with id=5 updated_by='cursor' reassign_to='codex'
+Use replay_task with id=5 updated_by='cursor' reassign_to='keep'
+```
+
+Resets failure count, clears blocked state, and re-queues the task. Default: reassign to `any`. Use `keep` to preserve the current assignee.
 
 ## Plans
 
@@ -346,6 +377,29 @@ mcp-stringwork status claude-code
 mcp-stringwork status cursor
 
 # Output format: unread=N pending=N
+```
+
+### Agent auto-discovery
+
+```bash
+# Scan PATH for known agent CLIs (claude, codex, gemini)
+mcp-stringwork discover
+
+# Outputs a table of found agents with versions and suggested config
+```
+
+### Audit log
+
+```bash
+# View recent audit entries
+mcp-stringwork audit
+
+# Filter by agent or tool
+mcp-stringwork audit --agent cursor
+mcp-stringwork audit --tool create_task
+
+# Last N entries
+mcp-stringwork audit --limit 50
 ```
 
 ### Server mode

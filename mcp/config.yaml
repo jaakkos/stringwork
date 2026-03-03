@@ -21,6 +21,14 @@ message_retention_max: 1000
 message_retention_days: 30
 presence_ttl_seconds: 300
 
+# --- Audit Logging ---
+# Records every tool call with agent, tool name, args summary, duration, and errors.
+# Enabled by default. Set `disabled: true` to turn off.
+# audit:
+#   disabled: false           # set to true to disable audit logging
+#   args_max_len: 1000        # max characters for arg summaries (default: 1000)
+#   retention_days: 7         # auto-prune entries older than this (default: 7)
+
 # --- Daemon mode (multi-driver support) ---
 # When enabled, multiple Cursor windows share a single server process.
 # The first invocation starts a background daemon; subsequent ones connect
@@ -83,6 +91,7 @@ orchestration:
   assignment_strategy: least_loaded    # or capability_match
   heartbeat_interval_seconds: 30
   worker_timeout_seconds: 120
+  max_task_failures: 3                 # DLQ: auto-block task after N watchdog failures (default: 3)
   # Git worktree isolation (optional): each worker gets its own checkout.
   # worktrees:
   #   enabled: true

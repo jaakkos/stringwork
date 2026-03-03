@@ -24,12 +24,12 @@ cmd/mcp-server (main, CLI)
 
 | Package | Role |
 |---------|------|
-| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies. Supports three modes: **daemon** (HTTP on TCP + unix socket, no stdio), **proxy** (thin stdio-to-HTTP bridge), and **standalone** (legacy stdio + HTTP in one process). CLI subcommands (`status`, `--version`). |
-| **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `FileLock`, `Presence`, `CollabState`. |
-| **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts), `SessionRegistry` (multi-client tracking). Defines `StateRepository` and `Policy` interfaces. |
-| **internal/repository/sqlite** | Implements `StateRepository` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`. |
-| **internal/policy** | Config loading from YAML, workspace path validation, state file and log file paths, global defaults. |
-| **internal/tools/collab** | 23 MCP tool handlers. Each handler parses `map[string]any` args, calls `CollabService`, and returns `mcp.CallToolResult`. Also: piggyback notifications, MCP resource providers, dynamic instructions. |
+| **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies. Supports three modes: **daemon** (HTTP on TCP + unix socket, no stdio), **proxy** (thin stdio-to-HTTP bridge), and **standalone** (legacy stdio + HTTP in one process). CLI subcommands (`status`, `audit`, `discover`, `--version`). |
+| **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `AuditEntry`, `FileLock`, `Presence`, `CollabState`. |
+| **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts, DLQ failure tracking), `SessionRegistry` (multi-client tracking). Defines `StateRepository`, `AuditWriter`, `AuditReader`, and `Policy` interfaces. |
+| **internal/repository/sqlite** | Implements `StateRepository` and `AuditWriter`/`AuditReader` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`; separate `audit_log` table for tool call recording. |
+| **internal/policy** | Config loading from YAML, workspace path validation, state file and log file paths, global defaults. Includes `AuditConfig` for audit logging settings. |
+| **internal/tools/collab** | 24 MCP tool handlers. Each handler parses `map[string]any` args, calls `CollabService`, and returns `mcp.CallToolResult`. Also: audit middleware, piggyback notifications, MCP resource providers, dynamic instructions. |
 | **internal/dashboard** | Web dashboard (embedded HTML) and REST API for viewing tasks, workers, messages, and plans. Served at `/dashboard` in HTTP mode. |
 | **internal/worktree** | Git worktree manager. Creates isolated checkouts per worker, runs setup commands, cleans up on cancel/exit. |
 
@@ -38,11 +38,13 @@ cmd/mcp-server (main, CLI)
 ### Tool call
 
 1. MCP client sends `tools/call` request
-2. Tool handler in `internal/tools/collab` parses arguments
-3. Handler calls `svc.Run(func(state) { ... })` on `CollabService`
-4. `CollabService` does `repo.Load()`, mutates state, `repo.Save()`
-5. Handler formats the result as `mcp.CallToolResult`
-6. Piggyback middleware appends notification banners (unread messages, pending tasks, STOP signals)
+2. Audit middleware records the call (agent, tool, args summary, timing)
+3. Tool handler in `internal/tools/collab` parses arguments
+4. Handler calls `svc.Run(func(state) { ... })` on `CollabService`
+5. `CollabService` does `repo.Load()`, mutates state, `repo.Save()`
+6. Handler formats the result as `mcp.CallToolResult`
+7. Piggyback middleware appends notification banners (unread messages, pending tasks, STOP signals)
+8. Audit middleware writes the entry to the `audit_log` table (synchronous)
 
 ### Worker lifecycle
 

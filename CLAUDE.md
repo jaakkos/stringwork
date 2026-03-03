@@ -145,16 +145,17 @@ When the server is configured with `orchestration` (in `mcp/config.yaml`), one a
 
 If no orchestration is configured, all agents are peers (legacy mode).
 
-## Available MCP Tools (23 coordination tools)
+## Available MCP Tools (24 coordination tools)
 
 - `get_session_context` - Full session context (messages, tasks, presence, notes)
 - `set_presence` - Update status and workspace; dynamically changes the server's project context
 - `append_session_note` - Add shared note or decision
 - `send_message` - Message your pair (optional title, urgent)
 - `read_messages` - Read messages
-- `create_task` - Create task (use assigned_to='any' for auto-assign; optional relevant_files, background, constraints for work context)
-- `list_tasks` - List tasks
-- `update_task` - Update task (auto-notifies on completion; status can be: pending, in_progress, completed, blocked, cancelled)
+- `create_task` - Create task (use assigned_to='any' for auto-assign; optional relevant_files, background, constraints, requires_review for work context)
+- `list_tasks` - List tasks (shows dependency status, review gates, and failure info)
+- `update_task` - Update task (auto-notifies on completion; supports review_status for approval gates; status can be: pending, in_progress, completed, blocked, cancelled)
+- `replay_task` - Reset failure tracking and re-queue a blocked/pending task (DLQ recovery)
 - `create_plan` - Create shared plan
 - `get_plan` - View plan(s); omit ID to list all
 - `update_plan` - Add or update plan items

@@ -72,6 +72,26 @@ type Task struct {
 	ProgressDescription string    `json:"progress_description,omitempty"`      // latest progress report text
 	ProgressPercent     int       `json:"progress_percent,omitempty"`          // 0-100 completion estimate
 	LastProgressAt      time.Time `json:"last_progress_at,omitempty"`          // when progress was last reported
+	// Failure tracking
+	FailureCount  int       `json:"failure_count,omitempty"`
+	LastFailure   time.Time `json:"last_failure_at,omitempty"`
+	FailureReason string    `json:"failure_reason,omitempty"`
+	// Review gates
+	RequiresReview bool   `json:"requires_review,omitempty"`
+	ReviewStatus   string `json:"review_status,omitempty"` // pending, approved, rejected
+	ReviewedBy     string `json:"reviewed_by,omitempty"`
+}
+
+// AuditEntry represents a single tool call recorded by the audit middleware.
+type AuditEntry struct {
+	ID          int64     `json:"id"`
+	Timestamp   time.Time `json:"timestamp"`
+	Agent       string    `json:"agent"`
+	ToolName    string    `json:"tool_name"`
+	ArgsSummary string    `json:"args_summary"`
+	DurationMs  int64     `json:"duration_ms"`
+	Error       string    `json:"error,omitempty"`
+	SessionID   string    `json:"session_id,omitempty"`
 }
 
 // Presence is an agent's current status.

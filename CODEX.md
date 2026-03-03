@@ -171,25 +171,32 @@ codex resume --last             # most recent session
 codex resume <SESSION_ID>       # specific session
 ```
 
-## Available MCP Tools (17 coordination tools)
+## Available MCP Tools (24 coordination tools)
 
 - `get_session_context` - Full session context (messages, tasks, presence, notes)
 - `set_presence` - Update status and workspace
 - `append_session_note` - Add shared note or decision
 - `send_message` - Message your pairs
 - `read_messages` - Read messages
-- `create_task` - Create task (auto-notifies assignee)
-- `list_tasks` - List tasks
-- `update_task` - Update task (auto-notifies on completion)
+- `create_task` - Create task (auto-notifies assignee; supports requires_review for quality gates)
+- `list_tasks` - List tasks (shows dependency status, review gates, failure info)
+- `update_task` - Update task (auto-notifies on completion; supports review_status for approval gates)
+- `replay_task` - Reset failure tracking and re-queue a blocked/pending task (DLQ recovery)
 - `create_plan` - Create shared plan
 - `get_plan` - View plan(s); omit ID to list all
 - `update_plan` - Add or update plan items
 - `handoff` - Hand off work with summary and next steps
 - `claim_next` - Claim next task (dry_run to peek)
+- `report_progress` - Report structured progress on a task
 - `request_review` - Request code review from pair
 - `lock_file` - Lock, unlock, check, or list file locks
 - `register_agent` - Register a custom agent
 - `list_agents` - List all available agents
+- `worker_status` - (Driver) List workers with progress, process activity, SLA status
+- `heartbeat` - (Workers) Signal liveness with progress info
+- `cancel_agent` - (Driver) Cancel a worker's tasks, send STOP signal, and kill its process
+- `get_work_context` - Get task context (relevant files, background, constraints, shared notes)
+- `update_work_context` - Add shared notes to a task's work context
 
 Use your native Codex tools for files, search, git, web search, and commands.
 

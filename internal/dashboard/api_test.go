@@ -47,6 +47,10 @@ func (p *mockPolicy) SetWorkspaceRoot(root string)               { p.workspaceRo
 func (p *mockPolicy) IsToolEnabled(string) bool                  { return true }
 func (p *mockPolicy) ValidatePath(path string) (string, error)   { return path, nil }
 func (p *mockPolicy) Orchestration() *policy.OrchestrationConfig { return nil }
+func (p *mockPolicy) MaxTaskFailures() int                       { return 3 }
+func (p *mockPolicy) AuditEnabled() bool                         { return true }
+func (p *mockPolicy) AuditArgsMaxLen() int                       { return 1000 }
+func (p *mockPolicy) AuditRetentionDays() int                    { return 7 }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}

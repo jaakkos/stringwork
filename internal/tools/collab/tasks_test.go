@@ -214,6 +214,31 @@ func TestCreateTask_InvalidDependency(t *testing.T) {
 	}
 }
 
+func TestCreateTask_RequiresReview(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"title":           "Task with review",
+		"created_by":      "cursor",
+		"requires_review": true,
+	}
+
+	_, err := callTool(t, srv, "create_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if !task.RequiresReview {
+		t.Error("expected RequiresReview to be true")
+	}
+	if task.ReviewStatus != "pending" {
+		t.Errorf("expected ReviewStatus pending, got %q", task.ReviewStatus)
+	}
+}
+
 // ========== list_tasks tests ==========
 
 func TestListTasks_Empty(t *testing.T) {
@@ -780,5 +805,131 @@ func TestUpdateTask_UpdatesTimestamp(t *testing.T) {
 
 	if !repo.state.Tasks[0].UpdatedAt.After(oldTime) {
 		t.Error("UpdatedAt should be updated to current time")
+	}
+}
+
+func TestUpdateTask_CompletionBlockedByReview(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Task", Status: "in_progress", AssignedTo: "cursor", CreatedBy: "cursor", RequiresReview: true, ReviewStatus: "pending"},
+	}
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"id":         float64(1),
+		"status":     "completed",
+		"updated_by": "cursor",
+	}
+
+	_, err := callTool(t, srv, "update_task", args)
+	if err == nil {
+		t.Error("expected error when completing task with pending review")
+	}
+}
+
+func TestUpdateTask_SelfApprovalGuard(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Task", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor", RequiresReview: true, ReviewStatus: "pending"},
+	}
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"id":            float64(1),
+		"review_status": "approved",
+		"updated_by":    "claude-code", // assignee
+	}
+
+	_, err := callTool(t, srv, "update_task", args)
+	if err == nil {
+		t.Error("expected error when assignee tries to approve their own task")
+	}
+}
+
+func TestUpdateTask_ApprovalAllowsCompletion(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Task", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor", RequiresReview: true, ReviewStatus: "pending"},
+	}
+
+	srv := testServer(svc, logger)
+
+	// Approve as driver
+	args := map[string]any{
+		"id":            float64(1),
+		"review_status": "approved",
+		"updated_by":    "cursor",
+	}
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error on approval: %v", err)
+	}
+
+	// Now complete it
+	args = map[string]any{
+		"id":         float64(1),
+		"status":     "completed",
+		"updated_by": "claude-code",
+	}
+	_, err = callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("should allow completion after approval: %v", err)
+	}
+
+	if repo.state.Tasks[0].Status != "completed" {
+		t.Errorf("expected status completed, got %q", repo.state.Tasks[0].Status)
+	}
+}
+
+// ========== replay_task tests ==========
+
+func TestReplayTask_Basic(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 1, Title: "Failed task", Status: "blocked", AssignedTo: "claude-code",
+			FailureCount: 3, FailureReason: "Watchdog", ResultSummary: "Error",
+			RequiresReview: true, ReviewStatus: "rejected", ReviewedBy: "cursor",
+		},
+	}
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"id":          float64(1),
+		"updated_by":  "cursor",
+		"reassign_to": "any",
+	}
+
+	_, err := callTool(t, srv, "replay_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if task.Status != "pending" {
+		t.Errorf("expected status pending, got %q", task.Status)
+	}
+	if task.FailureCount != 0 {
+		t.Errorf("expected FailureCount 0, got %d", task.FailureCount)
+	}
+	if task.FailureReason != "" {
+		t.Errorf("expected empty FailureReason, got %q", task.FailureReason)
+	}
+	if task.AssignedTo != "any" {
+		t.Errorf("expected assigned_to any, got %q", task.AssignedTo)
+	}
+	if task.ReviewStatus != "pending" {
+		t.Errorf("expected ReviewStatus pending for RequiresReview task, got %q", task.ReviewStatus)
 	}
 }
