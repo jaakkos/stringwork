@@ -23,7 +23,6 @@ import (
 	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/dashboard"
 	"github.com/jaakkos/stringwork/internal/domain"
-	"github.com/jaakkos/stringwork/internal/knowledge"
 	"github.com/jaakkos/stringwork/internal/policy"
 	"github.com/jaakkos/stringwork/internal/repository"
 	"github.com/jaakkos/stringwork/internal/tools/collab"
@@ -267,11 +266,20 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		return ""
 	}
 
+	stateLoader := func() (*domain.CollabState, error) {
+		var state *domain.CollabState
+		err := svc.Query(func(s *domain.CollabState) error {
+			state = s
+			return nil
+		})
+		return state, err
+	}
+
 	var notifierOpts []app.NotifierOption
 	var wm *app.WorkerManager
 	orchCfg := pol.Orchestration()
 	if orchCfg != nil {
-		wm = app.NewWorkerManager(orchCfg, getAgent, repo, svc.Run, cfg.WorkspaceRoot, logger)
+		wm = app.NewWorkerManager(orchCfg, getAgent, stateLoader, svc.Run, cfg.WorkspaceRoot, logger)
 		wm.SetSessionChecker(func(instanceOrType string) bool {
 			return registry.HasActiveSession(instanceOrType)
 		})
@@ -303,33 +311,9 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		}
 	}
 
-	var knowledgeStore *knowledge.KnowledgeStore
-	if kCfg := pol.KnowledgeConfig(); kCfg != nil && kCfg.Enabled {
-		knowledgeStore, err = knowledge.NewKnowledgeStore(pol.KnowledgeDBPath())
-		if err != nil {
-			logger.Printf("Warning: knowledge store init failed: %v (feature disabled)", err)
-		} else {
-			syncInterval := 60 * time.Second
-			if kCfg.WatchIntervalSeconds > 0 {
-				syncInterval = time.Duration(kCfg.WatchIntervalSeconds) * time.Second
-			}
-			indexer := knowledge.NewIndexer(knowledgeStore, knowledge.IndexerConfig{
-				WorkspaceRoot:     cfg.WorkspaceRoot,
-				IndexGoSource:     kCfg.IndexGoSource,
-				WatchEnabled:      true,
-				StateSyncInterval: syncInterval,
-			}, newKnowledgeStateAdapter(svc), logger)
-			go indexer.Start(ctx)
-			logger.Printf("Knowledge indexer enabled (go_source=%v, sync=%s, db=%s)", kCfg.IndexGoSource, syncInterval, pol.KnowledgeDBPath())
-		}
-	}
-
 	var regOpts []collab.RegisterOption
 	if wm != nil {
 		regOpts = append(regOpts, collab.WithCanceller(wm))
-	}
-	if knowledgeStore != nil {
-		regOpts = append(regOpts, collab.WithKnowledgeStore(knowledgeStore))
 	}
 	if wtManager != nil {
 		regOpts = append(regOpts, collab.WithWorktreeProvider(&worktreeAdapter{mgr: wtManager}))
@@ -339,7 +323,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	}
 	collab.Register(mcpServer, svc, logger, registry, taskOrch, regOpts...)
 
-	notifier := app.NewNotifier(pol.SignalFilePath(), repo, getAgent, pushFunc, logger, notifierOpts...)
+	notifier := app.NewNotifier(pol.SignalFilePath(), stateLoader, getAgent, pushFunc, logger, notifierOpts...)
 	svc.SetNotifier(notifier)
 	go notifier.Start(ctx)
 
@@ -355,11 +339,6 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		if wtManager != nil {
 			if err := wtManager.CleanupAll(cfg.WorkspaceRoot); err != nil {
 				logger.Printf("Warning: worktree cleanup on shutdown: %v", err)
-			}
-		}
-		if knowledgeStore != nil {
-			if err := knowledgeStore.Close(); err != nil {
-				logger.Printf("Warning: close knowledge store: %v", err)
 			}
 		}
 		if c, ok := repo.(interface{ Close() error }); ok {
@@ -580,49 +559,6 @@ func (a *worktreeAdapter) ListWorktrees() map[string]collab.WorktreeInfo {
 		}
 	}
 	return result
-}
-
-type knowledgeStateAdapter struct {
-	svc *app.CollabService
-}
-
-func newKnowledgeStateAdapter(svc *app.CollabService) *knowledgeStateAdapter {
-	return &knowledgeStateAdapter{svc: svc}
-}
-
-func (a *knowledgeStateAdapter) SessionNotes() []knowledge.SessionNoteData {
-	var notes []knowledge.SessionNoteData
-	_ = a.svc.Query(func(state *domain.CollabState) error {
-		for _, n := range state.SessionNotes {
-			notes = append(notes, knowledge.SessionNoteData{
-				ID:       n.ID,
-				Author:   n.Author,
-				Content:  n.Content,
-				Category: n.Category,
-			})
-		}
-		return nil
-	})
-	return notes
-}
-
-func (a *knowledgeStateAdapter) CompletedTasks() []knowledge.TaskData {
-	var tasks []knowledge.TaskData
-	_ = a.svc.Query(func(state *domain.CollabState) error {
-		for _, t := range state.Tasks {
-			if t.Status == "completed" {
-				tasks = append(tasks, knowledge.TaskData{
-					ID:            t.ID,
-					Title:         t.Title,
-					Description:   t.Description,
-					AssignedTo:    t.AssignedTo,
-					ResultSummary: t.ResultSummary,
-				})
-			}
-		}
-		return nil
-	})
-	return tasks
 }
 
 func runStatusCommand() {

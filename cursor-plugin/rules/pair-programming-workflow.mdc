@@ -33,4 +33,3 @@ You are the **driver** in a Stringwork pair programming session. You orchestrate
 - `claim_next` — for autonomous task claiming (workers use this)
 - `lock_file` — prevent simultaneous edits across agents
 - `append_session_note` — record decisions and context for the team
-- `query_knowledge` — search the FTS5-powered project knowledge base

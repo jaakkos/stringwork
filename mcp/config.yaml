@@ -57,13 +57,6 @@ http_port: 0
 #     command: npx
 #     args: ["@playwright/mcp@latest", "--browser", "chromium"]
 
-# --- Features ---
-features:
-  knowledge:
-    enabled: true               # Enable FTS5-based project knowledge indexer
-    index_go_source: true       # Index Go source files (function signatures, comments)
-    watch_interval_seconds: 60  # How often to sync session notes and task summaries
-
 # --- Orchestration (driver + workers) ---
 # One driver (e.g. Cursor) and N workers. The server spawns workers automatically
 # when there's pending work -- no need to keep them running manually.

@@ -16,7 +16,6 @@ cmd/mcp-server (main, CLI)
                 internal/domain (entities: Message, Task, Plan, AgentInstance, WorkContext, ...)
                     ^
                 internal/repository/sqlite (implements StateRepository)
-                internal/knowledge (FTS5 knowledge store, separate from state)
                 internal/policy (config, workspace validation, safety)
                 internal/worktree (git worktree manager for worker isolation)
 ```
@@ -32,7 +31,6 @@ cmd/mcp-server (main, CLI)
 | **internal/policy** | Config loading from YAML, workspace path validation, state file and log file paths, global defaults. |
 | **internal/tools/collab** | 23 MCP tool handlers. Each handler parses `map[string]any` args, calls `CollabService`, and returns `mcp.CallToolResult`. Also: piggyback notifications, MCP resource providers, dynamic instructions. |
 | **internal/dashboard** | Web dashboard (embedded HTML) and REST API for viewing tasks, workers, messages, and plans. Served at `/dashboard` in HTTP mode. |
-| **internal/knowledge** | FTS5-powered project knowledge store. Indexes markdown docs, Go source, session notes, and task summaries. Separate SQLite database from main state. |
 | **internal/worktree** | Git worktree manager. Creates isolated checkouts per worker, runs setup commands, cleans up on cancel/exit. |
 
 ## Data flow
@@ -59,8 +57,6 @@ cmd/mcp-server (main, CLI)
 ### State management
 
 All state lives in `domain.CollabState`. The repository loads and saves the full aggregate on every operation. There is no partial update -- this keeps the model simple and consistent.
-
-The knowledge store (`internal/knowledge`) uses a separate SQLite database with incremental FTS5 updates (checksums, not full replace), because it indexes project files that shouldn't be destroyed on every state save.
 
 ## Key interfaces
 
@@ -113,7 +109,6 @@ The daemon tracks connected proxies via unix socket connection counting. When th
 - **Repository**: Integration tests with temp SQLite databases.
 - **Tools/collab**: Integration tests using a real `CollabService` and in-memory state.
 - **Dashboard**: HTTP handler tests with `httptest`.
-- **Knowledge**: FTS5 indexing and query tests.
 - **Worktree**: Git worktree creation/cleanup tests.
 
 Run all tests:

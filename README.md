@@ -51,7 +51,6 @@ The server provides only coordination tools. Each agent uses its own native capa
 - **Shared planning** -- collaborative plans with items, acceptance criteria, and progress tracking
 - **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (3 min warning, 5 min critical, 10 min auto-recovery)
 - **File locks** -- prevent simultaneous edits across agents
-- **Knowledge indexing** -- FTS5-powered project knowledge base (markdown, Go source, session notes, task summaries)
 - **Web dashboard** -- real-time view of tasks, workers, messages, and plans (URL logged on startup)
 - **Auto-respond** -- server spawns agents when they have unread messages, no external daemon needed
 - **Git worktree isolation** -- optional per-worker checkouts to prevent file conflicts
@@ -167,7 +166,7 @@ orchestration:
 
 See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 
-## Available Tools (24)
+## Available Tools (23)
 
 ### Session
 | Tool | Description |
@@ -219,7 +218,6 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 | `lock_file` | Lock, unlock, check, or list file locks |
 | `register_agent` | Register a custom agent for collaboration |
 | `list_agents` | List all available agents (built-in and registered) |
-| `query_knowledge` | Search the FTS5-powered project knowledge base |
 
 ## Claude Code Hooks
 
@@ -255,7 +253,6 @@ mcp-stringwork status claude-code       # check unread/pending counts for an age
 │   ├── repository/sqlite/   # State persistence (SQLite)
 │   ├── policy/              # Workspace validation, config, safety policy
 │   ├── dashboard/           # Web dashboard (HTML + REST API)
-│   ├── knowledge/           # FTS5 project knowledge indexer
 │   ├── worktree/            # Git worktree manager for worker isolation
 │   └── tools/collab/        # 23 MCP tool handlers
 ├── chrome-extension/         # Chrome extension for toolbar monitoring (alpha)

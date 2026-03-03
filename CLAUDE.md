@@ -145,7 +145,7 @@ When the server is configured with `orchestration` (in `mcp/config.yaml`), one a
 
 If no orchestration is configured, all agents are peers (legacy mode).
 
-## Available MCP Tools (24 coordination tools)
+## Available MCP Tools (23 coordination tools)
 
 - `get_session_context` - Full session context (messages, tasks, presence, notes)
 - `set_presence` - Update status and workspace; dynamically changes the server's project context
@@ -170,7 +170,6 @@ If no orchestration is configured, all agents are peers (legacy mode).
 - `cancel_agent` - (Driver) Cancel a worker's tasks, send STOP signal, and kill its process
 - `get_work_context` - Get task context (relevant files, background, constraints, shared notes)
 - `update_work_context` - Add shared notes to a task's work context
-- `query_knowledge` - Search the FTS5-powered project knowledge base
 
 Use your native tools for files, search, git, and commands.
 

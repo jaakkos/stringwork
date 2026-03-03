@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/jaakkos/stringwork/internal/domain"
 )
 
 const (
@@ -34,7 +36,7 @@ type SpawnChecker interface {
 // If a SpawnChecker (WorkerManager) is attached, it also triggers spawning for workers with unread content.
 type Notifier struct {
 	signalPath   string
-	repo         StateRepository
+	stateLoader  func() (*domain.CollabState, error)
 	getAgent     func() string
 	pushFunc     func(method string, params any) error
 	logger       *log.Logger
@@ -72,10 +74,11 @@ func WithWorkerManager(wm *WorkerManager) NotifierOption {
 
 // NewNotifier creates a notifier. getAgent returns the connected agent (e.g. "cursor"); if empty, push is skipped.
 // pushFunc is called with method "notifications/pair_update" and params PairUpdateParams when the agent has unread content.
-func NewNotifier(signalPath string, repo StateRepository, getAgent func() string, pushFunc func(method string, params any) error, logger *log.Logger, opts ...NotifierOption) *Notifier {
+// stateLoader provides the current state; it should route through CollabService.Query to serialize access.
+func NewNotifier(signalPath string, stateLoader func() (*domain.CollabState, error), getAgent func() string, pushFunc func(method string, params any) error, logger *log.Logger, opts ...NotifierOption) *Notifier {
 	n := &Notifier{
 		signalPath:   signalPath,
-		repo:         repo,
+		stateLoader:  stateLoader,
 		getAgent:     getAgent,
 		pushFunc:     pushFunc,
 		logger:       logger,
@@ -227,7 +230,7 @@ func (n *Notifier) checkAndPush() {
 		return
 	}
 
-	state, err := n.repo.Load()
+	state, err := n.stateLoader()
 	if err != nil {
 		return
 	}

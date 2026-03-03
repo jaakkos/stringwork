@@ -20,9 +20,26 @@ func testPolicy() Policy {
 	})
 }
 
+// inMemoryRepo implements StateRepository for tests.
+type inMemoryRepo struct {
+	state *domain.CollabState
+}
+
+func (r *inMemoryRepo) Load() (*domain.CollabState, error) {
+	if r.state == nil {
+		return domain.NewCollabState(), nil
+	}
+	return r.state, nil
+}
+
+func (r *inMemoryRepo) Save(state *domain.CollabState) error {
+	r.state = state
+	return nil
+}
+
 // testService returns a CollabService backed by an in-memory repo.
 func testService(state *domain.CollabState) *CollabService {
-	repo := &notifierTestRepo{state: state}
+	repo := &inMemoryRepo{state: state}
 	logger := log.New(os.Stderr, "[test] ", 0)
 	return NewCollabService(repo, testPolicy(), logger)
 }

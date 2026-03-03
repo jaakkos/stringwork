@@ -68,13 +68,6 @@ type MCPServerConfig struct {
 	Auth    string            `yaml:"auth,omitempty"`    // "oauth", "bearer", or empty for none
 }
 
-// KnowledgeConfig controls the FTS5-based project knowledge indexer.
-type KnowledgeConfig struct {
-	Enabled              bool `yaml:"enabled"`                // enable the knowledge indexer and query_knowledge tool
-	IndexGoSource        bool `yaml:"index_go_source"`        // index .go source files (signatures, comments)
-	WatchIntervalSeconds int  `yaml:"watch_interval_seconds"` // state sync interval (default 60)
-}
-
 // WorktreeConfig controls git worktree isolation for workers.
 type WorktreeConfig struct {
 	Enabled         bool     `yaml:"enabled"`          // opt-in: create per-worker worktrees
@@ -94,11 +87,6 @@ type DaemonConfig struct {
 	GracePeriodSecs int    `yaml:"grace_period_seconds"`
 }
 
-// FeaturesConfig groups optional feature flags.
-type FeaturesConfig struct {
-	Knowledge *KnowledgeConfig `yaml:"knowledge"`
-}
-
 // Config holds policy configuration
 type Config struct {
 	WorkspaceRoot string   `yaml:"workspace_root"`
@@ -113,7 +101,6 @@ type Config struct {
 	HTTPPort      int                        `yaml:"http_port"`
 	Orchestration *OrchestrationConfig       `yaml:"orchestration"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
-	Features      *FeaturesConfig            `yaml:"features"`
 	Daemon        *DaemonConfig              `yaml:"daemon"`
 }
 
@@ -291,21 +278,6 @@ func (p *Policy) Orchestration() *OrchestrationConfig {
 // with worker CLIs. Returns nil if no servers are configured.
 func (p *Policy) MCPServers() map[string]MCPServerConfig {
 	return p.config.MCPServers
-}
-
-// KnowledgeConfig returns the knowledge indexer configuration.
-// Returns nil if not configured (feature disabled).
-func (p *Policy) KnowledgeConfig() *KnowledgeConfig {
-	if p.config.Features == nil {
-		return nil
-	}
-	return p.config.Features.Knowledge
-}
-
-// KnowledgeDBPath returns the path for the knowledge FTS5 database.
-// It lives alongside the state file.
-func (p *Policy) KnowledgeDBPath() string {
-	return filepath.Join(filepath.Dir(p.StateFile()), "knowledge.db")
 }
 
 // WorktreeConfig returns the worktree isolation configuration from orchestration.

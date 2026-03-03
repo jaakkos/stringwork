@@ -60,7 +60,7 @@ type MCPServerEntry struct {
 type WorkerManager struct {
 	configs        []WorkerSpawnConfig
 	getAgent       func() string
-	repo           StateRepository
+	stateLoader    func() (*domain.CollabState, error)
 	stateMutator   func(func(*domain.CollabState) error) error
 	fallbackDir    string
 	logger         *log.Logger
@@ -100,7 +100,7 @@ type ProcessInfo struct {
 }
 
 // NewWorkerManager creates a WorkerManager from orchestration config. Workers are built from orch.Workers only.
-func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, repo StateRepository, stateMutator func(func(*domain.CollabState) error) error, fallbackDir string, logger *log.Logger) *WorkerManager {
+func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, stateLoader func() (*domain.CollabState, error), stateMutator func(func(*domain.CollabState) error) error, fallbackDir string, logger *log.Logger) *WorkerManager {
 	var configs []WorkerSpawnConfig
 	if orch != nil {
 		for _, w := range orch.Workers {
@@ -146,7 +146,7 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 	return &WorkerManager{
 		configs:             configs,
 		getAgent:            getAgent,
-		repo:                repo,
+		stateLoader:         stateLoader,
 		stateMutator:        stateMutator,
 		fallbackDir:         fallbackDir,
 		logger:              logger,
@@ -486,7 +486,7 @@ func (m *WorkerManager) Check() {
 		return
 	}
 	connected := m.getAgent()
-	state, err := m.repo.Load()
+	state, err := m.stateLoader()
 	if err != nil {
 		return
 	}

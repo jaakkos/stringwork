@@ -167,6 +167,11 @@ func New(path string) (app.StateRepository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite pragma synchronous: %w", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite schema: %w", err)
@@ -270,9 +275,15 @@ func parseJSON(b []byte, v interface{}, context string) error {
 
 // Load implements app.StateRepository.
 func (s *Store) Load() (*domain.CollabState, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin read tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	state := domain.NewCollabState()
 
-	rows, err := s.db.Query("SELECT key, value FROM meta")
+	rows, err := tx.Query("SELECT key, value FROM meta")
 	if err != nil {
 		return nil, fmt.Errorf("meta: %w", err)
 	}
@@ -311,7 +322,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		state.DriverID = v
 	}
 
-	rows, err = s.db.Query("SELECT id, from_agent, to_agent, content, timestamp, read_flag FROM messages ORDER BY id")
+	rows, err = tx.Query("SELECT id, from_agent, to_agent, content, timestamp, read_flag FROM messages ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("messages: %w", err)
 	}
@@ -337,7 +348,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("messages iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at FROM tasks ORDER BY id")
+	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at FROM tasks ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("tasks: %w", err)
 	}
@@ -380,7 +391,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("tasks iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT agent, status, current_task_id, note, workspace, last_seen FROM presence")
+	rows, err = tx.Query("SELECT agent, status, current_task_id, note, workspace, last_seen FROM presence")
 	if err != nil {
 		return nil, fmt.Errorf("presence: %w", err)
 	}
@@ -404,7 +415,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("presence iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT id, author, content, category, timestamp FROM session_notes ORDER BY id")
+	rows, err = tx.Query("SELECT id, author, content, category, timestamp FROM session_notes ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("session_notes: %w", err)
 	}
@@ -428,7 +439,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("session_notes iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT id, title, goal, context, created_by, created_at, updated_at, status FROM plans")
+	rows, err = tx.Query("SELECT id, title, goal, context, created_by, created_at, updated_at, status FROM plans")
 	if err != nil {
 		return nil, fmt.Errorf("plans: %w", err)
 	}
@@ -456,7 +467,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("plans iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT plan_id, item_id, title, description, reasoning, acceptance, constraints, status, owner, dependencies, blockers, notes, priority, updated_by, updated_at FROM plan_items ORDER BY plan_id, item_id")
+	rows, err = tx.Query("SELECT plan_id, item_id, title, description, reasoning, acceptance, constraints, status, owner, dependencies, blockers, notes, priority, updated_by, updated_at FROM plan_items ORDER BY plan_id, item_id")
 	if err != nil {
 		return nil, fmt.Errorf("plan_items: %w", err)
 	}
@@ -499,7 +510,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("plan_items iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT agent, last_checked_msg_id, last_checked_task_id, last_check_time FROM agent_contexts")
+	rows, err = tx.Query("SELECT agent, last_checked_msg_id, last_checked_task_id, last_check_time FROM agent_contexts")
 	if err != nil {
 		return nil, fmt.Errorf("agent_contexts: %w", err)
 	}
@@ -523,7 +534,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("agent_contexts iteration: %w", err)
 	}
 
-	rows, err = s.db.Query("SELECT path, locked_by, reason, locked_at, expires_at FROM file_locks")
+	rows, err = tx.Query("SELECT path, locked_by, reason, locked_at, expires_at FROM file_locks")
 	if err != nil {
 		return nil, fmt.Errorf("file_locks: %w", err)
 	}
@@ -575,7 +586,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 	}
 
 	// agent_instances (table may not exist in very old DBs; only skip "no such table")
-	rows, err = s.db.Query("SELECT instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at FROM agent_instances")
+	rows, err = tx.Query("SELECT instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at FROM agent_instances")
 	if err != nil && !isNoSuchTableErr(err) {
 		return nil, fmt.Errorf("agent_instances: %w", err)
 	}
@@ -613,7 +624,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 	}
 
 	// work_contexts (table may not exist in very old DBs; only skip "no such table")
-	rows, err = s.db.Query("SELECT id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id FROM work_contexts")
+	rows, err = tx.Query("SELECT id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id FROM work_contexts")
 	if err != nil && !isNoSuchTableErr(err) {
 		return nil, fmt.Errorf("work_contexts: %w", err)
 	}
@@ -649,7 +660,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 	}
 
 	// registered_agents (table may not exist in very old DBs; only skip "no such table")
-	rows, err = s.db.Query("SELECT name, display_name, capabilities, workspace, project, registered_at, last_seen FROM registered_agents")
+	rows, err = tx.Query("SELECT name, display_name, capabilities, workspace, project, registered_at, last_seen FROM registered_agents")
 	if err != nil && !isNoSuchTableErr(err) {
 		return nil, fmt.Errorf("registered_agents: %w", err)
 	}

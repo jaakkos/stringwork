@@ -147,16 +147,7 @@ async def ask_project_rag_tool_impl(arguments):
     return [TextContent(type="text", text=answer_text)]
 ```
 
-**Recommendation for us:**
-- Add optional RAG capability using SQLite FTS5 (no external API dependency)
-- Index: `CLAUDE.md`, `AGENTS.md`, `docs/*.md`, `SessionNotes`, completed task summaries
-- New MCP tool: `query_project_knowledge` -- agents ask questions, get relevant context
-- Make it opt-in via config (`features.rag_enabled: true`)
-- Consider supporting external embeddings as an enhancement later
-
-**Why FTS5 over OpenAI embeddings:** Our project is local-first Go; adding an OpenAI dependency for core functionality would be a design mistake. FTS5 provides good-enough full-text search without network calls. For semantic search, we could add optional support for local models (ollama) or external APIs later.
-
-**Estimated effort:** High -- new feature area (indexer, query engine, MCP tool).
+**Our status:** We implemented an FTS5-based knowledge indexer (`query_knowledge` tool) and later removed it. In practice, workers never used it -- they relied on their native file search capabilities instead. The indexer added significant overhead (CPU spikes from filesystem scanning, multi-GB database) with no measurable benefit. SessionNotes and WorkContext provide sufficient shared context for coordination without a separate search index.
 
 ---
 
@@ -418,7 +409,7 @@ The server won't start without `OPENAI_API_KEY`. Even basic features like task m
 | Task management | Yes | Basic | Yes (22 tools) | No |
 | Message passing | Basic | Yes (transport) | Yes | No |
 | File conflict prevention | Git worktrees | N/A | File locks | Partial |
-| Project knowledge | RAG + embeddings | Context dict | SessionNotes | **Yes** |
+| Project knowledge | RAG + embeddings | Context dict | SessionNotes (via append_session_note) | **Yes** |
 | Agent health | N/A | Health monitor | Watchdog | Partial |
 | Audit trail | Via RAG indexing | Full audit logger | **None** | **Yes** |
 | Rate limiting | N/A | Sliding window | **None** | **Yes** |
@@ -446,8 +437,7 @@ Based on this analysis, suggested priority order for enhancements:
 5. **Per-project state isolation** -- move state to `<workspace>/.stringwork/`
 
 ### Phase 3: Major Features (1-2 weeks each)
-6. **RAG-based project knowledge** -- FTS5 indexer + query tool
-7. **Git worktree isolation** -- WorkerManager integration
+6. **Git worktree isolation** -- WorkerManager integration
 
 ---
 

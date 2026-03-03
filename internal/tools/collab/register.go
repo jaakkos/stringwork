@@ -7,7 +7,6 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
-	"github.com/jaakkos/stringwork/internal/knowledge"
 )
 
 // RegisterOption configures optional dependencies for tool registration.
@@ -40,7 +39,6 @@ type ProcessInfoSnapshot struct {
 
 type registerOpts struct {
 	canceller        WorkerCanceller
-	knowledgeStore   *knowledge.KnowledgeStore
 	worktreeProvider WorktreeInfoProvider
 	processProvider  ProcessInfoProvider
 }
@@ -48,11 +46,6 @@ type registerOpts struct {
 // WithCanceller sets the WorkerCanceller for the cancel_agent tool.
 func WithCanceller(c WorkerCanceller) RegisterOption {
 	return func(o *registerOpts) { o.canceller = c }
-}
-
-// WithKnowledgeStore enables the query_knowledge tool.
-func WithKnowledgeStore(ks *knowledge.KnowledgeStore) RegisterOption {
-	return func(o *registerOpts) { o.knowledgeStore = ks }
 }
 
 // WithWorktreeProvider enables worktree info in worker_status output.
@@ -116,11 +109,6 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	// Work context tools (2)
 	registerGetWorkContext(s, svc, logger)
 	registerUpdateWorkContext(s, svc, logger)
-
-	// Knowledge tool (1, optional)
-	if o.knowledgeStore != nil {
-		registerQueryKnowledge(s, o.knowledgeStore, logger)
-	}
 
 	// Prompt templates (pair-respond, code-review, plan-feature)
 	registerPrompts(s)
