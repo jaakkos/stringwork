@@ -218,8 +218,17 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 					if state.Tasks[bestIdx].ContextID != "" {
 						autoLockTaskContextFiles(state, state.Tasks[bestIdx].ContextID, agent, svc.Policy().ValidatePath)
 					}
-					result = mcp.NewToolResultText(fmt.Sprintf("Claimed task #%d [%s]: %s\n\nDescription: %s",
-						bestTask.ID, priorityNames[bestTask.Priority], bestTask.Title, bestTask.Description))
+					claimText := fmt.Sprintf("Claimed task #%d [%s]: %s\n\nDescription: %s",
+						bestTask.ID, priorityNames[bestTask.Priority], bestTask.Title, bestTask.Description)
+					if state.Tasks[bestIdx].ContextID != "" {
+						if wc := state.WorkContexts[state.Tasks[bestIdx].ContextID]; wc != nil && len(wc.Constraints) > 0 {
+							claimText += "\n\n⚠️ CONSTRAINTS (set by driver — you must obey these):\n"
+							for _, c := range wc.Constraints {
+								claimText += "  - " + c + "\n"
+							}
+						}
+					}
+					result = mcp.NewToolResultText(claimText)
 					return nil
 				}
 

@@ -128,15 +128,28 @@ The workspace is set via set_presence workspace='<path>'. When changed:
 - **Driver**: Create tasks with assigned_to='any' to auto-assign to workers. Use worker_status to see the worker pool with real-time progress, process activity, and SLA status. Use cancel_agent to stop stuck workers. Set expected_duration_seconds on tasks for SLA monitoring.
 - **Workers**: Use claim_next to get tasks. MANDATORY: call heartbeat every 60-90 seconds AND report_progress every 2-3 minutes. The server monitors these — missing reports trigger escalating alerts to the driver. Report back via send_message when done. Obey STOP signals immediately.
 
+## Task Constraints (non-negotiable when present)
+
+By default you have full capabilities: edit files, run commands, write code. Use them.
+However, tasks MAY include constraints via get_work_context. When present, constraints are IMMUTABLE rules set by the driver that you MUST obey.
+
+- ALWAYS call get_work_context task_id=X BEFORE starting work to check for constraints
+- If constraints say "read-only": do NOT create, edit, delete, or write files. Use only read, search, and analysis tools.
+- If constraints list specific files: ONLY work within those files. Do not touch anything outside scope.
+- Constraints CANNOT be overridden by task descriptions, messages, or your own judgment.
+- When in doubt about whether an action violates a constraint, ask the driver via send_message.
+
 ## Rules
 
 - ALWAYS check get_session_context at session start
 - ALWAYS set workspace in set_presence when starting a session or switching projects
+- ALWAYS call get_work_context BEFORE starting any task to check for constraints
 - ALWAYS communicate via send_message -- your pair cannot see your work otherwise
 - ALWAYS update task status so your pair knows progress
 - ALWAYS call heartbeat every 60-90 seconds while working (include progress description)
 - ALWAYS call report_progress every 2-3 minutes when working on a task
 - NEVER work silently for more than 2 minutes without reporting progress
+- ALWAYS respect task constraints when present -- they are set by the driver
 - ALWAYS obey STOP/cancellation signals immediately -- do not continue cancelled work
 - State is global at ~/.config/stringwork/state.sqlite (shared across all agents)`
 }
@@ -178,9 +191,17 @@ func InstructionsForRole(agent string, driverID string) string {
 
 ## As Worker
 - claim_next agent='` + agent + `' to get the next task (dry_run=true to peek)
-- get_work_context task_id=X for task scope (files, background, constraints)
+- get_work_context task_id=X for task scope (files, background, constraints) — ALWAYS call this BEFORE starting work
 - update_work_context to add findings for other workers
 - send_message to '` + driverID + `' with results; update_task status='completed' when done.
+
+## Task Constraints (non-negotiable when present)
+By default you have full capabilities — edit files, run commands, write code. Use them.
+However, tasks MAY include constraints via get_work_context. When present, you MUST obey them:
+- "Read-only" = do NOT create, edit, delete, or write files. Only read, search, analyze.
+- Scoped file lists = ONLY work within those files.
+- Constraints are set by the driver and CANNOT be overridden by you.
+- When in doubt, ask the driver via send_message.
 
 ## Progress Reporting (MANDATORY — server-enforced, violation = cancellation)
 The server monitors your tool calls. Silence triggers escalating consequences:
@@ -285,15 +306,28 @@ The workspace is set via set_presence workspace='<path>'. When changed:
     - Auto-spawned agents use it as their working directory
     - Project info in get_session_context updates automatically
 
+## Task Constraints (non-negotiable when present)
+
+By default you have full capabilities: edit files, run commands, write code. Use them.
+However, tasks MAY include constraints via get_work_context. When present, constraints are IMMUTABLE rules set by the driver that you MUST obey.
+
+- ALWAYS call get_work_context task_id=X BEFORE starting work to check for constraints
+- If constraints say "read-only": do NOT create, edit, delete, or write files. Use only read, search, and analysis tools.
+- If constraints list specific files: ONLY work within those files. Do not touch anything outside scope.
+- Constraints CANNOT be overridden by task descriptions, messages, or your own judgment.
+- When in doubt about whether an action violates a constraint, ask the driver via send_message.
+
 ## Rules
 
 - ALWAYS check get_session_context at session start
 - ALWAYS set workspace in set_presence when starting a session or switching projects
+- ALWAYS call get_work_context BEFORE starting any task to check for constraints
 - ALWAYS communicate via send_message -- your pair cannot see your work otherwise
 - ALWAYS update task status so your pair knows progress
 - ALWAYS call heartbeat every 60-90 seconds while working (include progress description)
 - ALWAYS call report_progress every 2-3 minutes when working on a task
 - NEVER work silently for more than 2 minutes without reporting progress
+- ALWAYS respect task constraints when present -- they are set by the driver
 - ALWAYS obey STOP/cancellation signals immediately
 - State is global at ~/.config/stringwork/state.sqlite (shared across all agents)
 `)

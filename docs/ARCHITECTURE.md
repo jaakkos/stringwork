@@ -26,7 +26,7 @@ cmd/mcp-server (main, CLI)
 |---------|------|
 | **cmd/mcp-server** | Entrypoint. Loads config, wires dependencies. Supports three modes: **daemon** (HTTP on TCP + unix socket, no stdio), **proxy** (thin stdio-to-HTTP bridge), and **standalone** (legacy stdio + HTTP in one process). CLI subcommands (`status`, `audit`, `discover`, `--version`). |
 | **internal/domain** | Core entities and aggregate state. No external dependencies. `Message`, `Task`, `Plan`, `PlanItem`, `AgentInstance`, `WorkContext`, `AuditEntry`, `FileLock`, `Presence`, `CollabState`. |
-| **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts, DLQ failure tracking), `SessionRegistry` (multi-client tracking). Defines `StateRepository`, `AuditWriter`, `AuditReader`, and `Policy` interfaces. |
+| **internal/app** | Application services and ports. `CollabService` (all collaboration operations), `WorkerManager` (spawn/kill workers, heartbeat monitoring, Gemini `GEMINI_SYSTEM_MD` generation), `TaskOrchestrator` (auto-assign tasks to workers), `Watchdog` (progress monitoring, SLA alerts, DLQ failure tracking), `SessionRegistry` (multi-client tracking). Defines `StateRepository`, `AuditWriter`, `AuditReader`, and `Policy` interfaces. |
 | **internal/repository/sqlite** | Implements `StateRepository` and `AuditWriter`/`AuditReader` using SQLite (via modernc.org/sqlite, pure Go). Full load/save of `CollabState`; separate `audit_log` table for tool call recording. |
 | **internal/policy** | Config loading from YAML, workspace path validation, state file and log file paths, global defaults. Includes `AuditConfig` for audit logging settings. |
 | **internal/tools/collab** | 24 MCP tool handlers. Each handler parses `map[string]any` args, calls `CollabService`, and returns `mcp.CallToolResult`. Also: audit middleware, piggyback notifications, MCP resource providers, dynamic instructions. |
@@ -50,8 +50,8 @@ cmd/mcp-server (main, CLI)
 
 1. Driver creates a task with `assigned_to='any'`
 2. `TaskOrchestrator` assigns it to a worker type based on strategy (least_loaded or capability_match)
-3. `WorkerManager` spawns the worker process with the configured command
-4. Worker connects to MCP server, claims the task, does work
+3. `WorkerManager` spawns the worker process with the configured command (includes constraint compliance rules in spawn prompt; for Gemini, auto-generates `GEMINI_SYSTEM_MD`)
+4. Worker connects to MCP server, claims the task (constraints surfaced inline), calls `get_work_context` to check constraints, does work
 5. `Watchdog` monitors heartbeats and progress reports, escalates if silent
 6. Worker completes task and sends findings; process exits
 7. `WorkerManager` cleans up (worktree, process resources)

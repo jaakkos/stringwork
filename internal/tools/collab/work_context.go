@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -50,7 +51,13 @@ func registerGetWorkContext(s *server.MCPServer, svc *app.CollabService, logger 
 					"parent_ctx_id":  wc.ParentCtxID,
 				}
 				bytes, _ := json.MarshalIndent(out, "", "  ")
-				result = string(bytes)
+				body := string(bytes)
+				if len(wc.Constraints) > 0 {
+					body = "⚠️ CONSTRAINTS (set by driver — you must obey these):\n" +
+						formatConstraints(wc.Constraints) +
+						"\n" + body
+				}
+				result = body
 				return nil
 			})
 			if err != nil {
@@ -142,6 +149,16 @@ func ensureWorkContextForTask(state *domain.CollabState, taskID int, relevantFil
 		}
 	}
 	return contextID
+}
+
+func formatConstraints(constraints []string) string {
+	var sb strings.Builder
+	for _, c := range constraints {
+		sb.WriteString("  - ")
+		sb.WriteString(c)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 const defaultTaskContextLockMinutes = 60

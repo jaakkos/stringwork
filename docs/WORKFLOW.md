@@ -145,7 +145,7 @@ If the task exceeds its SLA, the driver gets an alert.
 create_task title='Fix auth bug' assigned_to='any' created_by='cursor' relevant_files='["internal/auth/handler.go","internal/auth/service.go"]' background='JWT tokens expire too quickly' constraints='["Do not change the token format"]'
 ```
 
-Workers can retrieve this context with `get_work_context`.
+Workers can retrieve this context with `get_work_context`. Constraints are surfaced prominently in `get_work_context` and `claim_next` responses with warning banners. Workers must obey constraints when present (e.g. "read-only" prevents file modifications). The server also injects constraint compliance rules into worker system prompts and spawn commands.
 
 ## Worker Patterns
 

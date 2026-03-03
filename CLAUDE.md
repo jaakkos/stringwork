@@ -46,29 +46,35 @@ You are `claude-code` in the pair programming system.
 
 ### When You Receive a Task
 
-1. **Claim the task:**
+1. **Check for constraints:**
+   ```
+   Use get_work_context with task_id=X
+   ```
+   Tasks may include constraints set by the driver (e.g. "read-only", scoped file lists). When present, you MUST obey them. Most tasks have no constraints.
+
+2. **Claim the task:**
    ```
    Use update_task with id=X, status='in_progress', updated_by='claude-code'
    ```
 
-2. **Do the work** using your native Claude Code tools (file read/write, search, git, commands).
+3. **Do the work** using your native Claude Code tools (file read/write, search, git, commands).
 
-3. **MANDATORY: Report progress every 2-3 minutes** using `report_progress`:
+4. **MANDATORY: Report progress every 2-3 minutes** using `report_progress`:
    ```
    Use report_progress agent='claude-code' task_id=X description='Implemented auth middleware, now writing tests (12/15 passing). ~2 min left.' percent_complete=70 eta_seconds=120
    ```
 
-4. **MANDATORY: Call heartbeat every 60-90 seconds** with progress info:
+5. **MANDATORY: Call heartbeat every 60-90 seconds** with progress info:
    ```
    Use heartbeat agent='claude-code' progress='writing unit tests for auth' step=3 total_steps=5
    ```
 
-5. **Report findings to your pair:**
+6. **Report findings to your pair:**
    ```
    Use send_message from='claude-code' to='cursor' with your findings
    ```
 
-6. **Mark task complete:**
+7. **Mark task complete:**
    ```
    Use update_task with id=X, status='completed', updated_by='claude-code'
    ```

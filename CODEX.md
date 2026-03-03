@@ -51,19 +51,25 @@ All agents share the same state via `~/.config/stringwork/state.sqlite`.
 
 ### When You Receive a Task
 
-1. **Claim the task:**
+1. **Check for constraints:**
+   ```
+   Use get_work_context with task_id=X
+   ```
+   Tasks may include constraints set by the driver (e.g. "read-only", scoped file lists). When present, you MUST obey them. Most tasks have no constraints.
+
+2. **Claim the task:**
    ```
    Use update_task with id=X, status='in_progress', updated_by='codex'
    ```
 
-2. **Do the work** using your native Codex tools (file read/write, search, git, commands).
+3. **Do the work** using your native Codex tools (file read/write, search, git, commands).
 
-3. **Report findings to your pairs:**
+4. **Report findings to your pairs:**
    ```
    Use send_message from='codex' to='cursor' with your findings
    ```
 
-4. **Mark task complete:**
+5. **Mark task complete:**
    ```
    Use update_task with id=X, status='completed', updated_by='codex'
    ```

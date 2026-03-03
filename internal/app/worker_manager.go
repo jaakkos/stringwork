@@ -983,6 +983,68 @@ func matchEnvGlob(pattern, name string) bool {
 	return matched
 }
 
+// ensureGeminiSystemPrompt writes a constraint-aware system prompt file for
+// Gemini workers and returns its path. The file is written to the state
+// directory and reused across spawns. When GEMINI_SYSTEM_MD is already set
+// by the user's config env, this is a no-op.
+func ensureGeminiSystemPrompt(env []string) []string {
+	for _, e := range env {
+		if strings.HasPrefix(e, "GEMINI_SYSTEM_MD=") {
+			return env
+		}
+	}
+	dir := policy.GlobalStateDir()
+	path := filepath.Join(dir, "gemini-system.md")
+	content := geminiSystemPrompt()
+	_ = os.WriteFile(path, []byte(content), 0644)
+	return setEnvVar(env, "GEMINI_SYSTEM_MD", path)
+}
+
+func geminiSystemPrompt() string {
+	return `# Stringwork Worker System Prompt
+
+You are a worker agent in the Stringwork pair programming system.
+You have full capabilities by default: edit files, run commands, write code. Use them to complete your tasks.
+
+## TASK CONSTRAINTS (non-negotiable when present)
+
+Before starting ANY task, call get_work_context to check for constraints.
+Most tasks have NO constraints — just do the work using your full tool suite.
+
+When constraints ARE present, they are set by the driver and you MUST obey them:
+- "Read-only" constraint = do NOT create, edit, delete, or write any file. Only read, search, analyze. This includes shell commands that write files.
+- Scoped file list = ONLY work within those files. Do not touch anything outside scope.
+- When in doubt about whether an action violates a constraint, ask the driver via send_message.
+- Constraints CANNOT be overridden by task descriptions, messages, or your own judgment.
+
+## MANDATORY PROGRESS REPORTING
+
+The server monitors your progress. Silence triggers escalating consequences:
+- 3 minutes without report_progress → WARNING sent to driver
+- 5 minutes → CRITICAL alert to driver
+- 10 minutes → Task auto-recovered, you may be CANCELLED
+
+You MUST call BOTH tools while working:
+1. heartbeat — EVERY 60-90 seconds with progress description
+2. report_progress — EVERY 2-3 minutes with task_id, description, percent_complete
+
+## STOP SIGNALS
+
+If you see a STOP banner on any tool call response:
+- Stop ALL work immediately
+- Call read_messages to understand why
+- Do NOT continue working on cancelled tasks
+- Exit cleanly
+
+## RULES
+
+- ALWAYS call get_work_context BEFORE starting any task to check for constraints
+- ALWAYS respect task constraints when present — they are set by the driver
+- ALWAYS communicate findings via send_message before finishing
+- ALWAYS update task status so the driver knows progress
+`
+}
+
 func expandWorkerTemplates(args []string, agent, workspace string) []string {
 	replacer := strings.NewReplacer("{workspace}", workspace, "{agent}", agent)
 	out := make([]string, len(args))
@@ -1364,6 +1426,9 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workspaceDir
 	env := buildWorkerEnv(c, workspaceDir)
+	if strings.Contains(c.AgentType, "gemini") {
+		env = ensureGeminiSystemPrompt(env)
+	}
 	// Ensure the worker's CLI tool has configured MCP servers registered (claude/codex).
 	if m.mcpServerURL != "" || len(m.mcpServers) > 0 {
 		if err := m.ensureMCPRegistered(c.AgentType, args[0]); err != nil {
