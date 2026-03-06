@@ -450,6 +450,115 @@ func (m *WorkerManager) RefreshMCPRegistrations() {
 	}()
 }
 
+// PreflightResult describes the health of a single worker configuration.
+type PreflightResult struct {
+	InstanceID string `json:"instance_id"`
+	AgentType  string `json:"agent_type"`
+	Binary     string `json:"binary"`
+	Found      bool   `json:"found"`
+	Path       string `json:"path,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// Preflight validates all configured worker binaries before spawning.
+// Returns a list of results (one per worker config). Issues are logged
+// and sent to the driver as a system message.
+func (m *WorkerManager) Preflight() []PreflightResult {
+	if len(m.configs) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var results []PreflightResult
+	var issues []string
+
+	for _, c := range m.configs {
+		if len(c.Command) == 0 {
+			continue
+		}
+		binary := c.Command[0]
+		if seen[binary] {
+			continue
+		}
+		seen[binary] = true
+
+		r := PreflightResult{
+			InstanceID: c.InstanceID,
+			AgentType:  c.AgentType,
+			Binary:     binary,
+		}
+
+		resolved, err := resolveWorkerBinary(binary)
+		if err != nil {
+			r.Error = err.Error()
+			issue := fmt.Sprintf("  - %s (%s): %s", c.AgentType, binary, err)
+			issues = append(issues, issue)
+			m.logger.Printf("WorkerManager: preflight FAIL %s: %s", c.AgentType, err)
+		} else {
+			r.Found = true
+			r.Path = resolved
+			m.logger.Printf("WorkerManager: preflight OK %s: %s", c.AgentType, resolved)
+		}
+		results = append(results, r)
+	}
+
+	if len(issues) > 0 && m.stateMutator != nil {
+		msg := "## Worker Preflight Issues\n\n" +
+			"The following worker binaries could not be found or are not executable:\n\n" +
+			strings.Join(issues, "\n") +
+			"\n\nWorkers with missing binaries will fail when tasks are assigned. " +
+			"Fix the paths in `~/.config/stringwork/config.yaml` or install the missing CLIs.\n" +
+			"Run `mcp-stringwork discover` to scan for available agent CLIs."
+		_ = m.stateMutator(func(state *domain.CollabState) error {
+			EnsureStateMaps(state)
+			state.Messages = append(state.Messages, domain.Message{
+				ID:        state.NextMsgID,
+				From:      "system",
+				To:        m.driver(),
+				Content:   msg,
+				Timestamp: time.Now(),
+				Read:      false,
+			})
+			state.NextMsgID++
+			return nil
+		})
+	}
+
+	return results
+}
+
+// resolveWorkerBinary checks that a binary exists and is executable.
+func resolveWorkerBinary(binary string) (string, error) {
+	if filepath.IsAbs(binary) {
+		info, err := os.Stat(binary)
+		if err != nil {
+			return "", fmt.Errorf("binary not found: %s", binary)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("path is a directory, not a binary: %s", binary)
+		}
+		if info.Mode()&0111 == 0 {
+			return "", fmt.Errorf("binary is not executable: %s", binary)
+		}
+		return binary, nil
+	}
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return "", fmt.Errorf("binary not found in PATH: %s", binary)
+	}
+	return resolved, nil
+}
+
+// driver returns the driver agent name from the first config's context, or "cursor" as default.
+func (m *WorkerManager) driver() string {
+	if m.getAgent != nil {
+		if d := m.getAgent(); d != "" {
+			return d
+		}
+	}
+	return "cursor"
+}
+
 // StartupCheck runs a check after a short delay to pick up pending work after server start.
 // In HTTP mode, it waits for the MCP endpoint to become reachable before spawning workers.
 func (m *WorkerManager) StartupCheck() {

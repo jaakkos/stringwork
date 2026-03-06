@@ -320,6 +320,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		}
 		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
 		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
+		wm.Preflight()
 		wm.StartupCheck()
 	}
 

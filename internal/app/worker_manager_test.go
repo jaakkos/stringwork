@@ -1,13 +1,22 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jaakkos/stringwork/internal/domain"
 )
+
+func testLogger(t *testing.T) *log.Logger {
+	t.Helper()
+	return log.New(os.Stderr, "[test] ", log.LstdFlags)
+}
 
 func TestMcpBaseURL(t *testing.T) {
 	tests := []struct {
@@ -606,6 +615,166 @@ func TestWorkerErrorClass_Terminal(t *testing.T) {
 	}
 	if !workerErrorNotFound.Terminal() {
 		t.Error("not_found should be terminal")
+	}
+}
+
+func TestResolveWorkerBinary_AbsoluteExists(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "myagent")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveWorkerBinary(bin)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if resolved != bin {
+		t.Errorf("expected %s, got %s", bin, resolved)
+	}
+}
+
+func TestResolveWorkerBinary_AbsoluteMissing(t *testing.T) {
+	_, err := resolveWorkerBinary("/nonexistent/path/to/agent")
+	if err == nil {
+		t.Fatal("expected error for missing binary")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestResolveWorkerBinary_AbsoluteNotExecutable(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "noexec")
+	if err := os.WriteFile(bin, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveWorkerBinary(bin)
+	if err == nil {
+		t.Fatal("expected error for non-executable binary")
+	}
+	if !strings.Contains(err.Error(), "not executable") {
+		t.Errorf("expected 'not executable' in error, got: %v", err)
+	}
+}
+
+func TestResolveWorkerBinary_InPATH(t *testing.T) {
+	resolved, err := resolveWorkerBinary("sh")
+	if err != nil {
+		t.Fatalf("expected 'sh' to be found: %v", err)
+	}
+	if resolved == "" {
+		t.Error("expected non-empty path")
+	}
+}
+
+func TestResolveWorkerBinary_NotInPATH(t *testing.T) {
+	_, err := resolveWorkerBinary("stringwork_nonexistent_binary_xyz")
+	if err == nil {
+		t.Fatal("expected error for binary not in PATH")
+	}
+	if !strings.Contains(err.Error(), "not found in PATH") {
+		t.Errorf("expected 'not found in PATH' in error, got: %v", err)
+	}
+}
+
+func TestResolveWorkerBinary_Directory(t *testing.T) {
+	tmp := t.TempDir()
+	_, err := resolveWorkerBinary(tmp)
+	if err == nil {
+		t.Fatal("expected error for directory path")
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("expected 'directory' in error, got: %v", err)
+	}
+}
+
+func TestPreflight_NoConfigs(t *testing.T) {
+	wm := &WorkerManager{configs: nil}
+	results := wm.Preflight()
+	if results != nil {
+		t.Errorf("expected nil results for empty configs, got %v", results)
+	}
+}
+
+func TestPreflight_MixedBinaries(t *testing.T) {
+	tmp := t.TempDir()
+	goodBin := filepath.Join(tmp, "good-agent")
+	if err := os.WriteFile(goodBin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	wm := &WorkerManager{
+		configs: []WorkerSpawnConfig{
+			{InstanceID: "good-1", AgentType: "good", Command: []string{goodBin, "-p", "do work"}},
+			{InstanceID: "bad-1", AgentType: "bad", Command: []string{"/nonexistent/bad-agent"}},
+		},
+		logger:              testLogger(t),
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		processActivity:     make(map[string]*ProcessInfo),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+	}
+	results := wm.Preflight()
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if !results[0].Found {
+		t.Errorf("expected good binary to be found")
+	}
+	if results[0].Path != goodBin {
+		t.Errorf("expected path %s, got %s", goodBin, results[0].Path)
+	}
+	if results[1].Found {
+		t.Errorf("expected bad binary to NOT be found")
+	}
+	if results[1].Error == "" {
+		t.Errorf("expected error message for bad binary")
+	}
+}
+
+func TestPreflight_SendsMessageOnIssues(t *testing.T) {
+	var mutated bool
+	var msgContent string
+	wm := &WorkerManager{
+		configs: []WorkerSpawnConfig{
+			{InstanceID: "missing-1", AgentType: "missing", Command: []string{"/nonexistent/missing-agent"}},
+		},
+		logger: testLogger(t),
+		getAgent: func() string {
+			return "cursor"
+		},
+		stateMutator: func(fn func(*domain.CollabState) error) error {
+			mutated = true
+			state := &domain.CollabState{}
+			EnsureStateMaps(state)
+			if err := fn(state); err != nil {
+				return err
+			}
+			if len(state.Messages) > 0 {
+				msgContent = state.Messages[0].Content
+			}
+			return nil
+		},
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		processActivity:     make(map[string]*ProcessInfo),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+	}
+
+	wm.Preflight()
+	if !mutated {
+		t.Fatal("expected stateMutator to be called for preflight issues")
+	}
+	if !strings.Contains(msgContent, "Preflight") {
+		t.Errorf("expected message to contain 'Preflight', got: %s", msgContent)
+	}
+	if !strings.Contains(msgContent, "missing") {
+		t.Errorf("expected message to mention 'missing' agent, got: %s", msgContent)
 	}
 }
 
