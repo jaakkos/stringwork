@@ -46,6 +46,7 @@ type serverBundle struct {
 	notifier  *app.Notifier
 	watchdog  *app.Watchdog
 	cleanup   func()
+	ctx       context.Context // cancelled on SIGINT/SIGTERM
 }
 
 func main() {
@@ -59,6 +60,9 @@ func main() {
 			return
 		case "discover":
 			runDiscoverCommand()
+			return
+		case "restart":
+			runRestartCommand()
 			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
@@ -321,7 +325,6 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
 		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
 		wm.Preflight()
-		wm.StartupCheck()
 	}
 
 	var wtManager *worktree.Manager
@@ -384,6 +387,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		notifier:  notifier,
 		watchdog:  watchdog,
 		cleanup:   cleanupFunc,
+		ctx:       ctx,
 	}
 }
 
@@ -455,6 +459,10 @@ func setupAndServeHTTP(bundle *serverBundle) (baseURL string, handler http.Handl
 // runStandalone runs in legacy single-process mode: stdio for the driver, HTTP for workers.
 func runStandalone(bundle *serverBundle) {
 	_, _, httpShutdown := setupAndServeHTTP(bundle)
+
+	if bundle.wm != nil {
+		bundle.wm.StartupCheck()
+	}
 
 	bundle.logger.Println("Stdio ready (driver connection)")
 	stdioSrv := server.NewStdioServer(bundle.mcpServer)
@@ -727,4 +735,83 @@ func runDiscoverCommand() {
 			fmt.Printf("      timeout_seconds: 600\n")
 		}
 	}
+}
+
+func runRestartCommand() {
+	logger := log.New(os.Stderr, "[mcp-pair] ", log.LstdFlags)
+	cfg := loadConfig(logger)
+	pol := policy.New(cfg)
+
+	socketPath := pol.SocketPath()
+	pidFile := pol.PIDFile()
+
+	stopped := stopDaemon(pidFile, socketPath, logger)
+	if !stopped {
+		fmt.Println("No running daemon found")
+	}
+
+	if !pol.DaemonEnabled() {
+		if stopped {
+			fmt.Println("Daemon stopped (daemon mode not enabled in config, skipping restart)")
+		} else {
+			fmt.Println("Daemon mode not enabled in config")
+		}
+		return
+	}
+
+	fmt.Println("Starting daemon with fresh config...")
+	if err := startDaemonProcess(socketPath, pidFile, logger); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start daemon: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Daemon restarted successfully")
+}
+
+func stopDaemon(pidFile, socketPath string, logger *log.Logger) bool {
+	pid, err := readPIDFile(pidFile)
+	if err != nil {
+		if isDaemonRunning(socketPath) {
+			logger.Println("Daemon is running but no PID file found, cannot stop")
+			return false
+		}
+		return false
+	}
+
+	if !isPIDAlive(pid) {
+		logger.Printf("Stale PID file (pid=%d), cleaning up", pid)
+		removePIDFile(pidFile)
+		removeStaleSocket(socketPath)
+		return false
+	}
+
+	fmt.Printf("Stopping daemon (pid=%d)...\n", pid)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		logger.Printf("Cannot find process %d: %v", pid, err)
+		return false
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		logger.Printf("Failed to send SIGTERM to %d: %v", pid, err)
+		return false
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isPIDAlive(pid) {
+			removePIDFile(pidFile)
+			removeStaleSocket(socketPath)
+			fmt.Println("Daemon stopped")
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	logger.Printf("Daemon did not exit within 10s, sending SIGKILL")
+	_ = proc.Signal(syscall.SIGKILL)
+	time.Sleep(500 * time.Millisecond)
+	removePIDFile(pidFile)
+	removeStaleSocket(socketPath)
+	fmt.Println("Daemon killed")
+	return true
 }

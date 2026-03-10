@@ -168,6 +168,8 @@ func (m *WorkerManager) SetSessionChecker(fn func(string) bool) {
 // SetMCPServerURL sets the MCP server URL (e.g. http://localhost:8943/mcp) for auto-registering MCP with worker CLIs.
 // Spawned workers (Claude Code, Codex) get the stringwork MCP server registered via their CLI tools.
 func (m *WorkerManager) SetMCPServerURL(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.mcpServerURL = strings.TrimSuffix(url, "/")
 }
 
@@ -366,10 +368,12 @@ func (m *WorkerManager) SetMCPServers(servers []MCPServerEntry) {
 // Returns true if no URL is set or if the health endpoint responds.
 // Once ready, the result is cached — the server is in-process and stays ready.
 func (m *WorkerManager) checkMCPReady() bool {
-	if m.mcpServerURL == "" {
-		return true // no URL configured, skip check
-	}
 	m.mu.Lock()
+	url := m.mcpServerURL
+	if url == "" {
+		m.mu.Unlock()
+		return true
+	}
 	if m.mcpReady {
 		m.mu.Unlock()
 		return true
@@ -377,7 +381,7 @@ func (m *WorkerManager) checkMCPReady() bool {
 	m.mu.Unlock()
 
 	// Derive health URL from the MCP server URL (e.g. http://localhost:8943/mcp -> http://localhost:8943/health)
-	base := m.mcpServerURL
+	base := url
 	if idx := strings.LastIndex(base, "/mcp"); idx >= 0 {
 		base = base[:idx]
 	}
@@ -406,14 +410,17 @@ func (m *WorkerManager) checkMCPReady() bool {
 // the port changes on every restart, leaving stale entries in worker configs.
 // This cleans them up immediately rather than waiting for the first worker spawn.
 func (m *WorkerManager) RefreshMCPRegistrations() {
-	if m.mcpServerURL == "" || len(m.configs) == 0 {
+	m.mu.Lock()
+	url := m.mcpServerURL
+	m.mu.Unlock()
+	if url == "" || len(m.configs) == 0 {
 		return
 	}
 	go func() {
 		for _, wc := range m.configs {
 			exe := wc.Command[0]
 			agentType := wc.AgentType
-			entry := MCPServerEntry{Name: "stringwork", URL: m.mcpServerURL}
+			entry := MCPServerEntry{Name: "stringwork", URL: url}
 
 			var alreadyCurrent bool
 			switch {
@@ -444,7 +451,7 @@ func (m *WorkerManager) RefreshMCPRegistrations() {
 			if err != nil {
 				m.logger.Printf("WorkerManager: refresh MCP for %s: %v (will retry on spawn)", agentType, err)
 			} else {
-				m.logger.Printf("WorkerManager: stringwork MCP refreshed for %s → %s", agentType, m.mcpServerURL)
+				m.logger.Printf("WorkerManager: stringwork MCP refreshed for %s → %s", agentType, url)
 			}
 		}
 	}()
@@ -647,6 +654,9 @@ func (m *WorkerManager) Check() {
 	}
 
 	workspace := m.resolveWorkspace(state)
+	if workspace == "" || workspace == "/" {
+		return
+	}
 
 	for _, c := range m.configs {
 		if c.InstanceID == connected || c.AgentType == connected {
@@ -1539,7 +1549,10 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		env = ensureGeminiSystemPrompt(env)
 	}
 	// Ensure the worker's CLI tool has configured MCP servers registered (claude/codex).
-	if m.mcpServerURL != "" || len(m.mcpServers) > 0 {
+	m.mu.Lock()
+	hasMCP := m.mcpServerURL != "" || len(m.mcpServers) > 0
+	m.mu.Unlock()
+	if hasMCP {
 		if err := m.ensureMCPRegistered(c.AgentType, args[0]); err != nil {
 			m.logger.Printf("WorkerManager: MCP registration warning for %s: %v", c.InstanceID, err)
 		}

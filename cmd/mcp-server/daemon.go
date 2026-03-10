@@ -60,6 +60,10 @@ func runDaemon(bundle *serverBundle) {
 	}()
 	bundle.logger.Printf("Daemon: unix socket ready at %s", socketPath)
 
+	if bundle.wm != nil {
+		bundle.wm.StartupCheck()
+	}
+
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -74,6 +78,8 @@ func runDaemon(bundle *serverBundle) {
 		bundle.logger.Println("Daemon: all drivers disconnected, shutting down")
 	case <-tracker.ctx.Done():
 		bundle.logger.Println("Daemon: context cancelled, shutting down")
+	case <-bundle.ctx.Done():
+		bundle.logger.Println("Daemon: signal received, shutting down")
 	}
 
 	httpShutdown()
@@ -239,9 +245,12 @@ func startDaemonProcess(socketPath, pidFile string, logger interface{ Printf(str
 
 	cmd := exec.Command(exe, "--daemon")
 	cmd.Env = os.Environ()
-	cmd.Dir = os.Getenv("PWD")
-	if cmd.Dir == "" {
-		cmd.Dir, _ = os.Getwd()
+	cmd.Dir, _ = os.Getwd()
+	if envPwd := os.Getenv("PWD"); envPwd != "" && envPwd != "/" {
+		cmd.Dir = envPwd
+	}
+	if cmd.Dir == "/" || cmd.Dir == "" {
+		cmd.Dir = os.TempDir()
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout = nil
