@@ -218,7 +218,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .sla-ok { color: var(--green); }
 
   /* Messages */
-  .msg-list { max-height: 400px; overflow-y: auto; }
+  .msg-list { max-height: 600px; overflow-y: auto; }
   .msg {
     padding: 8px 14px;
     border-bottom: 1px solid var(--border);
@@ -243,7 +243,24 @@ const dashboardHTML = `<!DOCTYPE html>
     max-height: 60px;
     overflow: hidden;
     line-height: 1.4;
+    cursor: pointer;
+    position: relative;
   }
+  .msg-body.truncated::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 20px;
+    background: linear-gradient(transparent, var(--surface));
+    pointer-events: none;
+  }
+  .msg-body.expanded {
+    max-height: none;
+    overflow: visible;
+  }
+  .msg-body.expanded::after { display: none; }
   .msg.unread { border-left: 3px solid var(--accent); }
 
   /* Plan items */
@@ -652,7 +669,7 @@ function renderMessages(messages) {
     el.innerHTML = '<div class="empty">No messages</div>';
     return;
   }
-  el.innerHTML = messages.map(m => {
+  el.innerHTML = messages.map((m, i) => {
     const unread = m.read ? '' : ' unread';
     return '<div class="msg' + unread + '">' +
       '<div class="msg-header">' +
@@ -660,9 +677,25 @@ function renderMessages(messages) {
         '<span class="msg-to">&#8594; ' + esc(m.to) + '</span>' +
         '<span class="msg-time">' + esc(m.timestamp) + ' (' + esc(m.age) + ')</span>' +
       '</div>' +
-      '<div class="msg-body">' + esc(m.content) + '</div>' +
+      '<div class="msg-body" id="msg-body-' + i + '" onclick="toggleMsg(this)">' + esc(m.content) + '</div>' +
     '</div>';
   }).join('');
+  // Mark messages that overflow as truncated
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.msg-body').forEach(el => {
+      if (el.scrollHeight > 62 && !el.classList.contains('expanded')) {
+        el.classList.add('truncated');
+      }
+    });
+  });
+}
+
+function toggleMsg(el) {
+  el.classList.toggle('expanded');
+  el.classList.remove('truncated');
+  if (!el.classList.contains('expanded') && el.scrollHeight > 62) {
+    el.classList.add('truncated');
+  }
 }
 
 function renderSide(data) {
