@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/jaakkos/stringwork/internal/domain"
@@ -108,10 +109,36 @@ func selectLeastLoaded(state *domain.CollabState, requiredCaps []string) *domain
 	return best
 }
 
+// BackoffChecker reports which agent types are currently in failure backoff
+// (rate-limited, auth failure, etc.) and should be skipped during assignment.
+type BackoffChecker interface {
+	BackedOffAgentTypes() []string
+}
+
+// SetWorktreeForAssignedTask is called after a task is assigned to set the worktree
+// in the task's work context when the assigned worker uses Claude native worktrees.
+// It receives the live state, the assigned task, and the chosen instance.
+type SetWorktreeForAssignedTask func(state *domain.CollabState, task *domain.Task, inst *domain.AgentInstance)
+
 // TaskOrchestrator assigns new tasks to workers using a strategy.
 type TaskOrchestrator struct {
-	svc      *CollabService
-	strategy func(*domain.Task, *domain.CollabState) *domain.AgentInstance
+	svc            *CollabService
+	strategy       func(*domain.Task, *domain.CollabState) *domain.AgentInstance
+	backoffChecker BackoffChecker
+	// setWorktree is called after assignment to set WorktreeName on the task's work context when needed.
+	setWorktree SetWorktreeForAssignedTask
+}
+
+// SetBackoffChecker sets the backoff checker used to skip rate-limited
+// agent types during task assignment.
+func (o *TaskOrchestrator) SetBackoffChecker(c BackoffChecker) {
+	o.backoffChecker = c
+}
+
+// SetWorktreeForAssignedTask sets the callback that updates the task's work context
+// with the worktree name when the assigned worker uses Claude worktrees.
+func (o *TaskOrchestrator) SetWorktreeForAssignedTask(fn SetWorktreeForAssignedTask) {
+	o.setWorktree = fn
 }
 
 // NewTaskOrchestrator creates an orchestrator. Strategy name: capability_match, least_loaded, round_robin.
@@ -130,12 +157,23 @@ func NewTaskOrchestrator(svc *CollabService, strategyName string) *TaskOrchestra
 
 // AssignTask assigns a task to the best available worker and updates state (AssignedTo).
 // Call from within a state-mutating fn; the given task and state are the live references.
+// Rate-limited/backed-off agent types are automatically excluded from assignment.
 // Returns the instance ID assigned, or "" if none.
 func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabState) string {
 	if state.DriverID == "" {
 		return ""
 	}
-	inst := o.strategy(task, state)
+	var inst *domain.AgentInstance
+	if o.backoffChecker != nil {
+		excludeTypes := o.backoffChecker.BackedOffAgentTypes()
+		if len(excludeTypes) > 0 {
+			inst = selectWithExclusions(task, state, excludeTypes)
+		} else {
+			inst = o.strategy(task, state)
+		}
+	} else {
+		inst = o.strategy(task, state)
+	}
 	if inst == nil {
 		return ""
 	}
@@ -143,6 +181,9 @@ func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabSta
 	inst.CurrentTasks = append(inst.CurrentTasks, task.ID)
 	inst.Status = "busy"
 	inst.LastHeartbeat = time.Now()
+	if o.setWorktree != nil {
+		o.setWorktree(state, task, inst)
+	}
 	return inst.InstanceID
 }
 
@@ -161,7 +202,43 @@ func (o *TaskOrchestrator) ReassignTask(task *domain.Task, state *domain.CollabS
 	inst.CurrentTasks = append(inst.CurrentTasks, task.ID)
 	inst.Status = "busy"
 	inst.LastHeartbeat = time.Now()
+	if o.setWorktree != nil {
+		o.setWorktree(state, task, inst)
+	}
 	return inst.InstanceID
+}
+
+// EnsureWorkContextWorktree ensures the task has a work context and sets its
+// WorktreeName to the given value. Used by the orchestrator's setWorktree callback
+// so that scope and work setup include the Claude worktree when necessary.
+// If the task already has a context, it is updated; otherwise a minimal context is created.
+func EnsureWorkContextWorktree(state *domain.CollabState, task *domain.Task, worktreeName string) {
+	if worktreeName == "" {
+		return
+	}
+	if state.WorkContexts == nil {
+		state.WorkContexts = make(map[string]*domain.WorkContext)
+	}
+	contextID := task.ContextID
+	if contextID != "" {
+		if wc := state.WorkContexts[contextID]; wc != nil {
+			wc.WorktreeName = worktreeName
+			return
+		}
+	}
+	contextID = fmt.Sprintf("ctx-%d-%d", task.ID, time.Now().UnixNano())
+	state.WorkContexts[contextID] = &domain.WorkContext{
+		ID:           contextID,
+		TaskID:       task.ID,
+		WorktreeName: worktreeName,
+		SharedNotes:  make(map[string]string),
+	}
+	for i := range state.Tasks {
+		if state.Tasks[i].ID == task.ID {
+			state.Tasks[i].ContextID = contextID
+			break
+		}
+	}
 }
 
 // selectWithExclusions picks the least-loaded worker that matches task capabilities

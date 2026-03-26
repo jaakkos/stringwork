@@ -36,15 +36,17 @@ const (
 
 // WorkerSpawnConfig is a single spawnable worker (one instance).
 type WorkerSpawnConfig struct {
-	InstanceID string // e.g. "claude-code-1", "codex"
-	AgentType  string // e.g. "claude-code", "codex"
-	Command    []string
-	Cooldown   time.Duration
-	Timeout    time.Duration
-	RetryDelay time.Duration
-	MaxRetries int
-	Env        map[string]string // additional env vars for this worker
-	InheritEnv []string          // glob patterns for env var names to inherit (empty = all)
+	InstanceID         string // e.g. "claude-code-1", "codex"
+	AgentType          string // e.g. "claude-code", "codex"
+	Command            []string
+	Cooldown           time.Duration
+	Timeout            time.Duration
+	RetryDelay         time.Duration
+	MaxRetries         int
+	Env                map[string]string // additional env vars for this worker
+	InheritEnv         []string          // glob patterns for env var names to inherit (empty = all)
+	UseClaudeWorktree  bool              // if true, inject -w for Claude native worktree
+	ClaudeWorktreeName string            // optional: worktree name from orchestrator scope; overrides InstanceID for -w
 }
 
 // MCPServerEntry is a single MCP server configuration for worker CLI registration.
@@ -54,6 +56,12 @@ type MCPServerEntry struct {
 	Command string            // command-based server
 	Args    []string          // command arguments
 	Env     map[string]string // command environment
+}
+
+// pendingSpawn is a queued task waiting for a worker slot to open up.
+type pendingSpawn struct {
+	TaskID    int
+	AgentType string // which worker type to spawn (e.g. "claude-code")
 }
 
 // WorkerManager spawns and tracks worker instances from orchestration config (instance IDs, e.g. claude-code-1, claude-code-2).
@@ -78,8 +86,8 @@ type WorkerManager struct {
 	mcpRegistered map[string]bool
 	// worktreeManager creates isolated git worktrees per worker instance.
 	worktreeManager *worktree.Manager
-	// processActivity tracks when each worker process last produced output.
-	processActivity map[string]*ProcessInfo
+	// processRuntime tracks each worker's process metadata and output tail buffer.
+	processRuntime map[string]*workerRuntime
 	// consecutiveFailures tracks how many full spawn cycles (all retries exhausted)
 	// have failed in a row for each worker, used for exponential backoff.
 	consecutiveFailures map[string]int
@@ -88,6 +96,8 @@ type WorkerManager struct {
 	// backoffUntil holds an explicit "do not retry before" deadline, set when the
 	// worker output contains a parseable retry-after (e.g., quota reset time).
 	backoffUntil map[string]time.Time
+	// pendingSpawns is a per-agent-type FIFO queue of tasks waiting for a worker slot.
+	pendingSpawns map[string][]pendingSpawn
 }
 
 // ProcessInfo holds runtime process metadata for a worker instance.
@@ -97,6 +107,14 @@ type ProcessInfo struct {
 	LastOutputAt time.Time `json:"last_output_at"`
 	OutputBytes  int64     `json:"output_bytes"`
 	WorkspaceDir string    `json:"workspace_dir"`
+	LogPath      string    `json:"log_path"`
+}
+
+// workerRuntime bundles process metadata and output tail buffer together
+// so they share the same lifecycle (created and destroyed atomically).
+type workerRuntime struct {
+	info *ProcessInfo
+	tail *tailBuffer
 }
 
 // NewWorkerManager creates a WorkerManager from orchestration config. Workers are built from orch.Workers only.
@@ -130,15 +148,16 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 					instanceID = fmt.Sprintf("%s-%d", w.Type, i+1)
 				}
 				configs = append(configs, WorkerSpawnConfig{
-					InstanceID: instanceID,
-					AgentType:  w.Type,
-					Command:    w.Command,
-					Cooldown:   cooldown,
-					Timeout:    timeout,
-					RetryDelay: retryDelay,
-					MaxRetries: maxRetries,
-					Env:        w.Env,
-					InheritEnv: w.InheritEnv,
+					InstanceID:        instanceID,
+					AgentType:         w.Type,
+					Command:           w.Command,
+					Cooldown:          cooldown,
+					Timeout:           timeout,
+					RetryDelay:        retryDelay,
+					MaxRetries:        maxRetries,
+					Env:               w.Env,
+					InheritEnv:        w.InheritEnv,
+					UseClaudeWorktree: w.UseClaudeWorktree,
 				})
 			}
 		}
@@ -153,10 +172,11 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		lastSpawn:           make(map[string]time.Time),
 		runningWorkers:      make(map[string]context.CancelFunc),
 		mcpRegistered:       make(map[string]bool),
-		processActivity:     make(map[string]*ProcessInfo),
+		processRuntime:      make(map[string]*workerRuntime),
 		consecutiveFailures: make(map[string]int),
 		lastFailure:         make(map[string]time.Time),
 		backoffUntil:        make(map[string]time.Time),
+		pendingSpawns:       make(map[string][]pendingSpawn),
 	}
 }
 
@@ -177,13 +197,25 @@ func (m *WorkerManager) SetMCPServerURL(url string) {
 func (m *WorkerManager) GetProcessInfo() map[string]ProcessInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make(map[string]ProcessInfo, len(m.processActivity))
-	for k, v := range m.processActivity {
-		if v != nil {
-			result[k] = *v
+	result := make(map[string]ProcessInfo, len(m.processRuntime))
+	for k, rt := range m.processRuntime {
+		if rt != nil && rt.info != nil {
+			result[k] = *rt.info
 		}
 	}
 	return result
+}
+
+// GetRecentOutput returns the last chunk of output from a running worker's
+// in-memory tail buffer. Returns empty string if the worker is not running.
+func (m *WorkerManager) GetRecentOutput(instanceID string) string {
+	m.mu.Lock()
+	rt := m.processRuntime[instanceID]
+	m.mu.Unlock()
+	if rt == nil || rt.tail == nil {
+		return ""
+	}
+	return rt.tail.String()
 }
 
 // activityWriter wraps an io.Writer and records when writes happen for process monitoring.
@@ -205,8 +237,9 @@ func (w *activityWriter) Write(p []byte) (int, error) {
 }
 
 // tailBuffer is a ring buffer that retains the last N bytes written to it.
-// Used to capture the tail of worker process output for error diagnostics.
+// Thread-safe: Write and String can be called from different goroutines.
 type tailBuffer struct {
+	mu   sync.Mutex
 	buf  []byte
 	size int
 	pos  int
@@ -218,6 +251,8 @@ func newTailBuffer(size int) *tailBuffer {
 }
 
 func (tb *tailBuffer) Write(p []byte) (int, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
 	n := len(p)
 	if n >= tb.size {
 		copy(tb.buf, p[n-tb.size:])
@@ -240,10 +275,21 @@ func (tb *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (tb *tailBuffer) String() string {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
 	if !tb.full {
 		return string(tb.buf[:tb.pos])
 	}
 	return string(tb.buf[tb.pos:]) + string(tb.buf[:tb.pos])
+}
+
+func (tb *tailBuffer) Bytes() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.full {
+		return tb.size
+	}
+	return tb.pos
 }
 
 // workerErrorClass categorizes worker process failures to decide retry strategy.
@@ -592,8 +638,10 @@ func (m *WorkerManager) StartupCheck() {
 	}()
 }
 
-// Check examines state and spawns workers for instances that have unread messages or pending tasks.
-// In HTTP mode, skips spawning if the MCP endpoint is not reachable.
+// Check examines state and spawns workers for instances that have unread messages.
+// Tasks are handled via SpawnForTask (direct spawn-per-task), so Check only
+// handles message-driven auto-respond. In HTTP mode, skips spawning if the
+// MCP endpoint is not reachable.
 func (m *WorkerManager) Check() {
 	if len(m.configs) == 0 {
 		return
@@ -610,7 +658,6 @@ func (m *WorkerManager) Check() {
 	EnsureAgentInstances(state, nil)
 
 	unreadFor := make(map[string]int)
-	pendingFor := make(map[string]int)
 	latestUnread := make(map[string]time.Time)
 	agentTypes := make(map[string]struct{})
 	for _, c := range m.configs {
@@ -634,24 +681,6 @@ func (m *WorkerManager) Check() {
 			latestUnread[msg.To] = msg.Timestamp
 		}
 	}
-	for _, t := range state.Tasks {
-		if t.Status != "pending" {
-			continue
-		}
-		if t.AssignedTo == "any" {
-			for typ := range agentTypes {
-				pendingFor[typ]++
-				if t.CreatedAt.After(latestUnread[typ]) {
-					latestUnread[typ] = t.CreatedAt
-				}
-			}
-			continue
-		}
-		pendingFor[t.AssignedTo]++
-		if t.CreatedAt.After(latestUnread[t.AssignedTo]) {
-			latestUnread[t.AssignedTo] = t.CreatedAt
-		}
-	}
 
 	workspace := m.resolveWorkspace(state)
 	if workspace == "" || workspace == "/" {
@@ -662,8 +691,8 @@ func (m *WorkerManager) Check() {
 		if c.InstanceID == connected || c.AgentType == connected {
 			continue
 		}
-		hasWork := (unreadFor[c.AgentType] > 0 || pendingFor[c.AgentType] > 0) || (unreadFor[c.InstanceID] > 0 || pendingFor[c.InstanceID] > 0)
-		if !hasWork {
+		hasMessages := unreadFor[c.AgentType] > 0 || unreadFor[c.InstanceID] > 0
+		if !hasMessages {
 			continue
 		}
 		if m.sessionChecker != nil && (m.sessionChecker(c.InstanceID) || m.sessionChecker(c.AgentType)) {
@@ -675,13 +704,20 @@ func (m *WorkerManager) Check() {
 		if !m.cooldownElapsed(c.InstanceID, c.Cooldown) {
 			continue
 		}
-		if blocked, remaining := m.failureBackoffBlocked(c.InstanceID); blocked {
+		blocked, remaining := m.failureBackoffBlocked(c.InstanceID)
+		if !blocked && c.InstanceID != c.AgentType {
+			blocked, remaining = m.failureBackoffBlocked(c.AgentType)
+		}
+		if blocked {
 			newest := latestUnread[c.InstanceID]
 			if t := latestUnread[c.AgentType]; t.After(newest) {
 				newest = t
 			}
 			m.mu.Lock()
 			failTime := m.lastFailure[c.InstanceID]
+			if t := m.lastFailure[c.AgentType]; t.After(failTime) {
+				failTime = t
+			}
 			m.mu.Unlock()
 			if !newest.IsZero() && newest.After(failTime) {
 				m.ResetFailureBackoff(c.InstanceID)
@@ -697,9 +733,7 @@ func (m *WorkerManager) Check() {
 			continue
 		}
 		unread := unreadFor[c.AgentType] + unreadFor[c.InstanceID]
-		pending := pendingFor[c.AgentType] + pendingFor[c.InstanceID]
 
-		// Use worktree isolation if configured and workspace is a git repo
 		spawnDir := workspace
 		if m.worktreeManager != nil {
 			wtPath, err := m.worktreeManager.EnsureWorktree(c.InstanceID, workspace)
@@ -710,8 +744,8 @@ func (m *WorkerManager) Check() {
 			}
 		}
 
-		m.logger.Printf("WorkerManager: spawning %s (%d unread, %d pending, workspace=%s)", c.InstanceID, unread, pending, spawnDir)
-		m.sendAck(c.InstanceID, connected, unread, pending)
+		m.logger.Printf("WorkerManager: spawning %s (%d unread message(s), workspace=%s)", c.InstanceID, unread, spawnDir)
+		m.sendAck(c.InstanceID, connected, unread, 0)
 		go m.spawn(c, spawnDir)
 	}
 }
@@ -879,12 +913,69 @@ func (m *WorkerManager) failureBackoffLocked(failures int) time.Duration {
 
 // ResetFailureBackoff clears the failure backoff state for a specific worker,
 // allowing it to be spawned again immediately on the next Check() cycle.
+// Also clears agent type-level backoff so new task instances can be spawned.
 func (m *WorkerManager) ResetFailureBackoff(instanceID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.consecutiveFailures, instanceID)
 	delete(m.lastFailure, instanceID)
 	delete(m.backoffUntil, instanceID)
+	for _, c := range m.configs {
+		if c.InstanceID == instanceID || c.AgentType == instanceID {
+			delete(m.consecutiveFailures, c.AgentType)
+			delete(m.lastFailure, c.AgentType)
+			delete(m.backoffUntil, c.AgentType)
+		}
+	}
+}
+
+// BackedOffAgentTypes returns agent types currently in failure backoff
+// (rate-limited, auth failure, etc.) that should not receive new tasks.
+func (m *WorkerManager) BackedOffAgentTypes() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]bool)
+	var result []string
+	for _, c := range m.configs {
+		if seen[c.AgentType] {
+			continue
+		}
+		seen[c.AgentType] = true
+		failures := m.consecutiveFailures[c.AgentType]
+		if failures == 0 {
+			continue
+		}
+		if until, ok := m.backoffUntil[c.AgentType]; ok && time.Until(until) > 0 {
+			result = append(result, c.AgentType)
+			continue
+		}
+		if failures >= failureBackoffMaxCount {
+			result = append(result, c.AgentType)
+		}
+	}
+	return result
+}
+
+// BackoffInfoForType returns the backoff status for a specific agent type:
+// backed off (bool), remaining duration, and reason summary.
+func (m *WorkerManager) BackoffInfoForType(agentType string) (blocked bool, remaining time.Duration, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	failures := m.consecutiveFailures[agentType]
+	if failures == 0 {
+		return false, 0, ""
+	}
+	if until, ok := m.backoffUntil[agentType]; ok {
+		rem := time.Until(until)
+		if rem > 0 {
+			return true, rem, "rate-limited"
+		}
+		return false, 0, ""
+	}
+	if failures >= failureBackoffMaxCount {
+		return true, 0, "permanently blocked"
+	}
+	return false, 0, ""
 }
 
 func (m *WorkerManager) resolveWorkspace(state *domain.CollabState) string {
@@ -929,6 +1020,11 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 			m.consecutiveFailures[c.InstanceID] = 0
 			delete(m.lastFailure, c.InstanceID)
 			delete(m.backoffUntil, c.InstanceID)
+			if c.AgentType != "" && c.AgentType != c.InstanceID {
+				m.consecutiveFailures[c.AgentType] = 0
+				delete(m.lastFailure, c.AgentType)
+				delete(m.backoffUntil, c.AgentType)
+			}
 			m.mu.Unlock()
 			return
 		}
@@ -942,7 +1038,7 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 
 		if errInfo.Class.Terminal() {
 			m.logger.Printf("WorkerManager: %s terminal error (%s): %s — skipping remaining retries", c.InstanceID, errInfo.Class, errInfo.Summary)
-			m.recordTerminalFailure(c.InstanceID, errInfo)
+			m.recordTerminalFailure(c.InstanceID, c.AgentType, errInfo)
 			m.sendTerminalFailureAck(c.InstanceID, errInfo, attempts)
 			return
 		}
@@ -967,15 +1063,30 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 // recordTerminalFailure sets the backoff state for a terminal error.
 // If the error includes a retry-after duration, that's used as the backoff deadline.
 // Otherwise the worker is permanently blocked until manually reset.
-func (m *WorkerManager) recordTerminalFailure(instanceID string, info workerErrorInfo) {
+// Backoff is recorded at BOTH instance level and agent type level so that
+// new task instances (e.g., gemini-task-43) are blocked when an earlier
+// instance (gemini-task-42) hit a quota/auth/not-found error.
+func (m *WorkerManager) recordTerminalFailure(instanceID, agentType string, info workerErrorInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.lastFailure[instanceID] = time.Now()
+	now := time.Now()
+	m.lastFailure[instanceID] = now
+	if agentType != "" && agentType != instanceID {
+		m.lastFailure[agentType] = now
+	}
 	if info.RetryAfter > 0 {
-		m.backoffUntil[instanceID] = time.Now().Add(info.RetryAfter)
-		m.consecutiveFailures[instanceID] = 1 // allow auto-retry after the deadline
+		deadline := now.Add(info.RetryAfter)
+		m.backoffUntil[instanceID] = deadline
+		m.consecutiveFailures[instanceID] = 1
+		if agentType != "" && agentType != instanceID {
+			m.backoffUntil[agentType] = deadline
+			m.consecutiveFailures[agentType] = 1
+		}
 	} else {
-		m.consecutiveFailures[instanceID] = failureBackoffMaxCount // permanent block
+		m.consecutiveFailures[instanceID] = failureBackoffMaxCount
+		if agentType != "" && agentType != instanceID {
+			m.consecutiveFailures[agentType] = failureBackoffMaxCount
+		}
 	}
 }
 
@@ -1015,7 +1126,10 @@ func (m *WorkerManager) sendTerminalFailureAck(instanceID string, info workerErr
 			}
 		}
 		if recipient == "" {
-			recipient = "cursor"
+			recipient = s.DriverID
+			if recipient == "" {
+				recipient = "cursor"
+			}
 		}
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,
@@ -1164,12 +1278,35 @@ If you see a STOP banner on any tool call response:
 `
 }
 
-func expandWorkerTemplates(args []string, agent, workspace string) []string {
-	replacer := strings.NewReplacer("{workspace}", workspace, "{agent}", agent)
+func expandWorkerTemplates(args []string, agent, workspace, driver string) []string {
+	replacer := strings.NewReplacer("{workspace}", workspace, "{agent}", agent, "{driver}", driver)
 	out := make([]string, len(args))
 	for i, a := range args {
 		out[i] = replacer.Replace(a)
 	}
+	return out
+}
+
+// injectClaudeWorktreeFlag inserts -w <worktreeName> after the executable so Claude
+// uses its native worktree (e.g. .claude/worktrees/<worktreeName>). worktreeName is
+// the instance ID (e.g. claude-code-1), sanitized for use as a branch/worktree name.
+func injectClaudeWorktreeFlag(args []string, instanceID string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	// Sanitize: Claude worktree names typically become branch names; allow alphanumeric and hyphen.
+	worktreeName := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return -1
+	}, instanceID)
+	if worktreeName == "" {
+		worktreeName = "worker"
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[0], "-w", worktreeName)
+	out = append(out, args[1:]...)
 	return out
 }
 
@@ -1538,9 +1675,16 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		delete(m.runningWorkers, c.InstanceID)
 		m.mu.Unlock()
 	}()
-	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir)
+	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir, m.driver())
 	if len(args) == 0 {
 		return runResult{Err: fmt.Errorf("empty command")}
+	}
+	if c.UseClaudeWorktree && isClaudeCommand(args[0]) {
+		worktreeName := c.ClaudeWorktreeName
+		if worktreeName == "" {
+			worktreeName = c.InstanceID
+		}
+		args = injectClaudeWorktreeFlag(args, worktreeName)
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workspaceDir
@@ -1562,23 +1706,24 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 	logPath := filepath.Join(policy.GlobalStateDir(), fmt.Sprintf("stringwork-worker-%s.log", strings.ReplaceAll(c.InstanceID, "/", "-")))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 
-	// Set up process activity tracking
+	// Set up process runtime tracking (activity metadata + output tail buffer).
 	pInfo := &ProcessInfo{
 		InstanceID:   c.InstanceID,
 		StartedAt:    time.Now(),
 		LastOutputAt: time.Now(),
 		WorkspaceDir: workspaceDir,
+		LogPath:      logPath,
 	}
+	tail := newTailBuffer(16384)
+	rt := &workerRuntime{info: pInfo, tail: tail}
 	m.mu.Lock()
-	m.processActivity[c.InstanceID] = pInfo
+	m.processRuntime[c.InstanceID] = rt
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		delete(m.processActivity, c.InstanceID)
+		delete(m.processRuntime, c.InstanceID)
 		m.mu.Unlock()
 	}()
-
-	tail := newTailBuffer(4096)
 
 	if err != nil {
 		mw := io.MultiWriter(os.Stderr, tail)
@@ -1670,7 +1815,10 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 		if reconciled > 0 {
 			m.logger.Printf("WorkerManager: reconciled %d stuck task(s) for %s → set to pending", reconciled, c.InstanceID)
 			// Notify the driver
-			driver := "cursor"
+			driver := s.DriverID
+			if driver == "" {
+				driver = "cursor"
+			}
 			s.Messages = append(s.Messages, domain.Message{
 				ID:        s.NextMsgID,
 				From:      "system",
@@ -1680,6 +1828,330 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 			})
 			s.NextMsgID++
 		}
+		return nil
+	})
+}
+
+// SpawnForTask spawns a fresh worker process bound to a specific task.
+// The task's full context (title, description, files, constraints) is rendered
+// directly into the startup prompt so the worker begins working immediately.
+// If all slots for the worker type are occupied, the task is queued and will
+// be spawned when a slot frees up.
+func (m *WorkerManager) SpawnForTask(taskID int, assignedTo string) {
+	if len(m.configs) == 0 {
+		return
+	}
+	if !m.checkMCPReady() {
+		m.logger.Printf("WorkerManager: SpawnForTask(%d) skipped — MCP not ready", taskID)
+		return
+	}
+
+	cfg := m.findConfigForAgent(assignedTo)
+	if cfg == nil {
+		m.logger.Printf("WorkerManager: SpawnForTask(%d) — no config for %q", taskID, assignedTo)
+		return
+	}
+
+	if blocked, _ := m.failureBackoffBlocked(cfg.AgentType); blocked {
+		m.logger.Printf("WorkerManager: SpawnForTask(%d) — %s in failure backoff, queuing", taskID, cfg.AgentType)
+		m.enqueueSpawn(cfg.AgentType, taskID)
+		return
+	}
+
+	running := m.countRunningByType(cfg.AgentType)
+	limit := m.instanceLimitForType(cfg.AgentType)
+	if running >= limit {
+		m.logger.Printf("WorkerManager: SpawnForTask(%d) — %s at capacity (%d/%d), queuing", taskID, cfg.AgentType, running, limit)
+		m.enqueueSpawn(cfg.AgentType, taskID)
+		m.sendQueuedAck(taskID, cfg.AgentType, running, limit)
+		return
+	}
+
+	m.spawnTaskWorker(taskID, *cfg)
+}
+
+// spawnTaskWorker reads task context from state and spawns a worker for it.
+func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
+	state, err := m.stateLoader()
+	if err != nil {
+		m.logger.Printf("WorkerManager: spawnTaskWorker(%d) state load error: %v", taskID, err)
+		return
+	}
+
+	var task *domain.Task
+	for i := range state.Tasks {
+		if state.Tasks[i].ID == taskID {
+			task = &state.Tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		m.logger.Printf("WorkerManager: spawnTaskWorker(%d) — task not found", taskID)
+		return
+	}
+
+	var wc *domain.WorkContext
+	for _, ctx := range state.WorkContexts {
+		if ctx != nil && ctx.TaskID == taskID {
+			wc = ctx
+			break
+		}
+	}
+
+	workspace := m.resolveWorkspace(state)
+	if workspace == "" || workspace == "/" {
+		m.logger.Printf("WorkerManager: spawnTaskWorker(%d) — no workspace", taskID)
+		return
+	}
+
+	instanceID := fmt.Sprintf("%s-task-%d", baseCfg.AgentType, taskID)
+	taskCfg := baseCfg
+	taskCfg.InstanceID = instanceID
+
+	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver())
+	taskCfg.Command = appendPromptToCommand(baseCfg.Command, taskPrompt)
+	if wc != nil && wc.WorktreeName != "" {
+		taskCfg.ClaudeWorktreeName = wc.WorktreeName
+	}
+
+	spawnDir := workspace
+	if m.worktreeManager != nil {
+		wtPath, err := m.worktreeManager.EnsureWorktree(instanceID, workspace)
+		if err != nil {
+			m.logger.Printf("WorkerManager: worktree failed for %s: %v (falling back to shared dir)", instanceID, err)
+		} else {
+			spawnDir = wtPath
+		}
+	}
+
+	m.logger.Printf("WorkerManager: spawning %s for task #%d (workspace=%s)", instanceID, taskID, spawnDir)
+	connected := m.getAgent()
+	m.sendTaskSpawnAck(instanceID, connected, taskID, task.Title)
+	go func() {
+		m.spawn(taskCfg, spawnDir)
+		m.drainQueue(baseCfg.AgentType)
+	}()
+}
+
+// buildTaskPrompt renders the full task context into a prompt section that is
+// appended to the worker's base command prompt at spawn time.
+func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, workspace, driver string) string {
+	priorityNames := map[int]string{1: "critical", 2: "high", 3: "normal", 4: "low"}
+	priority := priorityNames[task.Priority]
+	if priority == "" {
+		priority = "normal"
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\n\n--- YOUR ASSIGNED TASK (task #%d) ---\n", task.ID))
+	b.WriteString(fmt.Sprintf("Title: %s\n", task.Title))
+	if task.Description != "" {
+		b.WriteString(fmt.Sprintf("Description: %s\n", task.Description))
+	}
+	b.WriteString(fmt.Sprintf("Priority: %s\n", priority))
+
+	if wc != nil {
+		if len(wc.RelevantFiles) > 0 {
+			b.WriteString("\nRelevant files:\n")
+			for _, f := range wc.RelevantFiles {
+				b.WriteString(fmt.Sprintf("- %s\n", f))
+			}
+		}
+		if wc.Background != "" {
+			b.WriteString(fmt.Sprintf("\nBackground: %s\n", wc.Background))
+		}
+		if len(wc.Constraints) > 0 {
+			b.WriteString("\nConstraints:\n")
+			for _, c := range wc.Constraints {
+				b.WriteString(fmt.Sprintf("- %s\n", c))
+			}
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("\nSteps:\n"+
+		"1) set_presence agent='%s' status='working' workspace='%s'\n"+
+		"2) update_task id=%d status='in_progress' updated_by='%s'\n"+
+		"3) Do the work (heartbeat every 60-90s, report_progress every 2-3min)\n"+
+		"4) send_message from='%s' to='%s' with detailed summary of changes\n"+
+		"5) update_task id=%d status='completed' updated_by='%s'\n",
+		instanceID, workspace,
+		task.ID, instanceID,
+		instanceID, driver,
+		task.ID, instanceID,
+	))
+
+	return b.String()
+}
+
+// appendPromptToCommand appends taskPrompt to the prompt argument in the CLI
+// command. It locates the prompt by finding the value after -p (claude) or
+// --prompt (gemini), falling back to the last non-flag argument.
+func appendPromptToCommand(baseCmd []string, taskPrompt string) []string {
+	if len(baseCmd) == 0 {
+		return baseCmd
+	}
+	result := make([]string, len(baseCmd))
+	copy(result, baseCmd)
+
+	promptIdx := -1
+	for i, arg := range result {
+		if (arg == "-p" || arg == "--prompt") && i+1 < len(result) {
+			promptIdx = i + 1
+			break
+		}
+	}
+
+	if promptIdx < 0 {
+		// Fallback: find the last argument that isn't a flag
+		for i := len(result) - 1; i >= 0; i-- {
+			if !strings.HasPrefix(result[i], "-") {
+				promptIdx = i
+				break
+			}
+		}
+	}
+
+	if promptIdx < 0 {
+		promptIdx = len(result) - 1
+	}
+
+	result[promptIdx] = result[promptIdx] + taskPrompt
+	return result
+}
+
+// findConfigForAgent returns the first WorkerSpawnConfig matching the given
+// agent name (by InstanceID or AgentType).
+func (m *WorkerManager) findConfigForAgent(agent string) *WorkerSpawnConfig {
+	for i := range m.configs {
+		if m.configs[i].InstanceID == agent || m.configs[i].AgentType == agent {
+			return &m.configs[i]
+		}
+	}
+	return nil
+}
+
+// countRunningByType counts how many worker processes of a given agent type are running.
+func (m *WorkerManager) countRunningByType(agentType string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for id := range m.runningWorkers {
+		for _, c := range m.configs {
+			if c.InstanceID == id && c.AgentType == agentType {
+				count++
+				break
+			}
+		}
+		if strings.HasPrefix(id, agentType+"-task-") {
+			count++
+		}
+	}
+	return count
+}
+
+// instanceLimitForType returns the configured instance count for an agent type.
+func (m *WorkerManager) instanceLimitForType(agentType string) int {
+	count := 0
+	for _, c := range m.configs {
+		if c.AgentType == agentType {
+			count++
+		}
+	}
+	if count == 0 {
+		return 1
+	}
+	return count
+}
+
+// enqueueSpawn adds a task to the per-type spawn queue.
+func (m *WorkerManager) enqueueSpawn(agentType string, taskID int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ps := range m.pendingSpawns[agentType] {
+		if ps.TaskID == taskID {
+			return // already queued
+		}
+	}
+	m.pendingSpawns[agentType] = append(m.pendingSpawns[agentType], pendingSpawn{
+		TaskID:    taskID,
+		AgentType: agentType,
+	})
+}
+
+// drainQueue checks the spawn queue for the given agent type and spawns
+// the next queued task if a slot is available.
+func (m *WorkerManager) drainQueue(agentType string) {
+	m.mu.Lock()
+	queue := m.pendingSpawns[agentType]
+	if len(queue) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	next := queue[0]
+	m.pendingSpawns[agentType] = queue[1:]
+	m.mu.Unlock()
+
+	if blocked, _ := m.failureBackoffBlocked(agentType); blocked {
+		m.logger.Printf("WorkerManager: drainQueue — %s in failure backoff, re-queuing task #%d", agentType, next.TaskID)
+		m.enqueueSpawn(agentType, next.TaskID)
+		return
+	}
+
+	running := m.countRunningByType(agentType)
+	limit := m.instanceLimitForType(agentType)
+	if running >= limit {
+		m.enqueueSpawn(agentType, next.TaskID)
+		return
+	}
+
+	cfg := m.findConfigForAgent(agentType)
+	if cfg == nil {
+		return
+	}
+	m.logger.Printf("WorkerManager: draining queue — spawning %s for task #%d", agentType, next.TaskID)
+	m.spawnTaskWorker(next.TaskID, *cfg)
+}
+
+// PendingSpawnCount returns the number of tasks queued for a given agent type.
+func (m *WorkerManager) PendingSpawnCount(agentType string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pendingSpawns[agentType])
+}
+
+func (m *WorkerManager) sendTaskSpawnAck(instanceID, recipient string, taskID int, title string) {
+	if recipient == "" || m.stateMutator == nil {
+		return
+	}
+	content := fmt.Sprintf("⚡ **%s** spawning for task #%d: %s", instanceID, taskID, title)
+	_ = m.stateMutator(func(s *domain.CollabState) error {
+		s.Messages = append(s.Messages, domain.Message{
+			ID:        s.NextMsgID,
+			From:      "system",
+			To:        recipient,
+			Content:   content,
+			Timestamp: time.Now(),
+		})
+		s.NextMsgID++
+		return nil
+	})
+}
+
+func (m *WorkerManager) sendQueuedAck(taskID int, agentType string, running, limit int) {
+	if m.stateMutator == nil {
+		return
+	}
+	content := fmt.Sprintf("⏳ Task #%d queued for **%s** (%d/%d slots busy). Will spawn when a slot opens.",
+		taskID, agentType, running, limit)
+	_ = m.stateMutator(func(s *domain.CollabState) error {
+		s.Messages = append(s.Messages, domain.Message{
+			ID:        s.NextMsgID,
+			From:      "system",
+			To:        m.driver(),
+			Content:   content,
+			Timestamp: time.Now(),
+		})
+		s.NextMsgID++
 		return nil
 	})
 }
@@ -1725,7 +2197,10 @@ func (m *WorkerManager) sendFailureAck(instanceID string, lastErr error, attempt
 			}
 		}
 		if recipient == "" {
-			recipient = "cursor"
+			recipient = s.DriverID
+			if recipient == "" {
+				recipient = "cursor"
+			}
 		}
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,

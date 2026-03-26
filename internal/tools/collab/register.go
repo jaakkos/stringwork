@@ -24,9 +24,11 @@ type WorktreeInfo struct {
 	BaseBranch string `json:"base_branch"`
 }
 
-// ProcessInfoProvider can return process activity information for running workers.
+// ProcessInfoProvider can return process activity and output for running workers.
 type ProcessInfoProvider interface {
 	GetProcessInfo() map[string]ProcessInfoSnapshot
+	GetRecentOutput(instanceID string) string
+	IsWorkerRunning(instanceID string) bool
 }
 
 // ProcessInfoSnapshot is a snapshot of a single worker process's activity.
@@ -35,12 +37,27 @@ type ProcessInfoSnapshot struct {
 	LastOutputAt time.Time `json:"last_output_at"`
 	OutputBytes  int64     `json:"output_bytes"`
 	WorkspaceDir string    `json:"workspace_dir"`
+	LogPath      string    `json:"log_path"`
+}
+
+// TaskSpawner spawns a fresh worker process for a specific task.
+type TaskSpawner interface {
+	SpawnForTask(taskID int, assignedTo string)
+}
+
+// BackoffInfoProvider reports which agent types are currently rate-limited
+// or otherwise backed off from receiving new work.
+type BackoffInfoProvider interface {
+	BackedOffAgentTypes() []string
+	BackoffInfoForType(agentType string) (blocked bool, remaining time.Duration, reason string)
 }
 
 type registerOpts struct {
 	canceller        WorkerCanceller
 	worktreeProvider WorktreeInfoProvider
 	processProvider  ProcessInfoProvider
+	taskSpawner      TaskSpawner
+	backoffProvider  BackoffInfoProvider
 }
 
 // WithCanceller sets the WorkerCanceller for the cancel_agent tool.
@@ -58,6 +75,17 @@ func WithProcessProvider(p ProcessInfoProvider) RegisterOption {
 	return func(o *registerOpts) { o.processProvider = p }
 }
 
+// WithTaskSpawner enables spawn-per-task: when a task is assigned, a fresh
+// worker process is spawned for it immediately.
+func WithTaskSpawner(s TaskSpawner) RegisterOption {
+	return func(o *registerOpts) { o.taskSpawner = s }
+}
+
+// WithBackoffProvider enables rate-limit/backoff visibility in worker_status output.
+func WithBackoffProvider(p BackoffInfoProvider) RegisterOption {
+	return func(o *registerOpts) { o.backoffProvider = p }
+}
+
 // Register registers the collaboration tools, prompt templates,
 // and piggyback middleware with the mcp-go server.
 // orch is optional; when set, create_task from the driver will auto-assign to workers.
@@ -72,10 +100,10 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerReadMessages(s, svc, logger)
 
 	// Task tools (4)
-	registerCreateTask(s, svc, logger, orch)
+	registerCreateTask(s, svc, logger, orch, o.taskSpawner)
 	registerListTasks(s, svc, logger)
-	registerUpdateTask(s, svc, logger, orch)
-	registerReplayTask(s, svc, logger)
+	registerUpdateTask(s, svc, logger, orch, o.taskSpawner)
+	registerReplayTask(s, svc, logger, o.taskSpawner)
 
 	// Planning tools (3)
 	registerCreatePlan(s, svc, logger)
@@ -99,8 +127,9 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerRegisterAgent(s, svc, logger)
 	registerListAgents(s, svc, logger)
 
-	// Driver/worker tools (3)
-	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider)
+	// Driver/worker tools (4)
+	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider, o.backoffProvider)
+	registerWorkerOutput(s, svc, logger, o.processProvider)
 	registerHeartbeat(s, svc, logger)
 	registerCancelAgent(s, svc, logger, o.canceller)
 

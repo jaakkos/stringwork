@@ -243,6 +243,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 			strategy = "least_loaded"
 		}
 		taskOrch = app.NewTaskOrchestrator(svc, strategy)
+		// BackoffChecker is wired below after WorkerManager is created.
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -323,6 +324,17 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 			logger.Printf("WorkerManager: %d additional MCP server(s) configured for workers", len(entries))
 		}
 		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
+		if taskOrch != nil {
+			taskOrch.SetBackoffChecker(wm)
+			taskOrch.SetWorktreeForAssignedTask(func(state *domain.CollabState, task *domain.Task, inst *domain.AgentInstance) {
+				for _, w := range orchCfg.Workers {
+					if w.Type == inst.AgentType && w.UseClaudeWorktree {
+						app.EnsureWorkContextWorktree(state, task, inst.InstanceID)
+						break
+					}
+				}
+			})
+		}
 		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
 		wm.Preflight()
 	}
@@ -339,12 +351,12 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	var regOpts []collab.RegisterOption
 	if wm != nil {
 		regOpts = append(regOpts, collab.WithCanceller(wm))
+		regOpts = append(regOpts, collab.WithProcessProvider(&processAdapter{wm: wm}))
+		regOpts = append(regOpts, collab.WithTaskSpawner(wm))
+		regOpts = append(regOpts, collab.WithBackoffProvider(wm))
 	}
 	if wtManager != nil {
 		regOpts = append(regOpts, collab.WithWorktreeProvider(&worktreeAdapter{mgr: wtManager}))
-	}
-	if wm != nil {
-		regOpts = append(regOpts, collab.WithProcessProvider(&processAdapter{wm: wm}))
 	}
 	collab.Register(mcpServer, svc, logger, registry, taskOrch, regOpts...)
 
@@ -352,10 +364,14 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	svc.SetNotifier(notifier)
 	go notifier.Start(ctx)
 
-	watchdog := app.NewWatchdog(svc, registry, logger,
+	watchdogOpts := []app.WatchdogOption{
 		app.WithWatchdogNotifier(notifier),
 		app.WithPolicy(pol),
-	)
+	}
+	if wm != nil {
+		watchdogOpts = append(watchdogOpts, app.WithProcessActivity(wm))
+	}
+	watchdog := app.NewWatchdog(svc, registry, logger, watchdogOpts...)
 	go watchdog.Start(ctx)
 
 	cleanupFunc := func() {
@@ -570,9 +586,18 @@ func (a *processAdapter) GetProcessInfo() map[string]collab.ProcessInfoSnapshot 
 			LastOutputAt: p.LastOutputAt,
 			OutputBytes:  p.OutputBytes,
 			WorkspaceDir: p.WorkspaceDir,
+			LogPath:      p.LogPath,
 		}
 	}
 	return result
+}
+
+func (a *processAdapter) GetRecentOutput(instanceID string) string {
+	return a.wm.GetRecentOutput(instanceID)
+}
+
+func (a *processAdapter) IsWorkerRunning(instanceID string) bool {
+	return a.wm.IsWorkerRunning(instanceID)
 }
 
 type worktreeAdapter struct {

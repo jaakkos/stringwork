@@ -14,7 +14,7 @@ import (
 )
 
 // registerCreateTask registers the create_task tool.
-func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator) {
+func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator, spawner TaskSpawner) {
 	s.AddTool(
 		mcp.NewTool("create_task",
 			mcp.WithDescription("Create a shared task for the pair programming session. Use this to coordinate work and track progress."),
@@ -150,6 +150,26 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				return nil, err
 			}
 
+			// Read back the effective assignee (auto-assignment may have changed it)
+			var effectiveAssignee string
+			_ = svc.Query(func(state *domain.CollabState) error {
+				for _, t := range state.Tasks {
+					if t.ID == taskID {
+						effectiveAssignee = t.AssignedTo
+						break
+					}
+				}
+				return nil
+			})
+			if effectiveAssignee == "" {
+				effectiveAssignee = assignedTo
+			}
+
+			// Spawn a fresh worker for this task if assigned to a worker
+			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != createdBy {
+				spawner.SpawnForTask(taskID, effectiveAssignee)
+			}
+
 			depInfo := ""
 			if len(dependencies) > 0 {
 				depInfo = fmt.Sprintf(", depends on: %v", dependencies)
@@ -157,7 +177,7 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			priorityNames := map[int]string{1: "critical", 2: "high", 3: "normal", 4: "low"}
 			logger.Printf("Task #%d created by %s (priority: %s)", taskID, createdBy, priorityNames[priority])
 			return mcp.NewToolResultText(fmt.Sprintf("Task #%d created: %s (assigned to: %s, priority: %s%s)",
-				taskID, title, assignedTo, priorityNames[priority], depInfo)), nil
+				taskID, title, effectiveAssignee, priorityNames[priority], depInfo)), nil
 		},
 	)
 }
@@ -284,7 +304,7 @@ func checkDependenciesCompleteState(state *domain.CollabState, taskID int) []int
 }
 
 // registerUpdateTask registers the update_task tool.
-func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator) {
+func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, orch *app.TaskOrchestrator, spawner TaskSpawner) {
 	s.AddTool(
 		mcp.NewTool("update_task",
 			mcp.WithDescription("Update a shared task's status, assignment, priority, or dependencies."),
@@ -312,6 +332,7 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			}
 
 			taskID := int(id)
+			var spawnAssignee string // set if we need to spawn a worker after update
 			if err := svc.Run(func(state *domain.CollabState) error {
 				extra := app.RegisteredAgentNames(state)
 				if err := app.ValidateAgent(updatedBy, state, false, false, extra...); err != nil {
@@ -462,11 +483,21 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					}
 					task.UpdatedAt = time.Now()
 
+					// If task is reassigned to a worker and still pending, spawn for it
+					if task.AssignedTo != oldAssignee && task.AssignedTo != "" &&
+						task.AssignedTo != "any" && task.Status == "pending" {
+						spawnAssignee = task.AssignedTo
+					}
+
 					return nil
 				}
 				return fmt.Errorf("task #%d not found", taskID)
 			}); err != nil {
 				return nil, err
+			}
+
+			if spawner != nil && spawnAssignee != "" && spawnAssignee != updatedBy {
+				spawner.SpawnForTask(taskID, spawnAssignee)
 			}
 
 			logger.Printf("Task #%d updated by %s", taskID, updatedBy)
@@ -476,7 +507,7 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 }
 
 // registerReplayTask registers the replay_task tool.
-func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger) {
+func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, spawner TaskSpawner) {
 	s.AddTool(
 		mcp.NewTool("replay_task",
 			mcp.WithDescription("Reset failure tracking and re-queue a blocked task. Only works on blocked or pending tasks (rejects in_progress to avoid races)."),
@@ -544,6 +575,10 @@ func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				return fmt.Errorf("task #%d not found", taskID)
 			}); err != nil {
 				return nil, err
+			}
+
+			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != updatedBy {
+				spawner.SpawnForTask(taskID, effectiveAssignee)
 			}
 
 			logger.Printf("Task #%d replayed by %s (assigned to: %s)", taskID, updatedBy, effectiveAssignee)
