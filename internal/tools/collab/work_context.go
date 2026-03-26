@@ -49,6 +49,7 @@ func registerGetWorkContext(s *server.MCPServer, svc *app.CollabService, logger 
 					"constraints":    wc.Constraints,
 					"shared_notes":   wc.SharedNotes,
 					"parent_ctx_id":  wc.ParentCtxID,
+					"worktree_name":  wc.WorktreeName,
 				}
 				bytes, _ := json.MarshalIndent(out, "", "  ")
 				body := string(bytes)

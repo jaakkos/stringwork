@@ -45,6 +45,12 @@ type WorkerConfig struct {
 	// ensure specific vars are passed (e.g. ["GH_*", "GITHUB_*", "SSH_AUTH_SOCK",
 	// "DOCKER_HOST"]). If set to ["none"], no env vars are inherited (clean environment).
 	InheritEnv []string `yaml:"inherit_env"`
+	// UseClaudeWorktree, when true for claude-code workers, passes -w <instance_id> to the
+	// Claude CLI so each worker runs in its own Git worktree under .claude/worktrees/.
+	// Prevents branch/file conflicts when running multiple Claude Code workers in parallel.
+	// Codex and Gemini do not have a native -w flag; for them, use orchestration.worktrees
+	// (server-managed git worktrees) so each worker's process cwd is an isolated checkout.
+	UseClaudeWorktree bool `yaml:"use_claude_worktree"`
 }
 
 // OrchestrationConfig holds driver/worker orchestration settings.

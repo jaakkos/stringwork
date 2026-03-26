@@ -225,6 +225,7 @@ func runMigrations(db *sql.DB) error {
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_total_steps INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_updated_at TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaWorkContexts)
+	_, _ = db.Exec("ALTER TABLE work_contexts ADD COLUMN worktree_name TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaRegisteredAgents)
 	_, _ = db.Exec("ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''")
@@ -264,7 +265,8 @@ CREATE TABLE IF NOT EXISTS work_contexts (
 	background TEXT NOT NULL DEFAULT '',
 	constraints TEXT NOT NULL DEFAULT '[]',
 	shared_notes TEXT NOT NULL DEFAULT '{}',
-	parent_ctx_id TEXT NOT NULL DEFAULT ''
+	parent_ctx_id TEXT NOT NULL DEFAULT '',
+	worktree_name TEXT NOT NULL DEFAULT ''
 )`
 
 // Close releases the database connection. Call on shutdown for clean exit.
@@ -657,7 +659,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 	}
 
 	// work_contexts (table may not exist in very old DBs; only skip "no such table")
-	rows, err = tx.Query("SELECT id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id FROM work_contexts")
+	rows, err = tx.Query("SELECT id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id, worktree_name FROM work_contexts")
 	if err != nil && !isNoSuchTableErr(err) {
 		return nil, fmt.Errorf("work_contexts: %w", err)
 	}
@@ -665,7 +667,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		for rows.Next() {
 			var wc domain.WorkContext
 			var rf, con, sn string
-			if err := rows.Scan(&wc.ID, &wc.TaskID, &rf, &wc.Background, &con, &sn, &wc.ParentCtxID); err != nil {
+			if err := rows.Scan(&wc.ID, &wc.TaskID, &rf, &wc.Background, &con, &sn, &wc.ParentCtxID, &wc.WorktreeName); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
@@ -871,8 +873,8 @@ func (s *Store) Save(state *domain.CollabState) error {
 		rf, _ := json.Marshal(wc.RelevantFiles)
 		con, _ := json.Marshal(wc.Constraints)
 		sn, _ := json.Marshal(wc.SharedNotes)
-		if _, err := tx.Exec("INSERT INTO work_contexts (id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			wc.ID, wc.TaskID, string(rf), wc.Background, string(con), string(sn), wc.ParentCtxID); err != nil {
+		if _, err := tx.Exec("INSERT INTO work_contexts (id, task_id, relevant_files, background, constraints, shared_notes, parent_ctx_id, worktree_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			wc.ID, wc.TaskID, string(rf), wc.Background, string(con), string(sn), wc.ParentCtxID, wc.WorktreeName); err != nil {
 			return err
 		}
 	}
