@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jaakkos/stringwork/internal/domain"
 )
@@ -38,6 +40,14 @@ const (
 	defaultMaxTaskFailures = 3
 )
 
+// ProcessActivityProvider gives the watchdog access to live process metadata
+// so it can distinguish workers that are actively producing output from those
+// that are truly stuck or crashed.
+type ProcessActivityProvider interface {
+	GetProcessInfo() map[string]ProcessInfo
+	GetRecentOutput(instanceID string) string
+}
+
 // Watchdog monitors agent liveness and recovers from stuck states.
 // It runs periodically and:
 // - Detects agent instances with stale heartbeats and marks them offline
@@ -56,6 +66,7 @@ type Watchdog struct {
 	progressCriticalThresh time.Duration
 	maxTaskFailures        int
 	notifier               Triggerable
+	processActivity        ProcessActivityProvider
 	stopCh                 chan struct{}
 	doneCh                 chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
@@ -110,6 +121,12 @@ func WithMaxTaskFailures(n int) WatchdogOption {
 // WithWatchdogNotifier sets the notifier to trigger after recovery actions.
 func WithWatchdogNotifier(n Triggerable) WatchdogOption {
 	return func(w *Watchdog) { w.notifier = n }
+}
+
+// WithProcessActivity gives the watchdog access to live process data so it
+// can automatically distinguish actively-working workers from stuck ones.
+func WithProcessActivity(p ProcessActivityProvider) WatchdogOption {
+	return func(w *Watchdog) { w.processActivity = p }
 }
 
 // NewWatchdog creates a new Watchdog.
@@ -377,29 +394,82 @@ func (w *Watchdog) check() {
 				}
 			}
 
-			// Tiered progress alerts
+			// Tiered progress alerts with smart stuck detection.
+			// When process activity data is available, the watchdog classifies the
+			// worker as ACTIVE (producing output), SILENT (no recent output), or
+			// NO_PROCESS (crashed/exited) and adjusts alerts accordingly.
 			currentLevel := w.alertedTasks[t.ID]
+			activity := w.classifyWorkerActivity(t.AssignedTo, now)
 
 			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" && currentLevel != "sla_exceeded" {
-				w.alertedTasks[t.ID] = "critical"
-				content := fmt.Sprintf("🔴 **Critical**: Worker %s has not reported progress on task #%d (%s) for %s. The worker may be stuck. Consider cancelling with `cancel_agent agent='%s'`.",
-					t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second), t.AssignedTo)
+				var content string
+				switch activity.status {
+				case workerActive:
+					w.alertedTasks[t.ID] = "critical"
+					content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
+						"but the process is actively producing output (last output %s ago, %d bytes written). "+
+						"The worker should call `report_progress` periodically.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+						activity.sinceOutput.Round(time.Second), activity.outputBytes)
+				case workerSilent:
+					w.alertedTasks[t.ID] = "critical"
+					content = fmt.Sprintf("🔴 **Stuck**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and the process has been silent for %s — likely stuck. "+
+						"Cancel with `cancel_agent agent='%s'`.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+						activity.sinceOutput.Round(time.Second), t.AssignedTo)
+					if activity.snippet != "" {
+						content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
+					}
+				default: // workerNoProcess
+					w.alertedTasks[t.ID] = "critical"
+					content = fmt.Sprintf("💀 **No process**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and no running process was found — the worker may have crashed or exited. "+
+						"Check the log with `worker_output task_id=%d` or reassign the task.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second), t.ID)
+				}
 				state.Messages = append(state.Messages, domain.Message{
 					ID: state.NextMsgID, From: "system", To: driver,
 					Content: content, Timestamp: now,
 				})
 				state.NextMsgID++
-				w.logger.Printf("Watchdog: CRITICAL — no progress on task #%d for %s", t.ID, sinceProgress.Round(time.Second))
+				w.logger.Printf("Watchdog: CRITICAL — task #%d no progress for %s (activity: %s)", t.ID, sinceProgress.Round(time.Second), activity.status)
+
 			} else if sinceProgress > w.progressWarningThresh && currentLevel == "" {
-				w.alertedTasks[t.ID] = "warning"
-				content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s. The worker may be working on a long step, or could be stuck.",
-					t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
-				state.Messages = append(state.Messages, domain.Message{
-					ID: state.NextMsgID, From: "system", To: driver,
-					Content: content, Timestamp: now,
-				})
-				state.NextMsgID++
-				w.logger.Printf("Watchdog: WARNING — no progress on task #%d for %s", t.ID, sinceProgress.Round(time.Second))
+				switch activity.status {
+				case workerActive:
+					// Suppress warning — worker is actively producing output, just not
+					// calling report_progress. Will alert at critical threshold if it continues.
+					w.logger.Printf("Watchdog: task #%d no progress for %s but process is active (last output %s ago) — suppressing warning",
+						t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
+				case workerSilent:
+					w.alertedTasks[t.ID] = "warning"
+					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and the process has been silent for %s. The worker may be stuck. "+
+						"Use `worker_output task_id=%d` to check.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+						activity.sinceOutput.Round(time.Second), t.ID)
+					if activity.snippet != "" {
+						content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
+					}
+					state.Messages = append(state.Messages, domain.Message{
+						ID: state.NextMsgID, From: "system", To: driver,
+						Content: content, Timestamp: now,
+					})
+					state.NextMsgID++
+					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (SILENT for %s)", t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
+				default: // workerNoProcess
+					w.alertedTasks[t.ID] = "warning"
+					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and no running process was found. Use `worker_output task_id=%d` to check the log.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second), t.ID)
+					state.Messages = append(state.Messages, domain.Message{
+						ID: state.NextMsgID, From: "system", To: driver,
+						Content: content, Timestamp: now,
+					})
+					state.NextMsgID++
+					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (no process)", t.ID, sinceProgress.Round(time.Second))
+				}
 			}
 		}
 
@@ -555,6 +625,104 @@ func removeTaskFromInstanceByID(state *domain.CollabState, taskID int, agent str
 			}
 		}
 	}
+}
+
+// workerActivityStatus classifies the state of a worker's process.
+type workerActivityStatus string
+
+const (
+	workerActive    workerActivityStatus = "active"
+	workerSilent    workerActivityStatus = "silent"
+	workerNoProcess workerActivityStatus = "no_process"
+)
+
+// workerActivityInfo holds the classification result for a worker's process.
+type workerActivityInfo struct {
+	status      workerActivityStatus
+	sinceOutput time.Duration // time since last output (zero if no process)
+	outputBytes int64
+	snippet     string // sanitized tail of recent output (for SILENT workers)
+}
+
+const (
+	silentThreshold = 2 * time.Minute
+	maxSnippetBytes = 500
+)
+
+// classifyWorkerActivity checks process activity for a worker and returns
+// a classification. Falls back to workerNoProcess when no provider is set
+// (backward compatible).
+func (w *Watchdog) classifyWorkerActivity(assignedTo string, now time.Time) workerActivityInfo {
+	if w.processActivity == nil {
+		return workerActivityInfo{status: workerNoProcess}
+	}
+	procs := w.processActivity.GetProcessInfo()
+
+	// Try exact instance ID first, then check for task-instance patterns
+	proc, found := procs[assignedTo]
+	if !found {
+		for id, p := range procs {
+			if strings.HasPrefix(id, assignedTo+"-") || strings.HasPrefix(id, assignedTo+"-task-") {
+				proc = p
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return workerActivityInfo{status: workerNoProcess}
+	}
+
+	sinceOutput := now.Sub(proc.LastOutputAt)
+	info := workerActivityInfo{
+		sinceOutput: sinceOutput,
+		outputBytes: proc.OutputBytes,
+	}
+
+	if sinceOutput < silentThreshold {
+		info.status = workerActive
+	} else {
+		info.status = workerSilent
+		raw := w.processActivity.GetRecentOutput(assignedTo)
+		if raw == "" {
+			// Try task-instance pattern
+			for id := range procs {
+				if strings.HasPrefix(id, assignedTo+"-") || strings.HasPrefix(id, assignedTo+"-task-") {
+					raw = w.processActivity.GetRecentOutput(id)
+					if raw != "" {
+						break
+					}
+				}
+			}
+		}
+		if raw != "" {
+			info.snippet = sanitizeSnippet(raw, maxSnippetBytes)
+		}
+	}
+
+	return info
+}
+
+// sanitizeSnippet truncates output to the last maxBytes, strips control chars,
+// and trims to the last complete line.
+func sanitizeSnippet(s string, maxBytes int) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r == '\r' {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > maxBytes {
+		s = s[len(s)-maxBytes:]
+		// Trim to the next complete line to avoid a garbled first line
+		if idx := strings.Index(s, "\n"); idx >= 0 && idx < len(s)-1 {
+			s = s[idx+1:]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // joinParts joins string parts with " and " for the last element, ", " otherwise.
