@@ -30,6 +30,17 @@ Set `workspace` when starting a session or switching to a different project.
 
 Optional: `include_all=true` to list all agents' presence.
 
+### Multiple Claude sessions (Git worktrees)
+
+**Manual:** Run several Claude Code sessions in parallel, each on its own branch:
+
+```
+claude -w feature-1    # terminal 1
+claude -w feature-2    # terminal 2
+```
+
+**Spawned workers:** In config, set `use_claude_worktree: true` on claude-code workers so the server injects `-w <instance_id>` (e.g. `claude-code-1`). Worktrees live under `.claude/worktrees/`; no branch or file conflicts. See [SETUP_GUIDE](SETUP_GUIDE.md) for details.
+
 ### Add note
 
 ```

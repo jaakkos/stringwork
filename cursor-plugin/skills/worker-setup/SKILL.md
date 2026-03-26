@@ -97,3 +97,4 @@ Each worker entry supports:
 - Set `instances: 2` (or more) for a worker type to run multiple instances in parallel
 - Each instance gets a unique ID (e.g., `claude-code-1`, `claude-code-2`)
 - With git worktree isolation enabled, each instance gets its own checkout
+- For Claude Code: set `use_claude_worktree: true` so each worker gets `-w <instance_id>` (Claude native worktrees under `.claude/worktrees/`), avoiding branch/file conflicts

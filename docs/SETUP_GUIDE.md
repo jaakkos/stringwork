@@ -141,6 +141,38 @@ The daemon keeps the HTTP endpoint alive across Cursor reconnects, so this regis
 
 See [docs/mcp-client-configs/](mcp-client-configs/) for detailed client configuration.
 
+### Running multiple Claude Code sessions in parallel (Git worktrees)
+
+Claude Code supports **Git worktrees natively** via the `-w` flag. You can run several Claude sessions at once, each on its own branch, without conflicts.
+
+**Manual use (e.g. two terminals):**
+
+```bash
+# Terminal 1: work on feature-1
+claude -w feature-1
+
+# Terminal 2: work on feature-2
+claude -w feature-2
+```
+
+Each session uses a separate worktree under `.claude/worktrees/`, so branches and files stay isolated. This is especially useful in monorepos (e.g. Pedregal), where you can run multiple streams of work simultaneously.
+
+You can combine this with Stringwork: run `claude -w <branch>` in each terminal and connect to the same MCP server; each session can set its presence and claim tasks independently.
+
+**Spawned workers:** To give each *spawned* Claude Code worker its own native worktree, set `use_claude_worktree: true` on the worker in your config:
+
+```yaml
+workers:
+  - type: claude-code
+    instances: 2
+    use_claude_worktree: true   # each worker gets -w <instance_id>, e.g. claude-code-1, claude-code-2
+    command: ["claude", "-p", "...", "--dangerously-skip-permissions"]
+```
+
+The **orchestrator** sets the worktree as part of scope when it assigns a task: the task's work context gets `worktree_name` set to the assigned instance ID (e.g. `claude-code-1`). The server then injects `-w <worktree_name>` when spawning that task's worker, so each worker runs in its own Claude worktree. Workers can see the scope (including `worktree_name`) via `get_work_context`. This complements (or replaces) Stringwork's optional git worktree isolation (`.stringwork/worktrees/`).
+
+**Codex and Gemini** do not have a native `-w` worktree flag. For them, use **orchestration.worktrees** (see below): the server creates a git worktree per worker and runs the process with that directory as cwd, so each Codex or Gemini worker gets an isolated checkout. Codex also supports worktrees in its GUI (under `$CODEX_HOME/worktrees`); the CLI uses `--cd` for working directory. Gemini must be launched from within the worktree directory for tool access — which is exactly what the server does when worktrees are enabled.
+
 ## Step 4: Verify setup
 
 ### Test from Cursor
@@ -305,7 +337,7 @@ orchestration:
     path: ".stringwork/worktrees"
 ```
 
-Requires the workspace to be a git repository.
+Requires the workspace to be a git repository. This applies to **all** worker types: the server sets each worker's process cwd to the worktree path. For **Claude Code**, you can additionally set `use_claude_worktree: true` so the Claude CLI gets `-w <name>` (Claude's own worktrees under `.claude/worktrees/`). Codex and Gemini have no equivalent CLI flag; they rely on this server-side worktree (cwd) for isolation.
 
 ## Dashboard
 
