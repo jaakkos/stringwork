@@ -419,10 +419,7 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 							removeTaskFromInstance(state, taskID, oldAssignee)
 
 							newAssignee := orch.ReassignTask(task, state, []string{blockerType})
-							driver := state.DriverID
-							if driver == "" {
-								driver = "cursor"
-							}
+							driver := app.ConfiguredDriver(state)
 							if newAssignee != "" {
 								task.Status = "pending"
 								state.Messages = append(state.Messages, domain.Message{

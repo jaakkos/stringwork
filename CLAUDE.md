@@ -146,10 +146,16 @@ When asked to review code:
 
 When the server is configured with `orchestration` (in `mcp/config.yaml`), one agent is the **driver** and others are **workers**.
 
-- **Driver** (e.g. cursor): Creates tasks with `assigned_to='any'` so the server auto-assigns to workers. Use `worker_status` to see real-time progress, process activity, and SLA status. Set `expected_duration_seconds` on tasks for SLA monitoring. Use `cancel_agent` to stop stuck workers. Can also do work (hybrid).
+- **Driver** (e.g. cursor or claude-code): Creates tasks with `assigned_to='any'` so the server auto-assigns to workers. Use `worker_status` to see real-time progress, process activity, and SLA status. Set `expected_duration_seconds` on tasks for SLA monitoring. Use `cancel_agent` to stop stuck workers. Can also do work (hybrid).
 - **Workers** (e.g. claude-code-1, codex, gemini): Use `claim_next` to get tasks, `heartbeat` every 60-90 seconds with progress info, `report_progress` every 2-3 minutes. **The server monitors these — missing reports trigger escalating alerts to the driver (3 min warning, 5 min critical, 10 min auto-recovery).** Report to the driver via `send_message`. **Obey STOP signals immediately.**
 
 If no orchestration is configured, all agents are peers (legacy mode).
+
+### Claude Code as Driver
+
+Claude Code can be the driver by setting `driver: claude-code` in config. This requires daemon mode (Claude Code connects via HTTP URL, not stdio). Use `/pair-drive` to start a driver session.
+
+See [docs/examples/config-claude-code-driver.yaml](docs/examples/config-claude-code-driver.yaml) for a complete example.
 
 ## Available MCP Tools (24 coordination tools)
 
@@ -182,8 +188,8 @@ Use your native tools for files, search, git, and commands.
 
 ## Agents
 
-- **`cursor`** — Cursor IDE agent (often the driver)
-- **`claude-code`** (you) — Claude Code CLI agent (worker; may be claude-code-1, claude-code-2 when multiple instances)
+- **`cursor`** — Cursor IDE agent (driver by default; can be a manual worker when another agent drives)
+- **`claude-code`** (you) — Claude Code CLI agent (worker by default; can be driver with `driver: claude-code` in config)
 - **`codex`** — OpenAI Codex CLI agent (worker)
 - **`gemini`** — Google Gemini CLI agent (worker)
 

@@ -88,6 +88,8 @@ http_port: 0
 #                  Set to ["none"] for a clean environment.
 orchestration:
   # Which agent is the driver. Worker prompts use {driver} to address this agent.
+  # Can be any agent name, e.g. "cursor" or "claude-code".
+  # See docs/examples/config-claude-code-driver.yaml for a Claude Code driver setup.
   driver: cursor
   assignment_strategy: least_loaded    # or capability_match
   heartbeat_interval_seconds: 30
@@ -115,7 +117,7 @@ orchestration:
     - type: claude-code
       instances: 1
       # use_claude_worktree: true   # optional: run each instance with -w <instance_id> (e.g. .claude/worktrees/claude-code-1)
-      command: ["claude", "-p", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED", "--dangerously-skip-permissions"]
+      command: ["claude", "-p", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nWORK PATTERN (recommended for complex tasks):\nUse the Agent tool to break work into focused sub-tasks.\nCall report_progress BETWEEN each Agent call — this creates natural progress checkpoints.\nExample:\n  report_progress ... description='Analyzing codebase' percent_complete=10\n  → Agent: 'Read and understand the relevant code'\n  report_progress ... description='Implementing changes' percent_complete=40\n  → Agent: 'Implement the changes'\n  report_progress ... description='Running tests' percent_complete=70\n  → Agent: 'Run tests and fix failures'\nFor simple tasks, work directly but still report every 2-3 minutes.\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED", "--dangerously-skip-permissions"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15

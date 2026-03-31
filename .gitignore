@@ -23,3 +23,6 @@ vendor/
 
 # Cursor (mcp.json contains personal paths)
 .cursor/
+
+# Claude Code local settings (personal permissions)
+.claude/settings.local.json

@@ -1,0 +1,77 @@
+# Example: Claude Code as Driver
+#
+# In this setup, Claude Code drives the session while Codex and Gemini
+# are workers. Claude Code connects via HTTP URL (daemon mode required).
+#
+# How it works:
+# 1. Start the server in daemon mode (or standalone with --http-only)
+# 2. Connect Claude Code via URL: claude mcp add-json --scope user stringwork \
+#      '{"type":"url","url":"http://localhost:8943/mcp"}'
+# 3. Use /pair-drive in Claude Code to start driving
+#
+# Key differences from Cursor-as-driver:
+# - Daemon mode is required (Claude Code connects via HTTP, not stdio)
+# - A fixed http_port is recommended for a stable URL across restarts
+# - Cursor can still connect as a manual worker (uses claim_next in the IDE)
+#   but should NOT be listed in workers[] (it can't be auto-spawned)
+
+workspace_root: ""
+log_file: ""
+state_file: ""
+
+enabled_tools:
+  - "*"
+
+message_retention_max: 1000
+message_retention_days: 30
+presence_ttl_seconds: 300
+
+# Daemon mode required for Claude Code as driver.
+# Claude Code connects via HTTP URL, so the server must run independently.
+daemon:
+  enabled: true
+  socket_path: ""
+  pid_file: ""
+  grace_period_seconds: 10
+
+# Fixed port recommended so the MCP URL stays stable across daemon restarts.
+http_port: 8943
+
+orchestration:
+  # Set claude-code as the driver. Worker prompts use {driver} to address this agent.
+  driver: claude-code
+  assignment_strategy: least_loaded
+  heartbeat_interval_seconds: 30
+  worker_timeout_seconds: 120
+  max_task_failures: 3
+
+  workers:
+    - type: codex
+      instances: 1
+      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      cooldown_seconds: 30
+      max_retries: 2
+      retry_delay_seconds: 15
+      timeout_seconds: 600
+      env:
+        GH_TOKEN: "${GH_TOKEN}"
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
+
+    - type: gemini
+      instances: 1
+      command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      cooldown_seconds: 30
+      max_retries: 2
+      retry_delay_seconds: 15
+      timeout_seconds: 600
+      env:
+        GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+        GH_TOKEN: "${GH_TOKEN}"
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
+
+  # NOTE: Cursor is NOT listed as a worker. It can't be auto-spawned.
+  # If Cursor connects to this server, it operates as a manual worker:
+  # use claim_next in the IDE to pick up tasks, or the driver can
+  # assign tasks directly with assigned_to='cursor'.

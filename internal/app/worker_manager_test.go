@@ -1421,3 +1421,39 @@ func TestGetRecentOutput_NonexistentWorker(t *testing.T) {
 		t.Errorf("expected empty string for nonexistent worker, got '%s'", output)
 	}
 }
+
+func TestWorkerManager_DriverMethod(t *testing.T) {
+	tests := []struct {
+		name     string
+		driverID string
+		want     string
+	}{
+		{"configured claude-code", "claude-code", "claude-code"},
+		{"configured cursor", "cursor", "cursor"},
+		{"empty falls back to cursor", "", "cursor"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wm := &WorkerManager{driverID: tc.driverID}
+			if got := wm.driver(); got != tc.want {
+				t.Errorf("driver() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildTaskPrompt_ClaudeCodeDriver(t *testing.T) {
+	task := &domain.Task{
+		ID:       99,
+		Title:    "Test with claude-code driver",
+		Priority: 3,
+	}
+	prompt := buildTaskPrompt(task, nil, "codex-task-99", "/workspace", "claude-code")
+
+	if !strings.Contains(prompt, "to='claude-code'") {
+		t.Error("prompt should contain send_message to claude-code driver")
+	}
+	if strings.Contains(prompt, "to='cursor'") {
+		t.Error("prompt should not reference cursor when driver is claude-code")
+	}
+}

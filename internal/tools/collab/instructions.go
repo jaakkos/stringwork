@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -31,17 +32,48 @@ func AgentNameForClient(clientName string) string {
 	}
 }
 
-// pairForAgent returns the default pair partner name.
-// Each built-in agent defaults to pairing with cursor (the driver).
-func pairForAgent(agent string) string {
-	switch agent {
-	case "cursor":
-		return "claude-code"
-	case "claude-code", "codex", "gemini":
-		return "cursor"
-	default:
-		return "cursor"
+// configuredDriverID holds the configured driver agent name.
+// Set via SetDriverID during server initialization, before any MCP
+// client connections are accepted. Stored as atomic.Value to prevent
+// data races — writes happen at startup, reads at any time.
+var configuredDriverID atomic.Value // stores string
+
+// SetDriverID sets the configured driver agent name used by pairForAgent
+// and DynamicInstructionsForClient. Must be called once during server
+// startup before serving begins. Safe for concurrent use.
+func SetDriverID(id string) {
+	configuredDriverID.Store(id)
+}
+
+// getDriverID returns the configured driver agent name, or "" if unset.
+func getDriverID() string {
+	if v := configuredDriverID.Load(); v != nil {
+		return v.(string)
 	}
+	return ""
+}
+
+// pairForAgent returns the default pair partner name.
+// The driver pairs with the first known worker type; workers pair with the driver.
+func pairForAgent(agent string) string {
+	driver := getDriverID()
+	if driver == "" {
+		driver = "cursor"
+	}
+	if agent == driver {
+		// Driver pairs with the first known worker type.
+		// These are hardcoded defaults; the orchestration config may define
+		// different worker types, but pairForAgent is only used for generating
+		// dynamic instructions text and has no behavioral impact.
+		workers := []string{"claude-code", "codex", "gemini"}
+		for _, w := range workers {
+			if w != driver {
+				return w
+			}
+		}
+		return "claude-code"
+	}
+	return driver
 }
 
 // InstructionsText returns the static instruction string used by the MCP server.

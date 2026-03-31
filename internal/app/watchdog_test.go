@@ -896,6 +896,338 @@ func TestWatchdog_DLQ_BelowMaxNotBlocked(t *testing.T) {
 	})
 }
 
+func TestWatchdog_AlertsGoToClaudeCodeDriver(t *testing.T) {
+	// When DriverID is "claude-code", progress alerts and recovery notifications
+	// should be sent to "claude-code" instead of "cursor".
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID:    "codex",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: staleTime,
+	}
+	state.DriverID = "claude-code"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         1,
+		Title:      "Stuck task",
+		Status:     "in_progress",
+		AssignedTo: "codex",
+		UpdatedAt:  staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	// Verify recovery notification was sent to claude-code (the driver), not cursor
+	_ = svc.Query(func(s *domain.CollabState) error {
+		foundForClaudeCode := false
+		foundForCursor := false
+		for _, msg := range s.Messages {
+			if msg.From == "system" && msg.To == "claude-code" {
+				foundForClaudeCode = true
+			}
+			if msg.From == "system" && msg.To == "cursor" {
+				foundForCursor = true
+			}
+		}
+		if !foundForClaudeCode {
+			t.Error("expected system notification to claude-code (the driver)")
+		}
+		if foundForCursor {
+			t.Error("system notification should go to claude-code, not cursor")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_ProgressAlertToClaudeCodeDriver(t *testing.T) {
+	// Progress warning/critical alerts should go to the configured driver.
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID:    "codex",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now,
+	}
+	state.DriverID = "claude-code"
+
+	// Task with no recent progress
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:             1,
+		Title:          "Slow task",
+		Status:         "in_progress",
+		AssignedTo:     "codex",
+		UpdatedAt:      now.Add(-6 * time.Minute),
+		LastProgressAt: now.Add(-6 * time.Minute),
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, msg := range s.Messages {
+			if msg.From == "system" {
+				if msg.To != "claude-code" {
+					t.Errorf("progress alert sent to %q, want \"claude-code\"", msg.To)
+				}
+				return nil
+			}
+		}
+		t.Error("expected a progress alert message")
+		return nil
+	})
+}
+
+// ========== Session-aware progress alert tests ==========
+
+func TestWatchdog_ProgressWarning_SuppressedWhenSessionActive(t *testing.T) {
+	// Worker has no process but has recent session activity (HTTP-connected).
+	// Warning should be suppressed.
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+
+	// Task with stale progress (4 min), exceeding warning threshold (3 min).
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:             1,
+		Title:          "HTTP worker task",
+		Status:         "in_progress",
+		AssignedTo:     "claude-code",
+		UpdatedAt:      now.Add(-4 * time.Minute),
+		LastProgressAt: now.Add(-4 * time.Minute),
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// Simulate recent session activity (tool calls).
+	registry.SetAgent("session-http", "claude-code")
+	registry.TouchSession("session-http")
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	// No warning message should be sent (suppressed by session activity).
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, msg := range s.Messages {
+			if msg.From == "system" && strings.Contains(msg.Content, "Warning") {
+				t.Errorf("warning should be suppressed when session is active, got: %s", msg.Content)
+			}
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_ProgressCritical_SoftWhenSessionActive(t *testing.T) {
+	// Worker has no process but has recent session activity (HTTP-connected).
+	// Critical alert should be softened to a "Note" instead of "No process".
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+
+	// Task with very stale progress (6 min), exceeding critical threshold (5 min).
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:             1,
+		Title:          "HTTP worker task",
+		Status:         "in_progress",
+		AssignedTo:     "claude-code",
+		UpdatedAt:      now.Add(-6 * time.Minute),
+		LastProgressAt: now.Add(-6 * time.Minute),
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// Simulate recent session activity.
+	registry.SetAgent("session-http", "claude-code")
+	registry.TouchSession("session-http")
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	// Should get a soft "Note" message, not "No process" or "Stuck".
+	_ = svc.Query(func(s *domain.CollabState) error {
+		found := false
+		for _, msg := range s.Messages {
+			if msg.From == "system" && msg.To == "cursor" {
+				found = true
+				if !strings.Contains(msg.Content, "Note") {
+					t.Errorf("expected soft 'Note' alert, got: %s", msg.Content)
+				}
+				if strings.Contains(msg.Content, "No process") {
+					t.Errorf("should not say 'No process' when session is active, got: %s", msg.Content)
+				}
+				if strings.Contains(msg.Content, "Stuck") {
+					t.Errorf("should not say 'Stuck' when session is active, got: %s", msg.Content)
+				}
+				if !strings.Contains(msg.Content, "session active") {
+					t.Errorf("expected 'session active' in message, got: %s", msg.Content)
+				}
+			}
+		}
+		if !found {
+			t.Error("expected a system message at critical threshold")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_ProgressWarning_NotSuppressedWhenSessionStale(t *testing.T) {
+	// Worker has no process AND stale session activity.
+	// Warning should NOT be suppressed.
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:             1,
+		Title:          "Dead worker task",
+		Status:         "in_progress",
+		AssignedTo:     "claude-code",
+		UpdatedAt:      now.Add(-4 * time.Minute),
+		LastProgressAt: now.Add(-4 * time.Minute),
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// Session exists but activity is old (stale).
+	registry.SetAgent("session-stale", "claude-code")
+	registry.BackdateActivity("session-stale", now.Add(-10*time.Minute))
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	// Warning should be sent (no active session to suppress it).
+	_ = svc.Query(func(s *domain.CollabState) error {
+		found := false
+		for _, msg := range s.Messages {
+			if msg.From == "system" && strings.Contains(msg.Content, "Warning") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected warning when session is stale and no process")
+		}
+		return nil
+	})
+}
+
 // mockTriggerable records Trigger calls.
 type mockTriggerable struct {
 	fn func()

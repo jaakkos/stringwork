@@ -352,10 +352,7 @@ func (w *Watchdog) check() {
 
 		// Phase 3: Tiered progress alerts and SLA checks for in_progress tasks.
 		// This generates warnings/critical alerts BEFORE the task hits the stuck threshold.
-		driver := state.DriverID
-		if driver == "" {
-			driver = "cursor"
-		}
+		driver := ConfiguredDriver(state)
 		for i := range state.Tasks {
 			t := &state.Tasks[i]
 			if t.Status != "in_progress" {
@@ -398,20 +395,44 @@ func (w *Watchdog) check() {
 			// When process activity data is available, the watchdog classifies the
 			// worker as ACTIVE (producing output), SILENT (no recent output), or
 			// NO_PROCESS (crashed/exited) and adjusts alerts accordingly.
+			//
+			// For workers without a process (HTTP-connected), session activity
+			// (tool calls via PiggybackMiddleware) serves as a liveness signal.
 			currentLevel := w.alertedTasks[t.ID]
 			activity := w.classifyWorkerActivity(t.AssignedTo, now)
 
+			// Session-aware override: if no process is found but the worker has
+			// recent session activity (tool calls), treat it as active. This covers
+			// HTTP-connected workers (e.g. claude-code via URL) that have no spawned process.
+			// We reuse progressWarningThresh as the staleness cutoff: if session activity
+			// is older than the progress warning threshold, the worker would be warned
+			// about lack of progress anyway, making the session effectively stale.
+			sessionActive := false
+			if activity.status == workerNoProcess {
+				lastSession := w.registry.LastActivityForAgent(t.AssignedTo)
+				if !lastSession.IsZero() && now.Sub(lastSession) < w.progressWarningThresh {
+					sessionActive = true
+				}
+			}
+
 			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" && currentLevel != "sla_exceeded" {
 				var content string
-				switch activity.status {
-				case workerActive:
+				switch {
+				case activity.status == workerActive || sessionActive:
 					w.alertedTasks[t.ID] = "critical"
-					content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
-						"but the process is actively producing output (last output %s ago, %d bytes written). "+
-						"The worker should call `report_progress` periodically.",
-						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
-						activity.sinceOutput.Round(time.Second), activity.outputBytes)
-				case workerSilent:
+					if sessionActive {
+						content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
+							"but is still making tool calls (session active). "+
+							"The worker should call `report_progress` periodically.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
+					} else {
+						content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
+							"but the process is actively producing output (last output %s ago, %d bytes written). "+
+							"The worker should call `report_progress` periodically.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+							activity.sinceOutput.Round(time.Second), activity.outputBytes)
+					}
+				case activity.status == workerSilent:
 					w.alertedTasks[t.ID] = "critical"
 					content = fmt.Sprintf("🔴 **Stuck**: Worker %s has not reported progress on task #%d (%s) for %s, "+
 						"and the process has been silent for %s — likely stuck. "+
@@ -421,7 +442,7 @@ func (w *Watchdog) check() {
 					if activity.snippet != "" {
 						content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
 					}
-				default: // workerNoProcess
+				default: // workerNoProcess, no session activity
 					w.alertedTasks[t.ID] = "critical"
 					content = fmt.Sprintf("💀 **No process**: Worker %s has not reported progress on task #%d (%s) for %s, "+
 						"and no running process was found — the worker may have crashed or exited. "+
@@ -433,16 +454,22 @@ func (w *Watchdog) check() {
 					Content: content, Timestamp: now,
 				})
 				state.NextMsgID++
-				w.logger.Printf("Watchdog: CRITICAL — task #%d no progress for %s (activity: %s)", t.ID, sinceProgress.Round(time.Second), activity.status)
+				w.logger.Printf("Watchdog: CRITICAL — task #%d no progress for %s (activity: %s, sessionActive: %v)", t.ID, sinceProgress.Round(time.Second), activity.status, sessionActive)
 
 			} else if sinceProgress > w.progressWarningThresh && currentLevel == "" {
-				switch activity.status {
-				case workerActive:
-					// Suppress warning — worker is actively producing output, just not
-					// calling report_progress. Will alert at critical threshold if it continues.
-					w.logger.Printf("Watchdog: task #%d no progress for %s but process is active (last output %s ago) — suppressing warning",
-						t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
-				case workerSilent:
+				switch {
+				case activity.status == workerActive || sessionActive:
+					// Suppress warning — worker is actively producing output or making
+					// tool calls, just not calling report_progress. Will alert at
+					// critical threshold if it continues.
+					if sessionActive {
+						w.logger.Printf("Watchdog: task #%d no progress for %s but session is active — suppressing warning",
+							t.ID, sinceProgress.Round(time.Second))
+					} else {
+						w.logger.Printf("Watchdog: task #%d no progress for %s but process is active (last output %s ago) — suppressing warning",
+							t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
+					}
+				case activity.status == workerSilent:
 					w.alertedTasks[t.ID] = "warning"
 					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
 						"and the process has been silent for %s. The worker may be stuck. "+
@@ -458,7 +485,7 @@ func (w *Watchdog) check() {
 					})
 					state.NextMsgID++
 					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (SILENT for %s)", t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
-				default: // workerNoProcess
+				default: // workerNoProcess, no session activity
 					w.alertedTasks[t.ID] = "warning"
 					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
 						"and no running process was found. Use `worker_output task_id=%d` to check the log.",
@@ -475,10 +502,6 @@ func (w *Watchdog) check() {
 
 		// Send notification if anything was recovered
 		if recoveredTasks > 0 || recoveredAgents > 0 {
-			driver := state.DriverID
-			if driver == "" {
-				driver = "cursor"
-			}
 			parts := []string{}
 			if recoveredTasks > 0 {
 				parts = append(parts, fmt.Sprintf("%d stuck task(s) reset to pending", recoveredTasks))

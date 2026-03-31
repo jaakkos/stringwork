@@ -67,7 +67,8 @@ type pendingSpawn struct {
 // WorkerManager spawns and tracks worker instances from orchestration config (instance IDs, e.g. claude-code-1, claude-code-2).
 type WorkerManager struct {
 	configs        []WorkerSpawnConfig
-	getAgent       func() string
+	driverID       string        // configured driver agent name
+	getAgent       func() string // returns the currently connected MCP client's agent name; used for workspace resolution and spawn filtering
 	stateLoader    func() (*domain.CollabState, error)
 	stateMutator   func(func(*domain.CollabState) error) error
 	fallbackDir    string
@@ -162,8 +163,13 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 			}
 		}
 	}
+	driverID := ""
+	if orch != nil {
+		driverID = orch.Driver
+	}
 	return &WorkerManager{
 		configs:             configs,
+		driverID:            driverID,
 		getAgent:            getAgent,
 		stateLoader:         stateLoader,
 		stateMutator:        stateMutator,
@@ -602,12 +608,10 @@ func resolveWorkerBinary(binary string) (string, error) {
 	return resolved, nil
 }
 
-// driver returns the driver agent name from the first config's context, or "cursor" as default.
+// driver returns the configured driver agent name, falling back to "cursor".
 func (m *WorkerManager) driver() string {
-	if m.getAgent != nil {
-		if d := m.getAgent(); d != "" {
-			return d
-		}
+	if m.driverID != "" {
+		return m.driverID
 	}
 	return "cursor"
 }
@@ -1126,10 +1130,7 @@ func (m *WorkerManager) sendTerminalFailureAck(instanceID string, info workerErr
 			}
 		}
 		if recipient == "" {
-			recipient = s.DriverID
-			if recipient == "" {
-				recipient = "cursor"
-			}
+			recipient = ConfiguredDriver(s)
 		}
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,
@@ -1815,10 +1816,7 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 		if reconciled > 0 {
 			m.logger.Printf("WorkerManager: reconciled %d stuck task(s) for %s → set to pending", reconciled, c.InstanceID)
 			// Notify the driver
-			driver := s.DriverID
-			if driver == "" {
-				driver = "cursor"
-			}
+			driver := ConfiguredDriver(s)
 			s.Messages = append(s.Messages, domain.Message{
 				ID:        s.NextMsgID,
 				From:      "system",
@@ -2197,10 +2195,7 @@ func (m *WorkerManager) sendFailureAck(instanceID string, lastErr error, attempt
 			}
 		}
 		if recipient == "" {
-			recipient = s.DriverID
-			if recipient == "" {
-				recipient = "cursor"
-			}
+			recipient = ConfiguredDriver(s)
 		}
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,

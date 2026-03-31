@@ -22,6 +22,20 @@ Key tools:
 - `cancel_agent` to stop stuck workers
 - `send_message` to give instructions or feedback
 
+### Driver (e.g. Claude Code)
+
+When Claude Code is configured as the driver (`driver: claude-code` in config):
+
+```
+get_session_context for 'claude-code'
+set_presence agent='claude-code' status='working' workspace='/path/to/project'
+create_task title='Add auth middleware' assigned_to='any' created_by='claude-code'
+worker_status
+cancel_agent agent='codex' cancelled_by='claude-code' reason='taking too long'
+```
+
+Use `/pair-drive` in Claude Code for a guided driver session.
+
 ### Workers (e.g. Claude Code, Codex, custom agents)
 
 Workers claim tasks, do the work, and report back.

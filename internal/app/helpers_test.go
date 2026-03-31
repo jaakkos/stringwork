@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jaakkos/stringwork/internal/domain"
+	"github.com/jaakkos/stringwork/internal/policy"
 )
 
 func TestTruncate(t *testing.T) {
@@ -239,6 +240,73 @@ func TestRegisteredAgentNames_WithAgents(t *testing.T) {
 	}
 	if !found["bot-a"] || !found["bot-b"] {
 		t.Errorf("expected bot-a and bot-b, got %v", names)
+	}
+}
+
+func TestConfiguredDriver(t *testing.T) {
+	tests := []struct {
+		name  string
+		state *domain.CollabState
+		want  string
+	}{
+		{"nil state", nil, "cursor"},
+		{"empty DriverID", &domain.CollabState{}, "cursor"},
+		{"cursor driver", &domain.CollabState{DriverID: "cursor"}, "cursor"},
+		{"claude-code driver", &domain.CollabState{DriverID: "claude-code"}, "claude-code"},
+		{"custom driver", &domain.CollabState{DriverID: "my-driver"}, "my-driver"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ConfiguredDriver(tc.state)
+			if got != tc.want {
+				t.Errorf("ConfiguredDriver() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnsureAgentInstances_ClaudeCodeDriver(t *testing.T) {
+	state := domain.NewCollabState()
+	orch := &policy.OrchestrationConfig{
+		Driver: "claude-code",
+		Workers: []policy.WorkerConfig{
+			{Type: "codex", Instances: 1},
+			{Type: "gemini", Instances: 1},
+		},
+	}
+
+	EnsureAgentInstances(state, orch)
+
+	// DriverID should be set to claude-code
+	if state.DriverID != "claude-code" {
+		t.Errorf("DriverID = %q, want \"claude-code\"", state.DriverID)
+	}
+
+	// claude-code should be the driver instance
+	inst := state.AgentInstances["claude-code"]
+	if inst == nil {
+		t.Fatal("expected claude-code agent instance")
+	}
+	if inst.Role != domain.RoleDriver {
+		t.Errorf("claude-code role = %q, want driver", inst.Role)
+	}
+
+	// Workers should exist
+	if state.AgentInstances["codex"] == nil {
+		t.Error("expected codex agent instance")
+	}
+	if state.AgentInstances["gemini"] == nil {
+		t.Error("expected gemini agent instance")
+	}
+	if state.AgentInstances["codex"].Role != domain.RoleWorker {
+		t.Errorf("codex role = %q, want worker", state.AgentInstances["codex"].Role)
+	}
+}
+
+func TestOrchestrationAgentTypes_Nil(t *testing.T) {
+	got := OrchestrationAgentTypes(nil)
+	if len(got) != 1 || got[0] != "cursor" {
+		t.Errorf("OrchestrationAgentTypes(nil) = %v, want [\"cursor\"]", got)
 	}
 }
 

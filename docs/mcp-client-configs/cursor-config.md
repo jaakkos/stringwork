@@ -103,6 +103,14 @@ mcp-stringwork status cursor
 # Output: unread=N pending=N
 ```
 
+## Cursor as worker
+
+When another agent is the driver (e.g. `driver: claude-code` in config), Cursor operates as a manual worker. It can't be auto-spawned, but can participate by:
+- Using `claim_next` to pick up pending tasks
+- Having tasks assigned directly via `assigned_to='cursor'`
+- Reporting progress with `heartbeat` and `report_progress` while working
+- Sending findings to the driver via `send_message`
+
 ## Troubleshooting
 
 - **Server not responding:** Check binary path and execute permission.

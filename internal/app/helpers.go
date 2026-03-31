@@ -12,6 +12,15 @@ import (
 	"github.com/jaakkos/stringwork/internal/policy"
 )
 
+// ConfiguredDriver returns the configured driver agent name from state,
+// falling back to "cursor" for backward compatibility.
+func ConfiguredDriver(state *domain.CollabState) string {
+	if state != nil && state.DriverID != "" {
+		return state.DriverID
+	}
+	return "cursor"
+}
+
 // Truncate truncates s to max runes (Unicode-safe).
 func Truncate(s string, max int) string {
 	runes := []rune(s)
@@ -99,7 +108,8 @@ func GetBuiltinAgents(state *domain.CollabState) []string {
 }
 
 // OrchestrationAgentTypes returns agent type names from orchestration config (driver + unique worker types).
-// Used for instruction resources and agent lists when state has no instances yet. If orch is nil, returns ["cursor"].
+// Used for instruction resources and agent lists when state has no instances yet.
+// Returns ["cursor"] when orch is nil to ensure default agent resources are registered.
 func OrchestrationAgentTypes(orch *policy.OrchestrationConfig) []string {
 	if orch == nil {
 		return []string{"cursor"}
@@ -188,7 +198,7 @@ func RefreshHeartbeatsOnStartup(state *domain.CollabState) {
 		// Refresh the heartbeat so the watchdog gives agents time to reconnect.
 		inst.LastHeartbeat = now
 		// Workers that haven't reconnected yet should start as offline.
-		// The driver keeps its status (cursor may reconnect immediately).
+		// The driver keeps its status (it may reconnect immediately).
 		if inst.Role == domain.RoleWorker {
 			inst.Status = "offline"
 			inst.CurrentTasks = nil

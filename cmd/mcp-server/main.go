@@ -193,8 +193,13 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 			logger.Printf("Client: %s %s, Protocol: %s", ci.Name, ci.Version, message.Params.ProtocolVersion)
 
 			agent := collab.AgentNameForClient(ci.Name)
-			if agent != "cursor" && agent != "" {
+			configuredDriver := "cursor"
+			if o := pol.Orchestration(); o != nil && o.Driver != "" {
+				configuredDriver = o.Driver
+			}
+			if agent != configuredDriver && agent != "" {
 				clientName, clientVersion := ci.Name, ci.Version
+				driverFallback := configuredDriver
 				go func() {
 					_ = svc.Run(func(state *domain.CollabState) error {
 						recipient := ""
@@ -206,7 +211,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 							}
 						}
 						if recipient == "" {
-							recipient = "cursor"
+							recipient = driverFallback
 						}
 						state.Messages = append(state.Messages, domain.Message{
 							ID:        state.NextMsgID,
@@ -305,6 +310,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	var wm *app.WorkerManager
 	orchCfg := pol.Orchestration()
 	if orchCfg != nil {
+		collab.SetDriverID(orchCfg.Driver)
 		wm = app.NewWorkerManager(orchCfg, getAgent, stateLoader, svc.Run, cfg.WorkspaceRoot, logger)
 		wm.SetSessionChecker(func(instanceOrType string) bool {
 			return registry.HasActiveSession(instanceOrType)

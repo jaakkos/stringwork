@@ -102,15 +102,28 @@ Claude Code wraps CLAUDE.md content in a framing that tells Claude it "may or ma
 | Command | Purpose |
 |---------|---------|
 | `/pair-respond` | Process unread messages and pending tasks (used by auto-spawn) |
+| `/pair-drive` | Drive the session — create tasks, monitor workers, review completions |
 
 ## Pair programming workflow
+
+### As worker (default)
 
 - Start: `get_context` for `'claude-code'`
 - Check tasks: `list_tasks` with `assigned_to='claude-code'`
 - Claim: `update_task` with `id=X` `status='in_progress'` `updated_by='claude-code'`
 - **While working:** `heartbeat` every 60-90s, `report_progress` every 2-3min (MANDATORY)
-- Report: `send_message` from `'claude-code'` to `'cursor'` with detailed findings
+- Report: `send_message` from `'claude-code'` to the driver with detailed findings
 - Complete: `update_task` with `id=X` `status='completed'` `updated_by='claude-code'`
+
+### As driver
+
+Set `driver: claude-code` in config (requires daemon mode with a fixed `http_port`). Then use `/pair-drive` to start. See [examples/config-claude-code-driver.yaml](../examples/config-claude-code-driver.yaml) for a complete config example.
+
+Key driver workflow:
+- `create_task` with `assigned_to='any'` to delegate work
+- `worker_status` to monitor workers
+- `cancel_agent` to stop stuck workers
+- Workers report back via `send_message` to `'claude-code'`
 
 ## Notifications
 
