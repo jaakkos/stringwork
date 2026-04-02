@@ -47,6 +47,7 @@ type WorkerSpawnConfig struct {
 	InheritEnv         []string          // glob patterns for env var names to inherit (empty = all)
 	UseClaudeWorktree  bool              // if true, inject -w for Claude native worktree
 	ClaudeWorktreeName string            // optional: worktree name from orchestrator scope; overrides InstanceID for -w
+	Communication      string            // "cli" (default) or "mcp"
 }
 
 // MCPServerEntry is a single MCP server configuration for worker CLI registration.
@@ -148,6 +149,10 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 				if n > 1 {
 					instanceID = fmt.Sprintf("%s-%d", w.Type, i+1)
 				}
+				comm := w.Communication
+				if comm == "" {
+					comm = "cli"
+				}
 				configs = append(configs, WorkerSpawnConfig{
 					InstanceID:        instanceID,
 					AgentType:         w.Type,
@@ -159,6 +164,7 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 					Env:               w.Env,
 					InheritEnv:        w.InheritEnv,
 					UseClaudeWorktree: w.UseClaudeWorktree,
+					Communication:     comm,
 				})
 			}
 		}
@@ -1184,6 +1190,14 @@ func buildWorkerEnv(c WorkerSpawnConfig, workspaceDir string) []string {
 	// Always inject our own vars
 	base = append(base, "STRINGWORK_AGENT="+c.InstanceID, "STRINGWORK_WORKSPACE="+workspaceDir)
 
+	if c.Communication != "mcp" {
+		socketPath := policy.DefaultSocketPath()
+		base = append(base, "STRINGWORK_SOCKET="+socketPath)
+		if binPath, err := os.Executable(); err == nil {
+			base = append(base, "STRINGWORK_BIN="+binPath)
+		}
+	}
+
 	// Merge config env vars (with ${VAR} expansion)
 	for k, v := range c.Env {
 		expanded := os.Expand(v, func(key string) string {
@@ -1694,13 +1708,18 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		env = ensureGeminiSystemPrompt(env)
 	}
 	// Ensure the worker's CLI tool has configured MCP servers registered (claude/codex).
-	m.mu.Lock()
-	hasMCP := m.mcpServerURL != "" || len(m.mcpServers) > 0
-	m.mu.Unlock()
-	if hasMCP {
-		if err := m.ensureMCPRegistered(c.AgentType, args[0]); err != nil {
-			m.logger.Printf("WorkerManager: MCP registration warning for %s: %v", c.InstanceID, err)
+	// Skip for CLI-mode workers — they use shell commands instead of MCP tools.
+	if c.Communication == "mcp" {
+		m.mu.Lock()
+		hasMCP := m.mcpServerURL != "" || len(m.mcpServers) > 0
+		m.mu.Unlock()
+		if hasMCP {
+			if err := m.ensureMCPRegistered(c.AgentType, args[0]); err != nil {
+				m.logger.Printf("WorkerManager: MCP registration warning for %s: %v", c.InstanceID, err)
+			}
 		}
+	} else {
+		m.logger.Printf("WorkerManager: CLI mode for %s — skipping MCP registration", c.InstanceID)
 	}
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1906,7 +1925,7 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 	taskCfg := baseCfg
 	taskCfg.InstanceID = instanceID
 
-	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver())
+	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver(), taskCfg.Communication)
 	taskCfg.Command = appendPromptToCommand(baseCfg.Command, taskPrompt)
 	if wc != nil && wc.WorktreeName != "" {
 		taskCfg.ClaudeWorktreeName = wc.WorktreeName
@@ -1933,7 +1952,8 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 
 // buildTaskPrompt renders the full task context into a prompt section that is
 // appended to the worker's base command prompt at spawn time.
-func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, workspace, driver string) string {
+// communication is "cli" or "mcp", controlling whether steps reference shell commands or MCP tools.
+func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, workspace, driver, communication string) string {
 	priorityNames := map[int]string{1: "critical", 2: "high", 3: "normal", 4: "low"}
 	priority := priorityNames[task.Priority]
 	if priority == "" {
@@ -1966,17 +1986,38 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 		}
 	}
 
-	b.WriteString(fmt.Sprintf("\nSteps:\n"+
-		"1) set_presence agent='%s' status='working' workspace='%s'\n"+
-		"2) update_task id=%d status='in_progress' updated_by='%s'\n"+
-		"3) Do the work (heartbeat every 60-90s, report_progress every 2-3min)\n"+
-		"4) send_message from='%s' to='%s' with detailed summary of changes\n"+
-		"5) update_task id=%d status='completed' updated_by='%s'\n",
-		instanceID, workspace,
-		task.ID, instanceID,
-		instanceID, driver,
-		task.ID, instanceID,
-	))
+	if communication != "mcp" {
+		bin := "$STRINGWORK_BIN"
+		b.WriteString(fmt.Sprintf("\nCOMMUNICATION: Use shell commands (not MCP tools) for all coordination.\n"+
+			"The env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\n"+
+			"Steps:\n"+
+			"1) Run: %s presence --agent %s --status working --workspace %s\n"+
+			"2) Run: %s task update --id %d --status in_progress --by %s\n"+
+			"3) Do the work. While working:\n"+
+			"   - Every 60-90s:  %s heartbeat --agent %s --progress 'what you are doing'\n"+
+			"   - Every 2-3min:  %s progress --agent %s --task %d --description 'status' --percent N\n"+
+			"4) Run: %s send --from %s --to %s --content 'detailed summary of changes'\n"+
+			"5) Run: %s task update --id %d --status completed --by %s\n",
+			bin, instanceID, workspace,
+			bin, task.ID, instanceID,
+			bin, instanceID,
+			bin, instanceID, task.ID,
+			bin, instanceID, driver,
+			bin, task.ID, instanceID,
+		))
+	} else {
+		b.WriteString(fmt.Sprintf("\nSteps:\n"+
+			"1) set_presence agent='%s' status='working' workspace='%s'\n"+
+			"2) update_task id=%d status='in_progress' updated_by='%s'\n"+
+			"3) Do the work (heartbeat every 60-90s, report_progress every 2-3min)\n"+
+			"4) send_message from='%s' to='%s' with detailed summary of changes\n"+
+			"5) update_task id=%d status='completed' updated_by='%s'\n",
+			instanceID, workspace,
+			task.ID, instanceID,
+			instanceID, driver,
+			task.ID, instanceID,
+		))
+	}
 
 	return b.String()
 }

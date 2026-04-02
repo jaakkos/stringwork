@@ -68,6 +68,11 @@ func main() {
 			fmt.Println("mcp-stringwork " + Version)
 			return
 		}
+
+		// CLI worker communication subcommands (heartbeat, progress, send, task, etc.)
+		if dispatchCLICommand(os.Args) {
+			return
+		}
 	}
 
 	daemonFlag := hasFlag("--daemon")
@@ -436,6 +441,9 @@ func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handl
 	}
 	dash := dashboard.NewHandler(bundle.svc, bundle.registry, dashOpts...)
 	dash.RegisterRoutes(mux)
+
+	wAPI := newWorkerAPI(bundle.svc, bundle.logger)
+	wAPI.RegisterRoutes(mux)
 
 	return mux
 }

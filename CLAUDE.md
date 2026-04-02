@@ -44,6 +44,42 @@ You are `claude-code` in the pair programming system.
 
 ## Working on Tasks
 
+### Communication Modes
+
+Workers can communicate with the Stringwork server in two ways:
+
+- **CLI mode** (default, recommended) — workers use shell commands (`$STRINGWORK_BIN heartbeat`, etc.) that hit the daemon's REST API over a unix socket. More reliable than MCP because each command is a short-lived HTTP request; no persistent connection required.
+- **MCP mode** (legacy) — workers connect via MCP over HTTP. Requires `mcp add` registration during spawn.
+
+When spawned in CLI mode, these environment variables are set automatically:
+- `STRINGWORK_AGENT` — your agent/instance ID
+- `STRINGWORK_WORKSPACE` — workspace root path
+- `STRINGWORK_SOCKET` — unix socket path for daemon communication
+- `STRINGWORK_BIN` — path to the `mcp-stringwork` binary
+
+Configure per worker in `mcp/config.yaml`:
+```yaml
+workers:
+  - type: codex
+    communication: cli   # "cli" (default) or "mcp"
+```
+
+### CLI Commands Reference
+
+```
+mcp-stringwork heartbeat  --agent NAME --progress 'text' [--step N] [--total N]
+mcp-stringwork progress   --agent NAME --task ID --description 'text' [--percent N] [--eta N]
+mcp-stringwork send       --from NAME --to NAME --content 'text'
+mcp-stringwork task update --id ID --status STATUS --by NAME
+mcp-stringwork task list   [--assigned-to NAME] [--status STATUS]
+mcp-stringwork read        --for NAME [--limit N]
+mcp-stringwork presence    --agent NAME --status STATUS [--workspace PATH]
+mcp-stringwork context     --for NAME
+mcp-stringwork work-ctx    --task ID
+```
+
+All commands connect to the daemon via unix socket at `~/.config/stringwork/server.sock`. Set `STRINGWORK_URL` to use TCP instead.
+
 ### When You Receive a Task
 
 1. **Check for constraints:**

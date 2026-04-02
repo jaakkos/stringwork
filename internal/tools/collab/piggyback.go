@@ -122,7 +122,7 @@ func PiggybackMiddleware(svc *app.CollabService, registry *app.SessionRegistry) 
 				return result, nil
 			}
 
-			banner := buildBanner(svc, agent, toolName)
+			banner := BuildBanner(svc, agent, toolName)
 			if banner == "" {
 				return result, nil
 			}
@@ -142,11 +142,11 @@ func agentFromContext(ctx context.Context, registry *app.SessionRegistry) string
 	return registry.GetAgent(session.SessionID())
 }
 
-// buildBanner checks state for the given agent and returns a notification
+// BuildBanner checks state for the given agent and returns a notification
 // banner string. Returns "" if there is nothing to report.
 // If the agent has cancelled tasks, a STOP directive is returned instead of a normal banner.
 // toolName is the current tool being invoked (used to suppress nudges on progress tools).
-func buildBanner(svc *app.CollabService, agent, toolName string) string {
+func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 	if agent == "" {
 		return ""
 	}

@@ -25,6 +25,12 @@ func GlobalStateFile() string {
 	return filepath.Join(GlobalStateDir(), "state.sqlite")
 }
 
+// DefaultSocketPath returns the default unix socket path for daemon communication.
+// Useful for CLI commands that don't load the full config.
+func DefaultSocketPath() string {
+	return filepath.Join(GlobalStateDir(), "server.sock")
+}
+
 // WorkerConfig configures a worker type in the driver/worker orchestration model.
 type WorkerConfig struct {
 	Type               string   `yaml:"type"`                 // e.g. "claude-code", "codex"
@@ -51,6 +57,12 @@ type WorkerConfig struct {
 	// Codex and Gemini do not have a native -w flag; for them, use orchestration.worktrees
 	// (server-managed git worktrees) so each worker's process cwd is an isolated checkout.
 	UseClaudeWorktree bool `yaml:"use_claude_worktree"`
+	// Communication selects how workers talk to the Stringwork server.
+	//   "cli" (default) — workers use shell commands (mcp-stringwork heartbeat, etc.)
+	//                     that hit the daemon's REST API. More reliable, no MCP registration.
+	//   "mcp"           — workers connect via MCP over HTTP (legacy). Requires mcp add
+	//                     registration during spawn.
+	Communication string `yaml:"communication"`
 }
 
 // OrchestrationConfig holds driver/worker orchestration settings.

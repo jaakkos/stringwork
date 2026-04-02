@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 This repository is a Go MCP server for pair-programming coordination. It supports a **driver/worker** model: one configurable driver (e.g. cursor, claude-code, or codex) and N workers that execute tasks with shared context and scope.
 
-- `cmd/mcp-server/`: executable entrypoint (`main.go`, `daemon.go`, `proxy.go`). Supports daemon, proxy, and standalone modes.
+- `cmd/mcp-server/`: executable entrypoint (`main.go`, `daemon.go`, `proxy.go`, `cli_api.go`, `cli_commands.go`). Supports daemon, proxy, and standalone modes. Workers can use CLI subcommands (`heartbeat`, `progress`, `send`, `task`, `read`, `presence`, `context`, `work-ctx`) that hit the REST API at `/api/w/` over a unix socket.
 - `internal/domain/`: core entities (AgentInstance, WorkContext, Task, Plan, etc.).
 - `internal/app/`: application services (CollabService, WorkerManager, TaskOrchestrator).
 - `internal/tools/collab/`: MCP tool handlers (tasks, messaging, plans, locks, worker_status, heartbeat, work_context, cancel_agent).

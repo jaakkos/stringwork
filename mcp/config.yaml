@@ -113,11 +113,16 @@ orchestration:
   # assigned, the server appends the full task context (title, description,
   # relevant files, constraints, step-by-step instructions) to the prompt
   # at spawn time via SpawnForTask. Workers start working immediately.
+  # Worker communication mode:
+  #   communication: cli   — workers use shell commands ($STRINGWORK_BIN heartbeat, etc.)
+  #                          No MCP registration needed. Default and recommended.
+  #   communication: mcp   — workers connect via MCP over HTTP (legacy, less reliable)
   workers:
     - type: claude-code
       instances: 1
+      communication: cli   # "cli" (default) or "mcp"
       # use_claude_worktree: true   # optional: run each instance with -w <instance_id> (e.g. .claude/worktrees/claude-code-1)
-      command: ["claude", "-p", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nWORK PATTERN (recommended for complex tasks):\nUse the Agent tool to break work into focused sub-tasks.\nCall report_progress BETWEEN each Agent call — this creates natural progress checkpoints.\nExample:\n  report_progress ... description='Analyzing codebase' percent_complete=10\n  → Agent: 'Read and understand the relevant code'\n  report_progress ... description='Implementing changes' percent_complete=40\n  → Agent: 'Implement the changes'\n  report_progress ... description='Running tests' percent_complete=70\n  → Agent: 'Run tests and fix failures'\nFor simple tasks, work directly but still report every 2-3 minutes.\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED", "--dangerously-skip-permissions"]
+      command: ["claude", "-p", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED", "--dangerously-skip-permissions"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
@@ -129,9 +134,10 @@ orchestration:
       # inherit_env: ["HOME", "PATH", "GH_*", "SSH_*"]  # restrict inherited env
     - type: codex
       instances: 1
+      communication: cli   # "cli" (default) or "mcp"
       # Codex sandbox blocks network by default.
       # Use --sandbox danger-full-access for full capabilities.
-      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
@@ -142,9 +148,10 @@ orchestration:
         SSH_AUTH_SOCK: "${SSH_AUTH_SOCK}"
     - type: gemini
       instances: 1
+      communication: cli   # "cli" (default) or "mcp"
       # Gemini CLI: --yolo auto-approves tools, --prompt runs headless.
       # Requires GOOGLE_API_KEY. Install: npm install -g @google/gemini-cli
-      command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15

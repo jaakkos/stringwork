@@ -104,7 +104,7 @@ func registerReportProgress(s *server.MCPServer, svc *app.CollabService, logger 
 				response += fmt.Sprintf(" (%d%% complete)", percentComplete)
 			}
 			if etaSeconds > 0 {
-				response += fmt.Sprintf(", ETA: %s", formatDuration(etaSeconds))
+				response += fmt.Sprintf(", ETA: %s", FormatDuration(etaSeconds))
 			}
 			logger.Printf("report_progress: task #%d by %s: %s", taskID, agent, description)
 			return mcp.NewToolResultText(response), nil
@@ -125,8 +125,8 @@ func findAgentInstance(state *domain.CollabState, agent string) *domain.AgentIns
 	return nil
 }
 
-// formatDuration formats seconds into a human-readable duration string.
-func formatDuration(seconds int) string {
+// FormatDuration formats seconds into a human-readable duration string.
+func FormatDuration(seconds int) string {
 	if seconds < 60 {
 		return fmt.Sprintf("%ds", seconds)
 	}

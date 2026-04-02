@@ -827,7 +827,7 @@ func TestBuildTaskPrompt_Basic(t *testing.T) {
 		Description: "Implement JWT validation",
 		Priority:    2,
 	}
-	prompt := buildTaskPrompt(task, nil, "claude-code-task-42", "/workspace", "cursor")
+	prompt := buildTaskPrompt(task, nil, "claude-code-task-42", "/workspace", "cursor", "mcp")
 
 	if !strings.Contains(prompt, "task #42") {
 		t.Error("prompt should contain task ID")
@@ -858,7 +858,7 @@ func TestBuildTaskPrompt_CustomDriver(t *testing.T) {
 		Title:    "Test task",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "codex-task-10", "/workspace", "claude-code")
+	prompt := buildTaskPrompt(task, nil, "codex-task-10", "/workspace", "claude-code", "mcp")
 
 	if !strings.Contains(prompt, "to='claude-code'") {
 		t.Error("prompt should contain send_message to custom driver")
@@ -879,7 +879,7 @@ func TestBuildTaskPrompt_WithWorkContext(t *testing.T) {
 		Background:    "Auth module uses JWT tokens",
 		Constraints:   []string{"do not modify the public API", "read-only investigation"},
 	}
-	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor")
+	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "mcp")
 
 	if !strings.Contains(prompt, "src/auth.go") {
 		t.Error("prompt should contain relevant files")
@@ -901,10 +901,75 @@ func TestBuildTaskPrompt_NoDescription(t *testing.T) {
 		Title:    "Quick task",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "agent", "/ws", "cursor")
+	prompt := buildTaskPrompt(task, nil, "agent", "/ws", "cursor", "mcp")
 
 	if strings.Contains(prompt, "Description:") {
 		t.Error("prompt should not contain Description label when description is empty")
+	}
+}
+
+func TestBuildTaskPrompt_CLIMode(t *testing.T) {
+	task := &domain.Task{
+		ID:       42,
+		Title:    "Add auth middleware",
+		Priority: 2,
+	}
+	prompt := buildTaskPrompt(task, nil, "codex-task-42", "/workspace", "cursor", "cli")
+
+	if !strings.Contains(prompt, "COMMUNICATION: Use shell commands") {
+		t.Error("CLI mode prompt should contain CLI communication header")
+	}
+	if !strings.Contains(prompt, "$STRINGWORK_BIN heartbeat") {
+		t.Error("CLI mode prompt should reference $STRINGWORK_BIN for heartbeat")
+	}
+	if !strings.Contains(prompt, "$STRINGWORK_BIN progress") {
+		t.Error("CLI mode prompt should reference $STRINGWORK_BIN for progress")
+	}
+	if !strings.Contains(prompt, "$STRINGWORK_BIN send --from codex-task-42 --to cursor") {
+		t.Error("CLI mode prompt should reference send command with correct from/to")
+	}
+	if !strings.Contains(prompt, "$STRINGWORK_BIN task update --id 42") {
+		t.Error("CLI mode prompt should reference task update command")
+	}
+	if strings.Contains(prompt, "set_presence agent=") {
+		t.Error("CLI mode prompt should NOT contain MCP-style set_presence")
+	}
+	if strings.Contains(prompt, "update_task id=") {
+		t.Error("CLI mode prompt should NOT contain MCP-style update_task")
+	}
+}
+
+func TestBuildTaskPrompt_CLIMode_WithWorkContext(t *testing.T) {
+	task := &domain.Task{
+		ID:       7,
+		Title:    "Fix bug",
+		Priority: 3,
+	}
+	wc := &domain.WorkContext{
+		RelevantFiles: []string{"src/auth.go"},
+		Constraints:   []string{"read-only"},
+	}
+	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "cli")
+
+	if !strings.Contains(prompt, "src/auth.go") {
+		t.Error("CLI mode prompt should include relevant files")
+	}
+	if !strings.Contains(prompt, "read-only") {
+		t.Error("CLI mode prompt should include constraints")
+	}
+	if !strings.Contains(prompt, "$STRINGWORK_BIN") {
+		t.Error("CLI mode prompt should use CLI commands")
+	}
+}
+
+func TestBuildTaskPrompt_EmptyCommDefaultsToCLI(t *testing.T) {
+	task := &domain.Task{ID: 1, Title: "Test"}
+	prompt := buildTaskPrompt(task, nil, "codex-1", "/ws", "cursor", "")
+	if !strings.Contains(prompt, "$STRINGWORK_BIN") {
+		t.Error("empty communication should default to CLI mode")
+	}
+	if strings.Contains(prompt, "set_presence agent=") {
+		t.Error("empty communication should NOT produce MCP instructions")
 	}
 }
 
@@ -1448,7 +1513,7 @@ func TestBuildTaskPrompt_ClaudeCodeDriver(t *testing.T) {
 		Title:    "Test with claude-code driver",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "codex-task-99", "/workspace", "claude-code")
+	prompt := buildTaskPrompt(task, nil, "codex-task-99", "/workspace", "claude-code", "mcp")
 
 	if !strings.Contains(prompt, "to='claude-code'") {
 		t.Error("prompt should contain send_message to claude-code driver")
