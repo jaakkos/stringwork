@@ -177,6 +177,8 @@ codex resume --last             # most recent session
 codex resume <SESSION_ID>       # specific session
 ```
 
+**Server-side session continuation:** When you report your CLI session ID on your first heartbeat (`session_id` parameter), the Stringwork server stores it. If you get cancelled and respawned (e.g. due to being stuck), the server injects `--session <your-session-id>` into the spawn command so you automatically resume your previous conversation context.
+
 ## Available MCP Tools (24 coordination tools)
 
 - `get_session_context` - Full session context (messages, tasks, presence, notes)

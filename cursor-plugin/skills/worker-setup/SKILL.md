@@ -42,7 +42,7 @@ Each worker entry supports:
 ```yaml
 - type: claude-code
   instances: 1
-  command: ["claude", "-p", "You are claude-code, a worker in a pair programming session. Workspace: {workspace}.\n\nMANDATORY: heartbeat every 60-90s, report_progress every 2-3min, send_message before finishing.\n\nSteps:\n1) set_presence agent='claude-code' status='working' workspace='{workspace}'\n2) read_messages for 'claude-code'\n3) list_tasks assigned_to='claude-code'\n4) Work on tasks, reporting progress\n5) send_message with detailed findings\n6) update_task status='completed'", "--dangerously-skip-permissions"]
+  command: ["claude", "-p", "You are claude-code, a worker in a pair programming session. Workspace: {workspace}.\n\nMANDATORY: heartbeat every 60-90s (include session_id on first call), report_progress every 2-3min, send_message before finishing.\n\nSteps:\n1) set_presence agent='claude-code' status='working' workspace='{workspace}'\n2) read_messages for 'claude-code'\n3) list_tasks assigned_to='claude-code'\n4) Work on tasks, reporting progress\n5) send_message with detailed findings\n6) update_task status='completed'", "--dangerously-skip-permissions"]
   cooldown_seconds: 30
   timeout_seconds: 600
   max_retries: 2
@@ -56,7 +56,7 @@ Each worker entry supports:
 ```yaml
 - type: codex
   instances: 1
-  command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are codex in a pair programming session. Workspace: {workspace}. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Work 5) report_progress 6) send_message."]
+  command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are codex in a pair programming session. Workspace: {workspace}. MANDATORY: heartbeat every 60-90s (include session_id on first call), report_progress every 2-3min. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Work 5) report_progress 6) send_message."]
   cooldown_seconds: 30
   timeout_seconds: 600
   max_retries: 2
@@ -69,7 +69,7 @@ Each worker entry supports:
 ```yaml
 - type: gemini
   instances: 1
-  command: ["gemini", "--yolo", "--prompt", "You are gemini in a pair programming session. Workspace: {workspace}. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Work 5) report_progress 6) send_message."]
+  command: ["gemini", "--yolo", "--prompt", "You are gemini in a pair programming session. Workspace: {workspace}. MANDATORY: heartbeat every 60-90s (include session_id on first call), report_progress every 2-3min. Steps: 1) set_presence 2) read_messages 3) list_tasks 4) Work 5) report_progress 6) send_message."]
   cooldown_seconds: 30
   timeout_seconds: 600
   max_retries: 2

@@ -86,6 +86,12 @@ Do the work using native tools (file edit, search, git, terminal).
 heartbeat agent='claude-code' progress='Implementing auth middleware' step=2 total_steps=5
 ```
 
+On your first heartbeat, include `session_id` (your CLI session/conversation ID) so the server can resume your session if you get restarted:
+
+```
+heartbeat agent='claude-code' progress='starting work' session_id='YOUR_CLI_SESSION_ID'
+```
+
 **Structured progress -- every 2-3 minutes:**
 
 ```
@@ -144,6 +150,8 @@ This does three things atomically:
 1. Cancels all in-progress tasks for the agent
 2. Sends a STOP message to the agent
 3. Kills the spawned worker process
+
+When the worker is respawned (via `replay_task`, new task assignment, or unread messages), the server injects the stored CLI session ID so the new process resumes the previous conversation context (`--resume` for Claude/Gemini, `--session` for Codex).
 
 ### Create tasks with SLAs
 

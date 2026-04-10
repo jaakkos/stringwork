@@ -67,7 +67,7 @@ workers:
 ### CLI Commands Reference
 
 ```
-mcp-stringwork heartbeat  --agent NAME --progress 'text' [--step N] [--total N]
+mcp-stringwork heartbeat  --agent NAME --progress 'text' [--step N] [--total N] [--session-id ID]
 mcp-stringwork progress   --agent NAME --task ID --description 'text' [--percent N] [--eta N]
 mcp-stringwork send       --from NAME --to NAME --content 'text'
 mcp-stringwork task update --id ID --status STATUS --by NAME
@@ -104,6 +104,7 @@ All commands connect to the daemon via unix socket at `~/.config/stringwork/serv
    ```
    Use heartbeat agent='claude-code' progress='writing unit tests for auth' step=3 total_steps=5
    ```
+   On your first heartbeat, include `session_id` (your CLI session/conversation ID) so the server can resume your session if you get restarted.
 
 6. **Report findings to your pair:**
    ```
@@ -127,13 +128,16 @@ The server actively monitors your progress. **Failure to report triggers escalat
 
 **You MUST call these tools while working:**
 
-1. `heartbeat` — every 60-90 seconds with `progress` description
+1. `heartbeat` — every 60-90 seconds with `progress` description. On first call, include `session_id` so the server can resume your session on restart.
 2. `report_progress` — every 2-3 minutes with task_id, description, percent_complete, eta_seconds
 
 **Example progress loop during work:**
 ```
-# After claiming task, every 60-90 seconds:
-Use heartbeat agent='claude-code' progress='reading codebase, understanding auth flow' step=1 total_steps=4
+# First heartbeat — include session_id for session resume on restart:
+Use heartbeat agent='claude-code' progress='reading codebase, understanding auth flow' step=1 total_steps=4 session_id='YOUR_CLI_SESSION_ID'
+
+# Subsequent heartbeats (session_id only needed once):
+Use heartbeat agent='claude-code' progress='implementing auth middleware' step=2 total_steps=4
 
 # Every 2-3 minutes, structured progress:
 Use report_progress agent='claude-code' task_id=5 description='Auth middleware implemented. Writing unit tests (8/15 done). Fixing edge cases next.' percent_complete=50 eta_seconds=180
@@ -215,7 +219,7 @@ See [docs/examples/config-claude-code-driver.yaml](docs/examples/config-claude-c
 - `register_agent` - Register a custom agent for auto-discovery
 - `list_agents` - List all available agents (built-in and registered)
 - `worker_status` - (Driver) List workers with progress, process activity, SLA status
-- `heartbeat` - (Workers) Signal liveness with progress info; call every 60-90 seconds
+- `heartbeat` - (Workers) Signal liveness with progress info; call every 60-90 seconds. Include `session_id` on first call for session resume on restart
 - `cancel_agent` - (Driver) Cancel a worker's tasks, send STOP signal, and kill its process
 - `get_work_context` - Get task context (relevant files, background, constraints, shared notes)
 - `update_work_context` - Add shared notes to a task's work context

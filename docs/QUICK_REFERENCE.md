@@ -232,14 +232,23 @@ The agent will see a `🛑 STOP` banner on its next tool call.
 Use heartbeat agent='claude-code'
 Use heartbeat agent='claude-code' progress='Implementing auth middleware' step=2 total_steps=5
 Use heartbeat agent='codex' progress='Running test suite'
+Use heartbeat agent='claude-code' progress='starting work' session_id='YOUR_CLI_SESSION_ID'
 ```
 
 Parameters:
 - `agent` (required) — Your agent name
 - `progress` (optional) — Short description of what you're doing now
 - `step` / `total_steps` (optional) — Current step number and total steps
+- `session_id` (optional) — Your CLI session/conversation ID. Report on first heartbeat so the server can resume your session if you get restarted.
 
 Missing heartbeats trigger: 3 min warning, 5 min critical alert, 10 min auto-recovery.
+
+**Session continuation:** When a stuck worker is cancelled and respawned, the server injects `--resume` (Claude/Gemini) or `--session` (Codex) with the stored session ID, so the new process continues the previous conversation context.
+
+**CLI equivalent:**
+```bash
+mcp-stringwork heartbeat --agent claude-code --progress 'starting' --session-id YOUR_SESSION_ID
+```
 
 ### Report progress (REQUIRED for workers, every 2–3 minutes)
 

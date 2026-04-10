@@ -50,6 +50,7 @@ The server provides only coordination tools. Each agent uses its own native capa
 - **Messaging** -- inter-agent messages with urgency, piggyback notifications on every tool call
 - **Shared planning** -- collaborative plans with items, acceptance criteria, and progress tracking
 - **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (3 min warning, 5 min critical, 10 min auto-recovery)
+- **Session continuation** -- workers report CLI session IDs via heartbeat; restarted workers resume their previous CLI conversation context automatically
 - **File locks** -- prevent simultaneous edits across agents
 - **Web dashboard** -- real-time view of tasks, workers, messages, and plans (URL logged on startup)
 - **Auto-respond** -- server spawns agents when they have unread messages, no external daemon needed
@@ -206,7 +207,7 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 | Tool | Description |
 |------|-------------|
 | `worker_status` | Live view of workers: progress, SLA status, process activity |
-| `heartbeat` | Signal liveness every 60-90s with progress info |
+| `heartbeat` | Signal liveness every 60-90s with progress info. Include `session_id` on first call for session resume on restart |
 | `report_progress` | Structured progress: description, percent complete, ETA |
 | `cancel_agent` | Cancel a worker's tasks, send STOP signal, kill process |
 | `get_work_context` | Get task context (files, background, constraints, notes) |

@@ -309,10 +309,22 @@ Workers must report progress while working. The server monitors and escalates:
 | 10 minutes (no heartbeat) | Task auto-recovered, worker may be cancelled |
 
 Workers call:
-- `heartbeat` every 60-90 seconds with a progress description
+- `heartbeat` every 60-90 seconds with a progress description. On first call, include `session_id` (CLI session/conversation ID) for session continuation on restart.
 - `report_progress` every 2-3 minutes with task_id, description, percent_complete
 
 The driver monitors all workers via `worker_status` and can cancel stuck ones with `cancel_agent`.
+
+### Session continuation on restart
+
+When a worker reports its CLI session ID via heartbeat, the server stores it. If the worker is cancelled and respawned (stuck, failed, manual restart), the server injects the appropriate resume flag into the spawn command:
+
+| CLI | Flag injected |
+|-----|--------------|
+| Claude Code | `--resume <session-id>` |
+| Codex | `--session <session-id>` |
+| Gemini | `--resume <session-id>` |
+
+If the resumed session fails (e.g. session expired), the server clears the stored ID and retries with a fresh session.
 
 ### Task SLAs
 
