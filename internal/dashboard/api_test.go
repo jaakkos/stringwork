@@ -205,10 +205,13 @@ func TestAPIState_AgentOrdering(t *testing.T) {
 	h := NewHandler(svc, registry)
 
 	now := time.Now()
+	repo.state.Presence = map[string]*domain.Presence{
+		"cursor":      {Status: "working", LastSeen: now},
+		"claude-code": {Status: "idle", LastSeen: now},
+		"codex":       {Status: "online", LastSeen: now},
+	}
 	repo.state.AgentInstances = map[string]*domain.AgentInstance{
-		"codex":       {InstanceID: "codex", AgentType: "codex", Role: domain.RoleWorker, Status: "idle", LastHeartbeat: now},
-		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", LastHeartbeat: now},
-		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "busy", LastHeartbeat: now},
+		"cursor": {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", LastHeartbeat: now},
 	}
 	repo.state.DriverID = "cursor"
 
@@ -231,9 +234,9 @@ func TestAPIState_AgentOrdering(t *testing.T) {
 	if snap.Agents[0].Role != "driver" {
 		t.Errorf("expected driver first, got role=%q name=%q", snap.Agents[0].Role, snap.Agents[0].Name)
 	}
-	// Workers should be alphabetically ordered
+	// Remaining should be alphabetically ordered
 	if snap.Agents[1].Name >= snap.Agents[2].Name {
-		t.Errorf("expected workers sorted alphabetically: %q >= %q", snap.Agents[1].Name, snap.Agents[2].Name)
+		t.Errorf("expected agents sorted alphabetically: %q >= %q", snap.Agents[1].Name, snap.Agents[2].Name)
 	}
 }
 

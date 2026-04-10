@@ -14,15 +14,17 @@ import (
 
 // StateSnapshot is the JSON response from /api/state.
 type StateSnapshot struct {
-	Timestamp    string             `json:"timestamp"`
-	Workspace    string             `json:"workspace"`
-	Agents       []AgentSnapshot    `json:"agents"`
-	Tasks        []TaskSnapshot     `json:"tasks"`
-	Messages     []MessageSnapshot  `json:"messages"`
-	Plans        []PlanSnapshot     `json:"plans,omitempty"`
-	Workers      []WorkerSnapshot   `json:"workers,omitempty"`
-	SessionNotes []NoteSnapshot     `json:"session_notes,omitempty"`
-	FileLocks    []FileLockSnapshot `json:"file_locks,omitempty"`
+	Timestamp     string             `json:"timestamp"`
+	Workspace     string             `json:"workspace"`
+	Agents        []AgentSnapshot    `json:"agents"`
+	Tasks         []TaskSnapshot     `json:"tasks"`
+	TotalTasks    int                `json:"total_tasks"`
+	Messages      []MessageSnapshot  `json:"messages"`
+	TotalMessages int                `json:"total_messages"`
+	Plans         []PlanSnapshot     `json:"plans,omitempty"`
+	Workers       []WorkerSnapshot   `json:"workers,omitempty"`
+	SessionNotes  []NoteSnapshot     `json:"session_notes,omitempty"`
+	FileLocks     []FileLockSnapshot `json:"file_locks,omitempty"`
 }
 
 // AgentSnapshot is a per-agent summary.
@@ -32,10 +34,12 @@ type AgentSnapshot struct {
 	Role               string `json:"role"`
 	Workspace          string `json:"workspace,omitempty"`
 	CurrentTaskID      int    `json:"current_task_id,omitempty"`
+	CurrentTasks       []int  `json:"current_tasks,omitempty"`
 	Note               string `json:"note,omitempty"`
 	LastSeen           string `json:"last_seen,omitempty"`
 	LastHeartbeat      string `json:"last_heartbeat,omitempty"`
 	Connected          bool   `json:"connected"`
+	Reachable          bool   `json:"reachable"`
 	Progress           string `json:"progress,omitempty"`
 	ProgressStep       int    `json:"progress_step,omitempty"`
 	ProgressTotalSteps int    `json:"progress_total_steps,omitempty"`
@@ -95,6 +99,7 @@ type WorkerSnapshot struct {
 	Status             string `json:"status"`
 	CurrentTasks       []int  `json:"current_tasks"`
 	LastHeartbeat      string `json:"last_heartbeat"`
+	Reachable          bool   `json:"reachable"`
 	Progress           string `json:"progress,omitempty"`
 	ProgressStep       int    `json:"progress_step,omitempty"`
 	ProgressTotalSteps int    `json:"progress_total_steps,omitempty"`
@@ -368,9 +373,20 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.svc.Query(func(state *domain.CollabState) error {
-		// ── Agents: merge presence + instances ──
+		// Identify worker instance IDs so they only appear in the Workers section
+		workerIDs := make(map[string]bool)
+		for id, inst := range state.AgentInstances {
+			if inst != nil && inst.Role == domain.RoleWorker {
+				workerIDs[id] = true
+			}
+		}
+
+		// ── Agents: merge presence + instances (excluding worker instances) ──
 		agentsSeen := make(map[string]bool)
 		for name, p := range state.Presence {
+			if workerIDs[name] {
+				continue
+			}
 			a := AgentSnapshot{
 				Name:          name,
 				Status:        p.Status,
@@ -383,6 +399,7 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 			if inst, ok := state.AgentInstances[name]; ok && inst != nil {
 				a.Role = string(inst.Role)
 				a.LastHeartbeat = relTime(inst.LastHeartbeat, now)
+				a.CurrentTasks = inst.CurrentTasks
 				a.Progress = inst.Progress
 				a.ProgressStep = inst.ProgressStep
 				a.ProgressTotalSteps = inst.ProgressTotalSteps
@@ -390,11 +407,22 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 					a.ProgressAge = relTime(inst.ProgressUpdatedAt, now)
 				}
 			}
+			a.Reachable = a.Connected
+			if !a.Reachable {
+				if inst, ok := state.AgentInstances[name]; ok && inst != nil &&
+					!inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+					a.Reachable = true
+				}
+				if !a.Reachable && !p.LastSeen.IsZero() && now.Sub(p.LastSeen) < 2*time.Minute &&
+					p.Status != "" && p.Status != "offline" {
+					a.Reachable = true
+				}
+			}
 			snap.Agents = append(snap.Agents, a)
 			agentsSeen[name] = true
 		}
 		for id, inst := range state.AgentInstances {
-			if inst == nil || agentsSeen[id] {
+			if inst == nil || agentsSeen[id] || workerIDs[id] {
 				continue
 			}
 			a := AgentSnapshot{
@@ -403,12 +431,17 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 				Role:               string(inst.Role),
 				LastHeartbeat:      relTime(inst.LastHeartbeat, now),
 				Connected:          connectedAgents[id],
+				CurrentTasks:       inst.CurrentTasks,
 				Progress:           inst.Progress,
 				ProgressStep:       inst.ProgressStep,
 				ProgressTotalSteps: inst.ProgressTotalSteps,
 			}
 			if !inst.ProgressUpdatedAt.IsZero() {
 				a.ProgressAge = relTime(inst.ProgressUpdatedAt, now)
+			}
+			a.Reachable = a.Connected
+			if !a.Reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+				a.Reachable = true
 			}
 			snap.Agents = append(snap.Agents, a)
 		}
@@ -426,6 +459,7 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// ── Tasks (most recent first, limit 50) ──
+		snap.TotalTasks = len(state.Tasks)
 		start := 0
 		if len(state.Tasks) > 50 {
 			start = len(state.Tasks) - 50
@@ -461,18 +495,23 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ── Messages (most recent first, limit 30) ──
+		snap.TotalMessages = len(state.Messages)
 		msgStart := 0
 		if len(state.Messages) > 30 {
 			msgStart = len(state.Messages) - 30
 		}
 		for i := len(state.Messages) - 1; i >= msgStart; i-- {
 			m := state.Messages[i]
+			tsFmt := "15:04:05"
+			if m.Timestamp.Day() != now.Day() || m.Timestamp.Month() != now.Month() || m.Timestamp.Year() != now.Year() {
+				tsFmt = "Jan 2 15:04"
+			}
 			snap.Messages = append(snap.Messages, MessageSnapshot{
 				ID:        m.ID,
 				From:      m.From,
 				To:        m.To,
-				Content:   truncate(m.Content, 200),
-				Timestamp: m.Timestamp.Format("15:04:05"),
+				Content:   m.Content,
+				Timestamp: m.Timestamp.Format(tsFmt),
 				Read:      m.Read,
 				Age:       relTime(m.Timestamp, now),
 			})
@@ -512,12 +551,17 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 			if inst == nil || inst.Role != domain.RoleWorker {
 				continue
 			}
+			reachable := connectedAgents[id]
+			if !reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+				reachable = true
+			}
 			ws := WorkerSnapshot{
 				InstanceID:         id,
 				AgentType:          inst.AgentType,
 				Status:             inst.Status,
 				CurrentTasks:       inst.CurrentTasks,
 				LastHeartbeat:      relTime(inst.LastHeartbeat, now),
+				Reachable:          reachable,
 				Progress:           inst.Progress,
 				ProgressStep:       inst.ProgressStep,
 				ProgressTotalSteps: inst.ProgressTotalSteps,

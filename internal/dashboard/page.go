@@ -179,6 +179,10 @@ const dashboardHTML = `<!DOCTYPE html>
   .badge.note { background: #1f2d3d; color: var(--text-dim); }
   .badge.question { background: #2a1f0d; color: var(--yellow); }
   .badge.blocker { background: #2d1a1a; color: var(--red); }
+  .badge.idle { background: #1f2d3d; color: var(--text-dim); }
+  .badge.busy { background: #2a1f0d; color: var(--yellow); }
+  .badge.offline { background: #21090d; color: var(--text-dim); }
+  .badge.working { background: #0c2d6b; color: var(--accent); }
 
   /* Priority indicators */
   .priority {
@@ -240,7 +244,7 @@ const dashboardHTML = `<!DOCTYPE html>
     white-space: pre-wrap;
     word-break: break-word;
     font-size: 12px;
-    max-height: 60px;
+    max-height: 100px;
     overflow: hidden;
     line-height: 1.4;
     cursor: pointer;
@@ -293,6 +297,12 @@ const dashboardHTML = `<!DOCTYPE html>
     color: var(--yellow);
     margin-top: 4px;
     font-style: italic;
+  }
+  .agent-pill.stale, .worker-card.stale { opacity: 0.5; }
+  .agent-tasks {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
   }
 
   /* Notes list */
@@ -542,9 +552,9 @@ function setInterval_() {
   if (refreshMs > 0) timer = setInterval(fetchState, refreshMs);
 }
 
-function statusDotClass(status, connected) {
-  if (!connected) return 'offline';
-  if (status === 'working') return 'working';
+function statusDotClass(status, reachable) {
+  if (!reachable) return 'offline';
+  if (status === 'working' || status === 'busy') return 'working';
   if (status === 'away') return 'away';
   return 'online';
 }
@@ -557,7 +567,8 @@ function renderAgents(agents) {
     return;
   }
   el.innerHTML = agents.map(a => {
-    const dotCls = statusDotClass(a.status, a.connected);
+    const dotCls = statusDotClass(a.status, a.reachable);
+    const stale = !a.reachable ? ' stale' : '';
     const roleClass = a.role === 'driver' ? ' driver' : '';
     const roleBadge = a.role ? '<span class="agent-role' + roleClass + '">' + esc(a.role) + '</span>' : '';
     const meta = [a.last_seen || '', a.note || ''].filter(Boolean).join(' · ');
@@ -572,7 +583,12 @@ function renderAgents(agents) {
       progressHTML = '<div class="agent-progress">' + esc(a.progress) + esc(stepInfo) + esc(age) + '</div>';
     }
 
-    return '<div class="agent-pill">' +
+    let tasksHTML = '';
+    if (a.current_tasks && a.current_tasks.length) {
+      tasksHTML = '<div class="agent-tasks">Tasks: ' + a.current_tasks.map(id => '#' + id).join(', ') + '</div>';
+    }
+
+    return '<div class="agent-pill' + stale + '">' +
       '<div class="agent-dot ' + dotCls + '"></div>' +
       '<div>' +
         '<div class="agent-name">' + esc(a.name) + ' ' + roleBadge + '</div>' +
@@ -582,6 +598,7 @@ function renderAgents(agents) {
           (meta ? ' · ' + esc(meta) : '') +
         '</div>' +
         progressHTML +
+        tasksHTML +
       '</div>' +
     '</div>';
   }).join('');
@@ -597,6 +614,8 @@ function renderWorkers(workers) {
   }
   card.style.display = '';
   el.innerHTML = workers.map(w => {
+    const stale = !w.reachable ? ' stale' : '';
+    const dotCls = statusDotClass(w.status, w.reachable);
     let progressHTML = '';
     if (w.progress) {
       let stepInfo = '';
@@ -606,8 +625,8 @@ function renderWorkers(workers) {
       const age = w.progress_age ? ' (' + w.progress_age + ')' : '';
       progressHTML = '<div class="worker-progress">' + esc(w.progress) + esc(stepInfo) + esc(age) + '</div>';
     }
-    return '<div class="worker-card">' +
-      '<div class="worker-id">' + esc(w.instance_id) + ' <span class="badge ' + w.status + '">' + esc(w.status) + '</span></div>' +
+    return '<div class="worker-card' + stale + '">' +
+      '<div class="worker-id"><span class="agent-dot ' + dotCls + '" style="display:inline-block;width:8px;height:8px;margin-right:6px;vertical-align:middle"></span>' + esc(w.instance_id) + ' <span class="badge ' + w.status + '">' + esc(w.status) + '</span></div>' +
       '<div class="worker-meta">Type: ' + esc(w.agent_type) + ' · HB: ' + esc(w.last_heartbeat) + '</div>' +
       (w.current_tasks && w.current_tasks.length ? '<div class="worker-meta">Tasks: ' + w.current_tasks.map(id => '#' + id).join(', ') + '</div>' : '') +
       progressHTML +
@@ -615,9 +634,10 @@ function renderWorkers(workers) {
   }).join('');
 }
 
-function renderTasks(tasks) {
+function renderTasks(tasks, total) {
   const el = document.getElementById('tasks');
-  document.getElementById('tasks-count').textContent = tasks ? tasks.length : 0;
+  const shown = tasks ? tasks.length : 0;
+  document.getElementById('tasks-count').textContent = total > shown ? shown + ' of ' + total : shown;
   if (!tasks || tasks.length === 0) {
     el.innerHTML = '<div class="empty">No tasks</div>';
     return;
@@ -645,6 +665,8 @@ function renderTasks(tasks) {
       }
     } else if (t.status === 'completed' && t.result_summary) {
       progressCol = '<span style="font-size:11px;color:var(--text-dim)">' + esc(t.result_summary) + '</span>';
+    } else if ((t.status === 'pending' || t.status === 'blocked') && t.result_summary) {
+      progressCol = '<span style="font-size:11px;color:var(--orange)">' + esc(t.result_summary) + '</span>';
     }
 
     html += '<tr>' +
@@ -662,9 +684,10 @@ function renderTasks(tasks) {
   el.innerHTML = html;
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, total) {
   const el = document.getElementById('messages');
-  document.getElementById('messages-count').textContent = messages ? messages.length : 0;
+  const shown = messages ? messages.length : 0;
+  document.getElementById('messages-count').textContent = total > shown ? shown + ' of ' + total : shown;
   if (!messages || messages.length === 0) {
     el.innerHTML = '<div class="empty">No messages</div>';
     return;
@@ -683,7 +706,7 @@ function renderMessages(messages) {
   // Mark messages that overflow as truncated
   requestAnimationFrame(() => {
     document.querySelectorAll('.msg-body').forEach(el => {
-      if (el.scrollHeight > 62 && !el.classList.contains('expanded')) {
+      if (el.scrollHeight > 102 && !el.classList.contains('expanded')) {
         el.classList.add('truncated');
       }
     });
@@ -693,7 +716,7 @@ function renderMessages(messages) {
 function toggleMsg(el) {
   el.classList.toggle('expanded');
   el.classList.remove('truncated');
-  if (!el.classList.contains('expanded') && el.scrollHeight > 62) {
+  if (!el.classList.contains('expanded') && el.scrollHeight > 102) {
     el.classList.add('truncated');
   }
 }
@@ -799,8 +822,8 @@ async function fetchState() {
 
     renderAgents(data.agents);
     renderWorkers(data.workers);
-    renderTasks(data.tasks);
-    renderMessages(data.messages);
+    renderTasks(data.tasks, data.total_tasks);
+    renderMessages(data.messages, data.total_messages);
     renderSide(data);
   } catch (e) {
     document.getElementById('updated').textContent = 'error';
