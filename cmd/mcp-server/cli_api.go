@@ -52,6 +52,7 @@ func (w *workerAPI) handleHeartbeat(rw http.ResponseWriter, r *http.Request) {
 		Progress   string `json:"progress"`
 		Step       int    `json:"step"`
 		TotalSteps int    `json:"total_steps"`
+		SessionID  string `json:"session_id"`
 	}
 	if !decodeJSON(rw, r, &req) {
 		return
@@ -81,6 +82,9 @@ func (w *workerAPI) handleHeartbeat(rw http.ResponseWriter, r *http.Request) {
 		}
 		if req.TotalSteps > 0 {
 			inst.ProgressTotalSteps = req.TotalSteps
+		}
+		if req.SessionID != "" {
+			inst.SessionID = req.SessionID
 		}
 		return nil
 	})

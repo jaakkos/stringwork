@@ -118,6 +118,7 @@ func runHeartbeatCLI(args []string) {
 	progress := flagValue(args, "--progress")
 	step, _ := strconv.Atoi(flagValue(args, "--step"))
 	totalSteps, _ := strconv.Atoi(flagValue(args, "--total"))
+	sessionID := flagValue(args, "--session-id")
 
 	client := newCLIClient()
 	body := map[string]interface{}{"agent": agent, "progress": progress}
@@ -126,6 +127,9 @@ func runHeartbeatCLI(args []string) {
 	}
 	if totalSteps > 0 {
 		body["total_steps"] = totalSteps
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
 	}
 	result, err := client.post("/api/w/heartbeat", body)
 	if err != nil {

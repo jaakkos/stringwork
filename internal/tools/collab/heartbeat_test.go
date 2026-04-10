@@ -184,3 +184,55 @@ func TestHeartbeat_DoesNotChangeNonOfflineStatus(t *testing.T) {
 		t.Errorf("heartbeat should not change non-offline status; expected 'working', got %q", inst.Status)
 	}
 }
+
+func TestHeartbeat_StoresSessionID(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", CurrentTasks: []int{}},
+	}
+
+	srv := testServer(svc, logger)
+
+	_, err := callTool(t, srv, "heartbeat", map[string]any{
+		"agent":      "claude-code",
+		"progress":   "starting work",
+		"session_id": "cli-session-abc123",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inst := repo.state.AgentInstances["claude-code"]
+	if inst.SessionID != "cli-session-abc123" {
+		t.Errorf("expected SessionID 'cli-session-abc123', got %q", inst.SessionID)
+	}
+}
+
+func TestHeartbeat_SessionIDNotOverwrittenByEmpty(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle", SessionID: "existing-session", CurrentTasks: []int{}},
+	}
+
+	srv := testServer(svc, logger)
+
+	// Heartbeat without session_id should not clear existing one
+	_, err := callTool(t, srv, "heartbeat", map[string]any{
+		"agent":    "claude-code",
+		"progress": "continuing work",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inst := repo.state.AgentInstances["claude-code"]
+	if inst.SessionID != "existing-session" {
+		t.Errorf("heartbeat without session_id should not clear existing; got %q, want %q", inst.SessionID, "existing-session")
+	}
+}

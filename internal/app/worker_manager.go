@@ -100,6 +100,10 @@ type WorkerManager struct {
 	backoffUntil map[string]time.Time
 	// pendingSpawns is a per-agent-type FIFO queue of tasks waiting for a worker slot.
 	pendingSpawns map[string][]pendingSpawn
+	// lastSessionID stores the CLI session/conversation ID reported by each worker
+	// via heartbeat. Preserved across restarts so the respawned process can resume
+	// the previous CLI session instead of starting fresh.
+	lastSessionID map[string]string
 }
 
 // ProcessInfo holds runtime process metadata for a worker instance.
@@ -189,12 +193,38 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		lastFailure:         make(map[string]time.Time),
 		backoffUntil:        make(map[string]time.Time),
 		pendingSpawns:       make(map[string][]pendingSpawn),
+		lastSessionID:       make(map[string]string),
 	}
 }
 
 // SetSessionChecker sets a function that returns true if an instance/agent has an active MCP session.
 func (m *WorkerManager) SetSessionChecker(fn func(string) bool) {
 	m.sessionChecker = fn
+}
+
+// SetWorkerSessionID records the CLI session/conversation ID for a worker instance.
+// Called when a worker reports its session ID via heartbeat.
+func (m *WorkerManager) SetWorkerSessionID(instanceID, sessionID string) {
+	if instanceID == "" || sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSessionID[instanceID] = sessionID
+}
+
+// loadSessionIDsFromState populates lastSessionID from AgentInstance.SessionID
+// in the current CollabState, without overwriting entries already set by heartbeat.
+func (m *WorkerManager) loadSessionIDsFromState(state *domain.CollabState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, inst := range state.AgentInstances {
+		if inst != nil && inst.SessionID != "" {
+			if _, exists := m.lastSessionID[id]; !exists {
+				m.lastSessionID[id] = inst.SessionID
+			}
+		}
+	}
 }
 
 // SetMCPServerURL sets the MCP server URL (e.g. http://localhost:8943/mcp) for auto-registering MCP with worker CLIs.
@@ -667,6 +697,8 @@ func (m *WorkerManager) Check() {
 	EnsureStateMaps(state)
 	EnsureAgentInstances(state, nil)
 
+	m.loadSessionIDsFromState(state)
+
 	unreadFor := make(map[string]int)
 	latestUnread := make(map[string]time.Time)
 	agentTypes := make(map[string]struct{})
@@ -1046,6 +1078,17 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 			m.logger.Printf("WorkerManager: %s attempt %d failed: %v", c.InstanceID, attempt+1, lastResult.Err)
 		}
 
+		// Clear stored session ID so retries start a fresh session
+		// instead of repeatedly failing to resume a stale one.
+		if attempt == 0 {
+			m.mu.Lock()
+			if _, had := m.lastSessionID[c.InstanceID]; had {
+				delete(m.lastSessionID, c.InstanceID)
+				m.logger.Printf("WorkerManager: %s cleared session ID for retry (resume may have failed)", c.InstanceID)
+			}
+			m.mu.Unlock()
+		}
+
 		if errInfo.Class.Terminal() {
 			m.logger.Printf("WorkerManager: %s terminal error (%s): %s — skipping remaining retries", c.InstanceID, errInfo.Class, errInfo.Summary)
 			m.recordTerminalFailure(c.InstanceID, c.AgentType, errInfo)
@@ -1273,7 +1316,7 @@ The server monitors your progress. Silence triggers escalating consequences:
 - 10 minutes → Task auto-recovered, you may be CANCELLED
 
 You MUST call BOTH tools while working:
-1. heartbeat — EVERY 60-90 seconds with progress description
+1. heartbeat — EVERY 60-90 seconds with progress description. On first call, include session_id (your CLI session ID) so the server can resume your session if you get restarted.
 2. report_progress — EVERY 2-3 minutes with task_id, description, percent_complete
 
 ## STOP SIGNALS
@@ -1338,6 +1381,70 @@ func isCodexCommand(exe string) bool {
 func isGeminiCommand(exe string) bool {
 	base := filepath.Base(exe)
 	return base == "gemini" || strings.Contains(strings.ToLower(exe), "gemini")
+}
+
+// isTaskBoundInstance returns true for ephemeral per-task instances (e.g. "claude-code-task-42").
+func isTaskBoundInstance(instanceID string) bool {
+	return strings.Contains(instanceID, "-task-")
+}
+
+// injectSessionResume modifies CLI args to resume a previous session.
+// Each CLI has its own flag for session resumption:
+//   - Claude Code: --resume <sessionID> (before -p)
+//   - Codex: --session <sessionID> (after "exec")
+//   - Gemini: --resume <sessionID> (before --prompt)
+func injectSessionResume(args []string, sessionID string) []string {
+	if sessionID == "" || len(args) == 0 {
+		return args
+	}
+	exe := args[0]
+	switch {
+	case isClaudeCommand(exe):
+		return injectClaudeResume(args, sessionID)
+	case isCodexCommand(exe):
+		return injectCodexSession(args, sessionID)
+	case isGeminiCommand(exe):
+		return injectGeminiResume(args, sessionID)
+	default:
+		return args
+	}
+}
+
+// injectClaudeResume inserts --resume <sessionID> after the executable, before any -p flag.
+// Claude supports: claude --resume <id> -p "prompt"
+func injectClaudeResume(args []string, sessionID string) []string {
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--resume", sessionID)
+	out = append(out, args[1:]...)
+	return out
+}
+
+// injectCodexSession inserts --session <sessionID> after "exec" in the command.
+// Codex supports: codex exec --session <id> "prompt"
+func injectCodexSession(args []string, sessionID string) []string {
+	out := make([]string, 0, len(args)+2)
+	for i, arg := range args {
+		out = append(out, arg)
+		if arg == "exec" {
+			out = append(out, "--session", sessionID)
+			out = append(out, args[i+1:]...)
+			return out
+		}
+	}
+	// No "exec" subcommand found; insert after the executable as fallback.
+	out = make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--session", sessionID)
+	out = append(out, args[1:]...)
+	return out
+}
+
+// injectGeminiResume inserts --resume <sessionID> after the executable, before any --prompt flag.
+// Gemini supports: gemini --resume <id> --prompt "prompt"
+func injectGeminiResume(args []string, sessionID string) []string {
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--resume", sessionID)
+	out = append(out, args[1:]...)
+	return out
 }
 
 // mcpBaseURL extracts the scheme+host+port from a URL (e.g. "http://localhost:8943/mcp" -> "http://localhost:8943").
@@ -1701,6 +1808,15 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		}
 		args = injectClaudeWorktreeFlag(args, worktreeName)
 	}
+	if !isTaskBoundInstance(c.InstanceID) {
+		m.mu.Lock()
+		sessionID := m.lastSessionID[c.InstanceID]
+		m.mu.Unlock()
+		if sessionID != "" {
+			args = injectSessionResume(args, sessionID)
+			m.logger.Printf("WorkerManager: %s resuming CLI session %s", c.InstanceID, sessionID)
+		}
+	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workspaceDir
 	env := buildWorkerEnv(c, workspaceDir)
@@ -1996,6 +2112,7 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 			"3) Do the work. While working:\n"+
 			"   - Every 60-90s:  %s heartbeat --agent %s --progress 'what you are doing'\n"+
 			"   - Every 2-3min:  %s progress --agent %s --task %d --description 'status' --percent N\n"+
+			"   - On first heartbeat, include --session-id YOUR_SESSION_ID so the server can resume your session if restarted\n"+
 			"4) Run: %s send --from %s --to %s --content 'detailed summary of changes'\n"+
 			"5) Run: %s task update --id %d --status completed --by %s\n",
 			bin, instanceID, workspace,
@@ -2009,7 +2126,7 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 		b.WriteString(fmt.Sprintf("\nSteps:\n"+
 			"1) set_presence agent='%s' status='working' workspace='%s'\n"+
 			"2) update_task id=%d status='in_progress' updated_by='%s'\n"+
-			"3) Do the work (heartbeat every 60-90s, report_progress every 2-3min)\n"+
+			"3) Do the work (heartbeat every 60-90s with session_id on first call, report_progress every 2-3min)\n"+
 			"4) send_message from='%s' to='%s' with detailed summary of changes\n"+
 			"5) update_task id=%d status='completed' updated_by='%s'\n",
 			instanceID, workspace,

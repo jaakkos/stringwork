@@ -1522,3 +1522,267 @@ func TestBuildTaskPrompt_ClaudeCodeDriver(t *testing.T) {
 		t.Error("prompt should not reference cursor when driver is claude-code")
 	}
 }
+
+// --- Session resume injection tests ---
+
+func assertArgs(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s: len = %d, want %d\n  got:  %v\n  want: %v", label, len(got), len(want), got, want)
+		return
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("%s: [%d] = %q, want %q", label, i, got[i], want[i])
+		}
+	}
+}
+
+func TestInjectSessionResume_Claude(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		sessionID string
+		want      []string
+	}{
+		{
+			name:      "inserts --resume before -p",
+			args:      []string{"claude", "-p", "You are a worker"},
+			sessionID: "abc123",
+			want:      []string{"claude", "--resume", "abc123", "-p", "You are a worker"},
+		},
+		{
+			name:      "inserts --resume with full path",
+			args:      []string{"/opt/homebrew/bin/claude", "--dangerously-skip-permissions", "-p", "prompt"},
+			sessionID: "sess-456",
+			want:      []string{"/opt/homebrew/bin/claude", "--resume", "sess-456", "--dangerously-skip-permissions", "-p", "prompt"},
+		},
+		{
+			name:      "works with -w flag already present",
+			args:      []string{"claude", "-w", "wt-1", "-p", "prompt"},
+			sessionID: "s1",
+			want:      []string{"claude", "--resume", "s1", "-w", "wt-1", "-p", "prompt"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectSessionResume(tc.args, tc.sessionID)
+			assertArgs(t, "injectSessionResume(claude)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectSessionResume_Codex(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		sessionID string
+		want      []string
+	}{
+		{
+			name:      "inserts --session after exec",
+			args:      []string{"codex", "exec", "--sandbox", "danger-full-access", "prompt"},
+			sessionID: "7f7116f0",
+			want:      []string{"codex", "exec", "--session", "7f7116f0", "--sandbox", "danger-full-access", "prompt"},
+		},
+		{
+			name:      "fallback when no exec subcommand",
+			args:      []string{"codex", "--some-flag", "prompt"},
+			sessionID: "sess-x",
+			want:      []string{"codex", "--session", "sess-x", "--some-flag", "prompt"},
+		},
+		{
+			name:      "with full path",
+			args:      []string{"/usr/local/bin/codex", "exec", "do something"},
+			sessionID: "abc",
+			want:      []string{"/usr/local/bin/codex", "exec", "--session", "abc", "do something"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectSessionResume(tc.args, tc.sessionID)
+			assertArgs(t, "injectSessionResume(codex)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectSessionResume_Gemini(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		sessionID string
+		want      []string
+	}{
+		{
+			name:      "inserts --resume before --prompt",
+			args:      []string{"gemini", "--yolo", "--prompt", "You are a worker"},
+			sessionID: "gem-session-1",
+			want:      []string{"gemini", "--resume", "gem-session-1", "--yolo", "--prompt", "You are a worker"},
+		},
+		{
+			name:      "with full path",
+			args:      []string{"/usr/local/bin/gemini", "--prompt", "do work"},
+			sessionID: "g42",
+			want:      []string{"/usr/local/bin/gemini", "--resume", "g42", "--prompt", "do work"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectSessionResume(tc.args, tc.sessionID)
+			assertArgs(t, "injectSessionResume(gemini)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectSessionResume_Empty(t *testing.T) {
+	args := []string{"claude", "-p", "prompt"}
+
+	got := injectSessionResume(args, "")
+	assertArgs(t, "empty sessionID", got, args)
+
+	got2 := injectSessionResume(nil, "abc")
+	if len(got2) != 0 {
+		t.Errorf("expected nil/empty args unchanged, got %v", got2)
+	}
+}
+
+func TestInjectSessionResume_UnknownCLI(t *testing.T) {
+	args := []string{"python3", "script.py", "--arg"}
+	got := injectSessionResume(args, "session-1")
+	assertArgs(t, "unknown CLI", got, args)
+}
+
+func TestIsTaskBoundInstance(t *testing.T) {
+	tests := []struct {
+		instanceID string
+		want       bool
+	}{
+		{"claude-code-task-42", true},
+		{"gemini-task-7", true},
+		{"codex-task-100", true},
+		{"claude-code", false},
+		{"claude-code-1", false},
+		{"codex", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.instanceID, func(t *testing.T) {
+			if got := isTaskBoundInstance(tc.instanceID); got != tc.want {
+				t.Errorf("isTaskBoundInstance(%q) = %v, want %v", tc.instanceID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetWorkerSessionID(t *testing.T) {
+	wm := &WorkerManager{
+		lastSessionID: make(map[string]string),
+	}
+
+	wm.SetWorkerSessionID("claude-code", "session-abc")
+	if got := wm.lastSessionID["claude-code"]; got != "session-abc" {
+		t.Errorf("expected session-abc, got %q", got)
+	}
+
+	// Empty values should not be stored
+	wm.SetWorkerSessionID("", "session-x")
+	wm.SetWorkerSessionID("codex", "")
+	if _, exists := wm.lastSessionID["codex"]; exists {
+		t.Error("empty session ID should not be stored")
+	}
+	if _, exists := wm.lastSessionID[""]; exists {
+		t.Error("empty instance ID should not create entry")
+	}
+}
+
+func TestLoadSessionIDsFromState(t *testing.T) {
+	wm := &WorkerManager{
+		lastSessionID: make(map[string]string),
+	}
+
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code",
+		AgentType:  "claude-code",
+		SessionID:  "state-session-1",
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex",
+		AgentType:  "codex",
+		SessionID:  "state-session-2",
+	}
+	state.AgentInstances["gemini"] = &domain.AgentInstance{
+		InstanceID: "gemini",
+		AgentType:  "gemini",
+	}
+
+	wm.loadSessionIDsFromState(state)
+
+	if got := wm.lastSessionID["claude-code"]; got != "state-session-1" {
+		t.Errorf("expected state-session-1, got %q", got)
+	}
+	if got := wm.lastSessionID["codex"]; got != "state-session-2" {
+		t.Errorf("expected state-session-2, got %q", got)
+	}
+	if _, exists := wm.lastSessionID["gemini"]; exists {
+		t.Error("empty SessionID in state should not create entry")
+	}
+}
+
+func TestLoadSessionIDsFromState_DoesNotOverwrite(t *testing.T) {
+	wm := &WorkerManager{
+		lastSessionID: map[string]string{
+			"claude-code": "heartbeat-session",
+		},
+	}
+
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code",
+		AgentType:  "claude-code",
+		SessionID:  "old-state-session",
+	}
+
+	wm.loadSessionIDsFromState(state)
+
+	if got := wm.lastSessionID["claude-code"]; got != "heartbeat-session" {
+		t.Errorf("loadSessionIDsFromState should not overwrite existing entry; got %q, want %q", got, "heartbeat-session")
+	}
+}
+
+func TestRestartWorkers_PreservesSessionID(t *testing.T) {
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code",
+		AgentType:  "claude-code",
+		Role:       domain.RoleWorker,
+		Status:     "idle",
+		SessionID:  "persisted-session",
+	}
+
+	wm := &WorkerManager{
+		configs:             []WorkerSpawnConfig{},
+		driverID:            "cursor",
+		getAgent:            func() string { return "cursor" },
+		stateLoader:         func() (*domain.CollabState, error) { return state, nil },
+		fallbackDir:         "/tmp",
+		logger:              log.New(os.Stderr, "[test] ", log.LstdFlags),
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		mcpRegistered:       make(map[string]bool),
+		processRuntime:      make(map[string]*workerRuntime),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+		pendingSpawns:       make(map[string][]pendingSpawn),
+		lastSessionID: map[string]string{
+			"claude-code": "my-session-123",
+		},
+	}
+
+	killed := wm.RestartWorkers()
+	_ = killed
+
+	if got := wm.lastSessionID["claude-code"]; got != "my-session-123" {
+		t.Errorf("RestartWorkers should preserve lastSessionID; got %q, want %q", got, "my-session-123")
+	}
+}

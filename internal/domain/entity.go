@@ -37,6 +37,7 @@ type AgentInstance struct {
 	ProgressStep       int       `json:"progress_step,omitempty"`        // current step number (e.g. 3 of 5)
 	ProgressTotalSteps int       `json:"progress_total_steps,omitempty"` // total steps
 	ProgressUpdatedAt  time.Time `json:"progress_updated_at,omitempty"`  // when progress was last reported
+	SessionID          string    `json:"session_id,omitempty"`           // CLI session/conversation ID for resume on restart
 }
 
 // WorkContext holds shared context for a task (files, background, constraints).

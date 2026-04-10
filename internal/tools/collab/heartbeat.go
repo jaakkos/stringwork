@@ -25,6 +25,7 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			mcp.WithString("progress", mcp.Description("What you're currently doing (e.g. 'writing unit tests for auth middleware'). STRONGLY RECOMMENDED on every heartbeat.")),
 			mcp.WithNumber("step", mcp.Description("Current step number (e.g. 3 of 5). Use with total_steps.")),
 			mcp.WithNumber("total_steps", mcp.Description("Total number of steps in your current work.")),
+			mcp.WithString("session_id", mcp.Description("Your CLI session/conversation ID. Report on first heartbeat so the server can resume your session if you get restarted.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -34,6 +35,7 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			}
 
 			progress, _ := args["progress"].(string)
+			sessionID, _ := args["session_id"].(string)
 			step := 0
 			if s, ok := args["step"].(float64); ok {
 				step = int(s)
@@ -90,6 +92,9 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 				}
 				if totalSteps > 0 {
 					inst.ProgressTotalSteps = totalSteps
+				}
+				if sessionID != "" {
+					inst.SessionID = sessionID
 				}
 				return nil
 			})
