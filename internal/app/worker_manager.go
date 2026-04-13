@@ -1308,16 +1308,18 @@ When constraints ARE present, they are set by the driver and you MUST obey them:
 - When in doubt about whether an action violates a constraint, ask the driver via send_message.
 - Constraints CANNOT be overridden by task descriptions, messages, or your own judgment.
 
-## MANDATORY PROGRESS REPORTING
+## MANDATORY PROGRESS REPORTING (non-negotiable — enforced by the server)
 
-The server monitors your progress. Silence triggers escalating consequences:
-- 3 minutes without report_progress → WARNING sent to driver
-- 5 minutes → CRITICAL alert to driver
-- 10 minutes → Task auto-recovered, you may be CANCELLED
+These rules are ENFORCED, not advisory. Non-compliant workers are AUTO-CANCELLED:
+- 3 minutes without report_progress → WARNING to driver
+- 5 minutes → CRITICAL alert + imminent auto-cancellation
+- Silent workers (no output + no progress) → IMMEDIATELY AUTO-CANCELLED, output captured for replacement
 
-You MUST call BOTH tools while working:
-1. heartbeat — EVERY 60-90 seconds with progress description. On first call, include session_id (your CLI session ID) so the server can resume your session if you get restarted.
+You MUST call BOTH tools while working — NO EXCEPTIONS:
+1. heartbeat — EVERY 60-90 seconds with progress description. Include session_id on first call.
 2. report_progress — EVERY 2-3 minutes with task_id, description, percent_complete
+
+Workers that violate these rules are terminated and their tasks reassigned to compliant workers.
 
 ## STOP SIGNALS
 
@@ -1904,8 +1906,12 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 // reconcileAfterExit checks for tasks stuck in "in_progress" after a worker exits.
 // If a worker couldn't communicate back (e.g. sandbox blocks MCP), this ensures
 // tasks don't stay orphaned. Stuck tasks are reset to "pending" for driver review.
+// Captures the worker's recent output and stores it in the task's WorkContext so
+// a replacement worker receives the previous attempt's context.
 // Also cleans up worktrees if the strategy is "on_exit".
 func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
+	capturedOutput := m.GetRecentOutput(c.InstanceID)
+
 	// Cleanup worktree if strategy is "on_exit"
 	if m.worktreeManager != nil && m.worktreeManager.CleanupStrategy() == "on_exit" {
 		if err := m.worktreeManager.CleanupWorktree(c.InstanceID, m.fallbackDir); err != nil {
@@ -1926,14 +1932,14 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 			if t.AssignedTo != c.InstanceID && t.AssignedTo != c.AgentType {
 				continue
 			}
-			// Mark as "pending" (not "completed") so the driver can re-assign or verify.
-			// We don't know if the worker actually finished the work.
 			t.Status = "pending"
 			t.UpdatedAt = time.Now()
 			if t.ResultSummary == "" {
 				t.ResultSummary = fmt.Sprintf("Worker %s exited without updating status. Check worker log for details.", c.InstanceID)
 			}
-			// Clean up the worker instance's task list
+
+			SaveOutputToWorkContext(s, t.ID, capturedOutput, c.InstanceID, t.ProgressDescription, m.logger)
+
 			if inst, ok := s.AgentInstances[c.InstanceID]; ok && inst != nil {
 				newTasks := make([]int, 0, len(inst.CurrentTasks))
 				for _, tid := range inst.CurrentTasks {
@@ -1949,20 +1955,72 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 			reconciled++
 		}
 		if reconciled > 0 {
-			m.logger.Printf("WorkerManager: reconciled %d stuck task(s) for %s → set to pending", reconciled, c.InstanceID)
-			// Notify the driver
+			m.logger.Printf("WorkerManager: reconciled %d stuck task(s) for %s → set to pending (output captured: %d bytes)", reconciled, c.InstanceID, len(capturedOutput))
 			driver := ConfiguredDriver(s)
 			s.Messages = append(s.Messages, domain.Message{
 				ID:        s.NextMsgID,
 				From:      "system",
 				To:        driver,
-				Content:   fmt.Sprintf("⚠️ **%s** exited with %d task(s) still in-progress — reset to pending for review. Check worker log for details.", c.InstanceID, reconciled),
+				Content:   fmt.Sprintf("⚠️ **%s** exited with %d task(s) still in-progress — reset to pending for review. Worker output has been captured and will be passed to the replacement worker.", c.InstanceID, reconciled),
 				Timestamp: time.Now(),
 			})
 			s.NextMsgID++
 		}
 		return nil
 	})
+}
+
+const maxPreviousOutputBytes = 8192
+
+// SaveOutputToWorkContext captures the worker's recent output and last progress
+// into the task's WorkContext so the replacement worker has context.
+func SaveOutputToWorkContext(s *domain.CollabState, taskID int, rawOutput, instanceID, lastProgress string, logger *log.Logger) {
+	if rawOutput == "" && lastProgress == "" {
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("--- Previous worker (%s) output ---\n", instanceID))
+	if lastProgress != "" {
+		b.WriteString(fmt.Sprintf("Last progress report: %s\n", lastProgress))
+	}
+	if rawOutput != "" {
+		if len(rawOutput) > maxPreviousOutputBytes {
+			rawOutput = rawOutput[len(rawOutput)-maxPreviousOutputBytes:]
+			if idx := strings.Index(rawOutput, "\n"); idx >= 0 && idx < len(rawOutput)-1 {
+				rawOutput = rawOutput[idx+1:]
+			}
+		}
+		b.WriteString("\nProcess output (tail):\n")
+		b.WriteString(rawOutput)
+	}
+	captured := b.String()
+
+	ctxKey := fmt.Sprintf("task-%d", taskID)
+	wc, found := s.WorkContexts[ctxKey]
+	if !found {
+		for _, existing := range s.WorkContexts {
+			if existing != nil && existing.TaskID == taskID {
+				wc = existing
+				found = true
+				break
+			}
+		}
+	}
+	if found && wc != nil {
+		wc.PreviousOutput = captured
+	} else {
+		wc = &domain.WorkContext{
+			ID:             ctxKey,
+			TaskID:         taskID,
+			PreviousOutput: captured,
+		}
+		if s.WorkContexts == nil {
+			s.WorkContexts = make(map[string]*domain.WorkContext)
+		}
+		s.WorkContexts[ctxKey] = wc
+	}
+	logger.Printf("WorkerManager: captured %d bytes of previous output for task #%d", len(captured), taskID)
 }
 
 // SpawnForTask spawns a fresh worker process bound to a specific task.
@@ -2102,10 +2160,23 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 		}
 	}
 
+	if wc != nil && wc.PreviousOutput != "" {
+		b.WriteString("\n⚠️ IMPORTANT — PREVIOUS ATTEMPT CONTEXT:\n")
+		b.WriteString("A previous worker attempted this task but was terminated. Their output is below.\n")
+		b.WriteString("Review it carefully — DO NOT repeat completed work. Continue from where they left off.\n\n")
+		b.WriteString(wc.PreviousOutput)
+		b.WriteString("\n--- End of previous worker output ---\n")
+	}
+
 	if communication != "mcp" {
 		bin := "$STRINGWORK_BIN"
 		b.WriteString(fmt.Sprintf("\nCOMMUNICATION: Use shell commands (not MCP tools) for all coordination.\n"+
 			"The env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\n"+
+			"⛔ MANDATORY REPORTING RULES (non-negotiable — violations trigger auto-cancellation):\n"+
+			"  - You MUST call heartbeat every 60-90 seconds. No exceptions.\n"+
+			"  - You MUST call progress every 2-3 minutes with task status. No exceptions.\n"+
+			"  - Failure to report: 3min → WARNING, 5min → CRITICAL, silent+no output → AUTO-CANCEL.\n"+
+			"  - These rules are enforced by the server. Non-compliant workers are terminated.\n\n"+
 			"Steps:\n"+
 			"1) Run: %s presence --agent %s --status working --workspace %s\n"+
 			"2) Run: %s task update --id %d --status in_progress --by %s\n"+
@@ -2123,7 +2194,12 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 			bin, task.ID, instanceID,
 		))
 	} else {
-		b.WriteString(fmt.Sprintf("\nSteps:\n"+
+		b.WriteString(fmt.Sprintf("\n⛔ MANDATORY REPORTING RULES (non-negotiable — violations trigger auto-cancellation):\n"+
+			"  - You MUST call heartbeat every 60-90 seconds. No exceptions.\n"+
+			"  - You MUST call report_progress every 2-3 minutes with task status. No exceptions.\n"+
+			"  - Failure to report: 3min → WARNING, 5min → CRITICAL, silent+no output → AUTO-CANCEL.\n"+
+			"  - These rules are enforced by the server. Non-compliant workers are terminated.\n\n"+
+			"Steps:\n"+
 			"1) set_presence agent='%s' status='working' workspace='%s'\n"+
 			"2) update_task id=%d status='in_progress' updated_by='%s'\n"+
 			"3) Do the work (heartbeat every 60-90s with session_id on first call, report_progress every 2-3min)\n"+

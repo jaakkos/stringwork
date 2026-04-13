@@ -37,6 +37,10 @@ func (m *mockCanceller) IsWorkerRunning(instanceID string) bool {
 	return m.running[instanceID]
 }
 
+func (m *mockCanceller) GetRecentOutput(instanceID string) string {
+	return ""
+}
+
 func testServerWithCanceller(svc *app.CollabService, logger *log.Logger, c WorkerCanceller) *server.MCPServer {
 	s := server.NewMCPServer("test", "1.0.0")
 	registry := app.NewSessionRegistry()

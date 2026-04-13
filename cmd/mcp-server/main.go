@@ -364,6 +364,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		regOpts = append(regOpts, collab.WithCanceller(wm))
 		regOpts = append(regOpts, collab.WithProcessProvider(&processAdapter{wm: wm}))
 		regOpts = append(regOpts, collab.WithTaskSpawner(wm))
+		regOpts = append(regOpts, collab.WithSessionIDRecorder(wm))
 		regOpts = append(regOpts, collab.WithBackoffProvider(wm))
 	}
 	if wtManager != nil {
@@ -381,6 +382,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	}
 	if wm != nil {
 		watchdogOpts = append(watchdogOpts, app.WithProcessActivity(wm))
+		watchdogOpts = append(watchdogOpts, app.WithAutoCanceller(wm))
 	}
 	watchdog := app.NewWatchdog(svc, registry, logger, watchdogOpts...)
 	go watchdog.Start(ctx)
@@ -443,6 +445,9 @@ func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handl
 	dash.RegisterRoutes(mux)
 
 	wAPI := newWorkerAPI(bundle.svc, bundle.logger)
+	if bundle.wm != nil {
+		wAPI.sessionIDRecorder = bundle.wm
+	}
 	wAPI.RegisterRoutes(mux)
 
 	return mux

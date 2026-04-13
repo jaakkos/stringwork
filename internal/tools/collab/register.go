@@ -52,12 +52,18 @@ type BackoffInfoProvider interface {
 	BackoffInfoForType(agentType string) (blocked bool, remaining time.Duration, reason string)
 }
 
+// SessionIDRecorder records a worker's CLI session ID for session resume.
+type SessionIDRecorder interface {
+	SetWorkerSessionID(instanceID, sessionID string)
+}
+
 type registerOpts struct {
-	canceller        WorkerCanceller
-	worktreeProvider WorktreeInfoProvider
-	processProvider  ProcessInfoProvider
-	taskSpawner      TaskSpawner
-	backoffProvider  BackoffInfoProvider
+	canceller         WorkerCanceller
+	worktreeProvider  WorktreeInfoProvider
+	processProvider   ProcessInfoProvider
+	taskSpawner       TaskSpawner
+	backoffProvider   BackoffInfoProvider
+	sessionIDRecorder SessionIDRecorder
 }
 
 // WithCanceller sets the WorkerCanceller for the cancel_agent tool.
@@ -84,6 +90,11 @@ func WithTaskSpawner(s TaskSpawner) RegisterOption {
 // WithBackoffProvider enables rate-limit/backoff visibility in worker_status output.
 func WithBackoffProvider(p BackoffInfoProvider) RegisterOption {
 	return func(o *registerOpts) { o.backoffProvider = p }
+}
+
+// WithSessionIDRecorder enables session ID synchronization from heartbeat to WorkerManager.
+func WithSessionIDRecorder(r SessionIDRecorder) RegisterOption {
+	return func(o *registerOpts) { o.sessionIDRecorder = r }
 }
 
 // Register registers the collaboration tools, prompt templates,
@@ -130,7 +141,7 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	// Driver/worker tools (4)
 	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider, o.backoffProvider)
 	registerWorkerOutput(s, svc, logger, o.processProvider)
-	registerHeartbeat(s, svc, logger)
+	registerHeartbeat(s, svc, logger, o.sessionIDRecorder)
 	registerCancelAgent(s, svc, logger, o.canceller)
 
 	// Progress monitoring tools (1)

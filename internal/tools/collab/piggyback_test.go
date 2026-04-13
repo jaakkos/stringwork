@@ -248,18 +248,21 @@ func TestBuildBanner_ProgressNudge_SoftReminder(t *testing.T) {
 			UpdatedAt: now.Add(-120 * time.Second), LastProgressAt: now.Add(-100 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
-	if !strings.Contains(banner, "⏰") {
-		t.Errorf("expected soft nudge (⏰) at 100s, got %q", banner)
+	if !strings.Contains(banner, "⚠️") {
+		t.Errorf("expected REQUIRED nudge (⚠️) at 100s, got %q", banner)
 	}
 	if !strings.Contains(banner, "Task #5") {
 		t.Errorf("expected task ID in nudge, got %q", banner)
 	}
 	if !strings.Contains(banner, "report_progress") {
-		t.Errorf("expected report_progress suggestion, got %q", banner)
+		t.Errorf("expected report_progress directive, got %q", banner)
 	}
-	// Should NOT have urgent warning marker.
-	if strings.Contains(banner, "⚠️") {
-		t.Errorf("should not be urgent at 100s, got %q", banner)
+	if !strings.Contains(banner, "MANDATORY") {
+		t.Errorf("expected MANDATORY language, got %q", banner)
+	}
+	// Should NOT have the critical-level marker yet.
+	if strings.Contains(banner, "⛔") {
+		t.Errorf("should not be critical-level at 100s, got %q", banner)
 	}
 }
 
@@ -271,17 +274,17 @@ func TestBuildBanner_ProgressNudge_UrgentReminder(t *testing.T) {
 			UpdatedAt: now.Add(-200 * time.Second), LastProgressAt: now.Add(-200 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
-	if !strings.Contains(banner, "⚠️") {
-		t.Errorf("expected urgent nudge (⚠️) at 200s, got %q", banner)
+	if !strings.Contains(banner, "⛔") {
+		t.Errorf("expected MANDATORY nudge (⛔) at 200s, got %q", banner)
 	}
 	if !strings.Contains(banner, "Task #7") {
 		t.Errorf("expected task ID in nudge, got %q", banner)
 	}
-	if !strings.Contains(banner, "watchdog WARNING imminent") {
-		t.Errorf("expected urgency text, got %q", banner)
+	if !strings.Contains(banner, "AUTO-CANCELLED") {
+		t.Errorf("expected auto-cancel warning, got %q", banner)
 	}
-	if !strings.Contains(banner, "report_progress NOW") {
-		t.Errorf("expected NOW emphasis, got %q", banner)
+	if !strings.Contains(banner, "IMMEDIATELY") {
+		t.Errorf("expected IMMEDIATELY emphasis, got %q", banner)
 	}
 }
 
@@ -307,7 +310,7 @@ func TestBuildBanner_ProgressNudge_SuppressedOnReportProgress(t *testing.T) {
 			UpdatedAt: now.Add(-200 * time.Second), LastProgressAt: now.Add(-200 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "report_progress")
-	if strings.Contains(banner, "⚠️") || strings.Contains(banner, "⏰") {
+	if strings.Contains(banner, "⚠️") || strings.Contains(banner, "⏰") || strings.Contains(banner, "⛔") {
 		t.Errorf("should not nudge on report_progress tool, got %q", banner)
 	}
 }
@@ -339,8 +342,8 @@ func TestBuildBanner_ProgressNudge_FallsBackToUpdatedAt(t *testing.T) {
 			UpdatedAt: now.Add(-120 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
-	if !strings.Contains(banner, "⏰") {
-		t.Errorf("expected soft nudge using UpdatedAt fallback, got %q", banner)
+	if !strings.Contains(banner, "⚠️") {
+		t.Errorf("expected REQUIRED nudge using UpdatedAt fallback, got %q", banner)
 	}
 	if !strings.Contains(banner, "Task #3") {
 		t.Errorf("expected task ID in nudge, got %q", banner)

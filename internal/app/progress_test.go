@@ -117,8 +117,8 @@ func TestWatchdog_ProgressCritical(t *testing.T) {
 		for _, msg := range s.Messages {
 			if msg.From == "system" && msg.To == "cursor" {
 				// Without a ProcessActivityProvider, the watchdog classifies
-				// as workerNoProcess and sends a "No process" critical message.
-				if contains(msg.Content, "No process") || contains(msg.Content, "Critical") || contains(msg.Content, "Stuck") {
+				// as workerNoProcess and sends an AUTO-RECOVERING critical message.
+				if contains(msg.Content, "AUTO-RECOVERING") || contains(msg.Content, "VIOLATION") || contains(msg.Content, "AUTO-CANCELLING") {
 					foundCritical = true
 				}
 			}
@@ -551,8 +551,8 @@ func TestWatchdog_WarningNoProcess(t *testing.T) {
 				if !contains(msg.Content, "no running process") {
 					t.Error("warning should mention no running process")
 				}
-				if !contains(msg.Content, "worker_output") {
-					t.Error("warning should include worker_output hint")
+				if !contains(msg.Content, "imminent auto-cancel") {
+					t.Error("warning should flag imminent auto-cancel")
 				}
 				return nil
 			}
@@ -596,14 +596,14 @@ func TestWatchdog_CriticalNoProcess(t *testing.T) {
 
 	_ = svc.Query(func(s *domain.CollabState) error {
 		for _, msg := range s.Messages {
-			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "No process") {
-				if !contains(msg.Content, "worker_output") {
-					t.Error("no-process critical should include worker_output hint")
+			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "AUTO-RECOVERING") {
+				if !contains(msg.Content, "no running process") {
+					t.Error("no-process critical should mention no running process")
 				}
 				return nil
 			}
 		}
-		t.Error("expected a No process critical message")
+		t.Error("expected an AUTO-RECOVERING critical message")
 		return nil
 	})
 }
@@ -730,9 +730,9 @@ func TestWatchdog_ActiveWorkerSoftCritical(t *testing.T) {
 
 	_ = svc.Query(func(s *domain.CollabState) error {
 		for _, msg := range s.Messages {
-			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "Note") {
-				if !contains(msg.Content, "actively producing output") {
-					t.Error("active critical should mention actively producing output")
+			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "VIOLATION") {
+				if !contains(msg.Content, "process active") {
+					t.Error("active critical should mention process is active")
 				}
 				if !contains(msg.Content, "report_progress") {
 					t.Error("active critical should suggest report_progress")
@@ -740,7 +740,7 @@ func TestWatchdog_ActiveWorkerSoftCritical(t *testing.T) {
 				return nil
 			}
 		}
-		t.Error("expected a soft Note message for active worker at critical threshold")
+		t.Error("expected a VIOLATION message for active worker at critical threshold")
 		return nil
 	})
 }
@@ -858,17 +858,17 @@ func TestWatchdog_SilentWorkerCriticalIncludesSnippet(t *testing.T) {
 
 	_ = svc.Query(func(s *domain.CollabState) error {
 		for _, msg := range s.Messages {
-			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "Stuck") {
-				if !contains(msg.Content, "cancel_agent") {
-					t.Error("stuck critical should suggest cancel_agent")
+			if msg.From == "system" && msg.To == "cursor" && contains(msg.Content, "AUTO-CANCELLING") {
+				if !contains(msg.Content, "Terminating worker") {
+					t.Error("silent critical should state worker is being terminated")
 				}
 				if !contains(msg.Content, "connection timeout") {
-					t.Errorf("stuck critical should include output snippet, got: %s", msg.Content)
+					t.Errorf("silent critical should include output snippet, got: %s", msg.Content)
 				}
 				return nil
 			}
 		}
-		t.Error("expected a Stuck critical message for silent worker")
+		t.Error("expected an AUTO-CANCELLING critical message for silent worker")
 		return nil
 	})
 }

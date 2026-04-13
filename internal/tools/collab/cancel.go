@@ -19,6 +19,7 @@ import (
 type WorkerCanceller interface {
 	CancelWorker(instanceID string) bool
 	IsWorkerRunning(instanceID string) bool
+	GetRecentOutput(instanceID string) string
 }
 
 // registerCancelAgent registers the cancel_agent tool.
@@ -44,7 +45,13 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 			var cancelledTasks []int
 			var agentFound bool
 
-			// Phase 1: Cancel all in-progress tasks and send STOP message.
+			// Capture output before cancellation so it's not lost
+			var capturedOutput string
+			if canceller != nil {
+				capturedOutput = canceller.GetRecentOutput(agent)
+			}
+
+			// Phase 1: Cancel all in-progress tasks, capture output, and send STOP message.
 			if err := svc.Run(func(state *domain.CollabState) error {
 				extra := app.RegisteredAgentNames(state)
 				if err := app.ValidateAgent(cancelledBy, state, false, false, extra...); err != nil {
@@ -57,14 +64,12 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 
 				now := time.Now()
 
-				// Cancel all in_progress tasks for this agent
 				for i := range state.Tasks {
 					t := &state.Tasks[i]
 					if t.Status != "in_progress" {
 						continue
 					}
 					if t.AssignedTo != agent {
-						// Also check by agent type for multi-instance workers
 						matchesType := false
 						for _, inst := range state.AgentInstances {
 							if inst != nil && inst.InstanceID == t.AssignedTo && inst.AgentType == agent {
@@ -86,7 +91,10 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 					}
 					cancelledTasks = append(cancelledTasks, t.ID)
 
-					// Clean up agent instance task tracking
+					if capturedOutput != "" {
+						app.SaveOutputToWorkContext(state, t.ID, capturedOutput, agent, t.ProgressDescription, logger)
+					}
+
 					removeTaskFromInstance(state, t.ID, t.AssignedTo)
 				}
 

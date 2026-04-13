@@ -14,15 +14,18 @@ import (
 )
 
 // registerHeartbeat registers the heartbeat tool (workers call this to signal liveness).
-func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.Logger) {
+// sessionIDRecorder is optional; when set, session IDs are synced to the WorkerManager
+// so that restarted workers can resume their CLI sessions.
+func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, sessionIDRecorder SessionIDRecorder) {
 	s.AddTool(
 		mcp.NewTool("heartbeat",
 			mcp.WithDescription(
-				"Signal liveness and optionally report progress. REQUIRED: call this every 60-90 seconds while working. "+
-					"Include progress details so the driver and server know you're making progress (not stuck). "+
-					"Workers that don't heartbeat are considered dead after 5 minutes and their tasks are recovered."),
+				"Signal liveness and report progress. MANDATORY: call this every 60-90 seconds while working — no exceptions. "+
+					"You MUST include progress details on every call. "+
+					"Workers that fail to heartbeat are auto-cancelled after 5 minutes and their tasks are reassigned. "+
+					"This is not optional — the server enforces these rules and will terminate non-compliant workers."),
 			mcp.WithString("agent", mcp.Required(), mcp.Description("Your agent or instance ID (e.g. claude-code-1, codex)")),
-			mcp.WithString("progress", mcp.Description("What you're currently doing (e.g. 'writing unit tests for auth middleware'). STRONGLY RECOMMENDED on every heartbeat.")),
+			mcp.WithString("progress", mcp.Description("MANDATORY: What you're currently doing (e.g. 'writing unit tests for auth middleware'). Must be provided on every heartbeat.")),
 			mcp.WithNumber("step", mcp.Description("Current step number (e.g. 3 of 5). Use with total_steps.")),
 			mcp.WithNumber("total_steps", mcp.Description("Total number of steps in your current work.")),
 			mcp.WithString("session_id", mcp.Description("Your CLI session/conversation ID. Report on first heartbeat so the server can resume your session if you get restarted.")),
@@ -100,6 +103,9 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if sessionID != "" && sessionIDRecorder != nil {
+				sessionIDRecorder.SetWorkerSessionID(agent, sessionID)
 			}
 			if progress != "" {
 				logger.Printf("heartbeat from %s (progress: %s)", agent, progress)

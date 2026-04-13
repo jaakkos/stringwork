@@ -1136,23 +1136,23 @@ func TestWatchdog_ProgressCritical_SoftWhenSessionActive(t *testing.T) {
 
 	wd.CheckOnce()
 
-	// Should get a soft "Note" message, not "No process" or "Stuck".
+	// Should get a VIOLATION message (session active), not no-process / silent-worker templates.
 	_ = svc.Query(func(s *domain.CollabState) error {
 		found := false
 		for _, msg := range s.Messages {
 			if msg.From == "system" && msg.To == "cursor" {
 				found = true
-				if !strings.Contains(msg.Content, "Note") {
-					t.Errorf("expected soft 'Note' alert, got: %s", msg.Content)
+				if !strings.Contains(msg.Content, "VIOLATION") {
+					t.Errorf("expected 'VIOLATION' alert, got: %s", msg.Content)
 				}
-				if strings.Contains(msg.Content, "No process") {
-					t.Errorf("should not say 'No process' when session is active, got: %s", msg.Content)
+				if strings.Contains(msg.Content, "AUTO-RECOVERING") {
+					t.Errorf("should not use no-process template when session is active, got: %s", msg.Content)
 				}
-				if strings.Contains(msg.Content, "Stuck") {
-					t.Errorf("should not say 'Stuck' when session is active, got: %s", msg.Content)
+				if strings.Contains(msg.Content, "AUTO-CANCELLING") {
+					t.Errorf("should not use silent-worker template when session is active, got: %s", msg.Content)
 				}
-				if !strings.Contains(msg.Content, "session active") {
-					t.Errorf("expected 'session active' in message, got: %s", msg.Content)
+				if !strings.Contains(msg.Content, "Session is active") {
+					t.Errorf("expected session-active wording in message, got: %s", msg.Content)
 				}
 			}
 		}

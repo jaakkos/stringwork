@@ -44,14 +44,15 @@ type AgentInstance struct {
 // WorktreeName is set by the orchestrator when assigning a task to a worker that
 // uses Claude native worktrees (-w), so the worker runs in that scope.
 type WorkContext struct {
-	ID            string            `json:"id"`
-	TaskID        int               `json:"task_id"`
-	RelevantFiles []string          `json:"relevant_files,omitempty"`
-	Background    string            `json:"background,omitempty"`
-	Constraints   []string          `json:"constraints,omitempty"`
-	SharedNotes   map[string]string `json:"shared_notes,omitempty"`
-	ParentCtxID   string            `json:"parent_ctx_id,omitempty"`
-	WorktreeName  string            `json:"worktree_name,omitempty"` // Claude -w scope; set by orchestrator on assign
+	ID             string            `json:"id"`
+	TaskID         int               `json:"task_id"`
+	RelevantFiles  []string          `json:"relevant_files,omitempty"`
+	Background     string            `json:"background,omitempty"`
+	Constraints    []string          `json:"constraints,omitempty"`
+	SharedNotes    map[string]string `json:"shared_notes,omitempty"`
+	ParentCtxID    string            `json:"parent_ctx_id,omitempty"`
+	WorktreeName   string            `json:"worktree_name,omitempty"`   // Claude -w scope; set by orchestrator on assign
+	PreviousOutput string            `json:"previous_output,omitempty"` // captured output from a previous worker attempt
 }
 
 // Task is a shared task.

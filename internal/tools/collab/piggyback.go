@@ -233,12 +233,18 @@ func progressNudgeText(taskID int, since time.Duration) string {
 	}
 	mins := int(since.Minutes())
 	if since >= progressUrgentThreshold {
-		return fmt.Sprintf("⚠️ Task #%d: no progress report for %dm+ (watchdog WARNING imminent). Call report_progress NOW with task_id=%d.",
+		return fmt.Sprintf("⛔ MANDATORY: Task #%d has no progress report for %dm. "+
+			"You MUST call report_progress with task_id=%d IMMEDIATELY. "+
+			"The watchdog is monitoring you — workers that do not report progress are AUTO-CANCELLED "+
+			"and their tasks reassigned. This is your final warning before escalation.",
 			taskID, mins, taskID)
 	}
 	if since >= progressNudgeThreshold {
-		return fmt.Sprintf("⏰ Task #%d: last progress report %dm ago. Call report_progress.",
-			taskID, mins)
+		return fmt.Sprintf("⚠️ REQUIRED: Task #%d last progress report was %dm ago. "+
+			"Call report_progress NOW with task_id=%d. "+
+			"Progress reporting every 2-3 minutes is MANDATORY, not optional. "+
+			"Failure to comply will result in auto-cancellation.",
+			taskID, mins, taskID)
 	}
 	return ""
 }

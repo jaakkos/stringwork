@@ -18,10 +18,11 @@ func registerReportProgress(s *server.MCPServer, svc *app.CollabService, logger 
 	s.AddTool(
 		mcp.NewTool("report_progress",
 			mcp.WithDescription(
-				"Report progress on a task you're working on. REQUIRED: call this every 2-3 minutes while working on a task. "+
+				"Report progress on a task you're working on. MANDATORY: call this every 2-3 minutes — no exceptions. "+
 					"This updates the task's progress fields AND refreshes your heartbeat. "+
-					"The driver and watchdog use this to determine if you're making progress or stuck. "+
-					"Tasks without progress reports for 3+ minutes trigger a warning to the driver."),
+					"The server monitors compliance: 3min without report → WARNING, 5min → CRITICAL, "+
+					"silent workers are AUTO-CANCELLED and tasks reassigned. "+
+					"This is not optional — non-compliant workers are terminated."),
 			mcp.WithString("agent", mcp.Required(), mcp.Description("Your agent or instance ID")),
 			mcp.WithNumber("task_id", mcp.Required(), mcp.Description("ID of the task you're working on")),
 			mcp.WithString("description", mcp.Required(), mcp.Description(

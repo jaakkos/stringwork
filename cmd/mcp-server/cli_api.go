@@ -19,8 +19,11 @@ import (
 // communication instead of MCP. Handlers call the same CollabService that MCP
 // tool handlers use, so state is consistent.
 type workerAPI struct {
-	svc    *app.CollabService
-	logger *log.Logger
+	svc               *app.CollabService
+	logger            *log.Logger
+	sessionIDRecorder interface {
+		SetWorkerSessionID(instanceID, sessionID string)
+	}
 }
 
 func newWorkerAPI(svc *app.CollabService, logger *log.Logger) *workerAPI {
@@ -91,6 +94,9 @@ func (w *workerAPI) handleHeartbeat(rw http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(rw, err.Error())
 		return
+	}
+	if req.SessionID != "" && w.sessionIDRecorder != nil {
+		w.sessionIDRecorder.SetWorkerSessionID(req.Agent, req.SessionID)
 	}
 	if req.Progress != "" {
 		w.logger.Printf("heartbeat from %s (progress: %s)", req.Agent, req.Progress)

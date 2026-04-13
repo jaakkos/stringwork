@@ -48,10 +48,17 @@ type ProcessActivityProvider interface {
 	GetRecentOutput(instanceID string) string
 }
 
+// WorkerAutoCanceller allows the watchdog to force-cancel unresponsive workers.
+type WorkerAutoCanceller interface {
+	CancelWorker(instanceID string) bool
+	GetRecentOutput(instanceID string) string
+}
+
 // Watchdog monitors agent liveness and recovers from stuck states.
 // It runs periodically and:
 // - Detects agent instances with stale heartbeats and marks them offline
 // - Resets in_progress tasks whose agents are dead back to pending
+// - Auto-cancels workers that are silent past the critical threshold
 // - Clears stale sessions from the registry so workers can be respawned
 // - Sends system notifications about recovery actions
 type Watchdog struct {
@@ -67,6 +74,7 @@ type Watchdog struct {
 	maxTaskFailures        int
 	notifier               Triggerable
 	processActivity        ProcessActivityProvider
+	autoCanceller          WorkerAutoCanceller
 	stopCh                 chan struct{}
 	doneCh                 chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
@@ -127,6 +135,13 @@ func WithWatchdogNotifier(n Triggerable) WatchdogOption {
 // can automatically distinguish actively-working workers from stuck ones.
 func WithProcessActivity(p ProcessActivityProvider) WatchdogOption {
 	return func(w *Watchdog) { w.processActivity = p }
+}
+
+// WithAutoCanceller gives the watchdog the ability to force-cancel unresponsive
+// workers and capture their output before termination. When set, silent workers
+// past the critical threshold are auto-cancelled instead of just warned about.
+func WithAutoCanceller(c WorkerAutoCanceller) WatchdogOption {
+	return func(w *Watchdog) { w.autoCanceller = c }
 }
 
 // NewWatchdog creates a new Watchdog.
@@ -253,12 +268,13 @@ func (w *Watchdog) check() {
 		now := time.Now()
 
 		// Find dead agents: instances with no recent activity from any source.
-		deadAgents := make(map[string]bool)
+		// Track per-instance liveness separately from per-type liveness.
+		deadInstances := make(map[string]bool)
+		aliveTypes := make(map[string]bool)
 		for id, inst := range state.AgentInstances {
 			if inst == nil {
 				continue
 			}
-			// Skip the driver — its presence is tracked by the MCP session lifecycle.
 			if inst.Role == domain.RoleDriver {
 				continue
 			}
@@ -266,7 +282,21 @@ func (w *Watchdog) check() {
 				continue
 			}
 			if !w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
-				deadAgents[id] = true
+				deadInstances[id] = true
+			} else {
+				aliveTypes[inst.AgentType] = true
+			}
+		}
+		// An agent TYPE is only dead if ALL its instances (including task-bound) are dead.
+		deadAgents := make(map[string]bool)
+		for id := range deadInstances {
+			deadAgents[id] = true
+		}
+		for id, inst := range state.AgentInstances {
+			if inst == nil {
+				continue
+			}
+			if deadInstances[id] && !aliveTypes[inst.AgentType] {
 				deadAgents[inst.AgentType] = true
 			}
 		}
@@ -278,6 +308,15 @@ func (w *Watchdog) check() {
 				continue
 			}
 
+			// Check if a task-bound worker for THIS specific task is alive.
+			// When a task is assigned to "claude-code" but the actual worker is
+			// "claude-code-task-3", the task-bound instance is the authoritative
+			// liveness signal — not the pre-existing idle instances.
+			taskBoundAlive := w.isTaskBoundWorkerAlive(state, t, now)
+			if taskBoundAlive {
+				continue
+			}
+
 			agentDead := deadAgents[t.AssignedTo]
 			taskStuck := now.Sub(t.UpdatedAt) > w.taskStuckThresh
 
@@ -285,12 +324,7 @@ func (w *Watchdog) check() {
 				continue
 			}
 
-			// For stuck-threshold tasks, also verify the agent isn't alive.
-			// If the agent is alive but the task is old, the agent may still be working.
 			if !agentDead && taskStuck {
-				// Check if the assigned agent has any recent activity.
-				// If the agent IS alive (has session activity), don't recover the task —
-				// the agent is connected and presumably still working on it.
 				assigneeInst := findInstanceForAgent(state, t.AssignedTo)
 				if w.isAgentAlive(t.AssignedTo, assigneeInst, now, w.heartbeatStaleThresh) {
 					continue
@@ -417,62 +451,98 @@ func (w *Watchdog) check() {
 
 			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" && currentLevel != "sla_exceeded" {
 				var content string
+				shouldAutoCancel := false
 				switch {
 				case activity.status == workerActive || sessionActive:
 					w.alertedTasks[t.ID] = "critical"
 					if sessionActive {
-						content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
-							"but is still making tool calls (session active). "+
-							"The worker should call `report_progress` periodically.",
+						content = fmt.Sprintf("🔴 **VIOLATION**: Worker %s has not called `report_progress` on task #%d (%s) for %s. "+
+							"Session is active but progress reporting is MANDATORY. "+
+							"Worker will be auto-cancelled if reporting does not resume within the next watchdog cycle.",
 							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
 					} else {
-						content = fmt.Sprintf("ℹ️ **Note**: Worker %s has not called `report_progress` on task #%d (%s) for %s, "+
-							"but the process is actively producing output (last output %s ago, %d bytes written). "+
-							"The worker should call `report_progress` periodically.",
+						content = fmt.Sprintf("🔴 **VIOLATION**: Worker %s has not called `report_progress` on task #%d (%s) for %s "+
+							"(process active, last output %s ago). "+
+							"Progress reporting is MANDATORY. Worker will be auto-cancelled if reporting does not resume.",
 							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
-							activity.sinceOutput.Round(time.Second), activity.outputBytes)
+							activity.sinceOutput.Round(time.Second))
 					}
 				case activity.status == workerSilent:
 					w.alertedTasks[t.ID] = "critical"
-					content = fmt.Sprintf("🔴 **Stuck**: Worker %s has not reported progress on task #%d (%s) for %s, "+
-						"and the process has been silent for %s — likely stuck. "+
-						"Cancel with `cancel_agent agent='%s'`.",
+					shouldAutoCancel = true
+					content = fmt.Sprintf("🔴 **AUTO-CANCELLING**: Worker %s on task #%d (%s) — no progress for %s, "+
+						"process silent for %s. Terminating worker and preserving output for replacement.",
 						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
-						activity.sinceOutput.Round(time.Second), t.AssignedTo)
+						activity.sinceOutput.Round(time.Second))
 					if activity.snippet != "" {
 						content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
 					}
 				default: // workerNoProcess, no session activity
 					w.alertedTasks[t.ID] = "critical"
-					content = fmt.Sprintf("💀 **No process**: Worker %s has not reported progress on task #%d (%s) for %s, "+
-						"and no running process was found — the worker may have crashed or exited. "+
-						"Check the log with `worker_output task_id=%d` or reassign the task.",
-						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second), t.ID)
+					shouldAutoCancel = true
+					content = fmt.Sprintf("💀 **AUTO-RECOVERING**: Worker %s on task #%d (%s) — no progress for %s, "+
+						"no running process found. Capturing output and resetting task for reassignment.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
 				}
+
+				if shouldAutoCancel && w.autoCanceller != nil {
+					capturedOutput := w.autoCanceller.GetRecentOutput(t.AssignedTo)
+					w.autoCanceller.CancelWorker(t.AssignedTo)
+
+					SaveOutputToWorkContext(state, t.ID, capturedOutput, t.AssignedTo, t.ProgressDescription, w.logger)
+
+					oldAssignee := t.AssignedTo
+					t.FailureCount++
+					t.LastFailure = now
+					t.FailureReason = "auto-cancelled: mandatory progress reporting violation"
+					t.UpdatedAt = now
+					if t.FailureCount >= w.maxTaskFailures {
+						t.Status = "blocked"
+						t.BlockedBy = fmt.Sprintf("Auto-blocked after %d failures. Worker output preserved in work context.", t.FailureCount)
+					} else {
+						t.Status = "pending"
+						t.ResultSummary = fmt.Sprintf("Auto-cancelled (failure %d/%d): worker did not report progress. Output captured for replacement.", t.FailureCount, w.maxTaskFailures)
+					}
+					removeTaskFromInstanceByID(state, t.ID, oldAssignee)
+					recoveredTasks++
+					content += fmt.Sprintf("\n\nTask reset to %s (failure %d/%d). Previous output captured (%d bytes).",
+						t.Status, t.FailureCount, w.maxTaskFailures, len(capturedOutput))
+				}
+
 				state.Messages = append(state.Messages, domain.Message{
 					ID: state.NextMsgID, From: "system", To: driver,
 					Content: content, Timestamp: now,
 				})
 				state.NextMsgID++
-				w.logger.Printf("Watchdog: CRITICAL — task #%d no progress for %s (activity: %s, sessionActive: %v)", t.ID, sinceProgress.Round(time.Second), activity.status, sessionActive)
+				w.logger.Printf("Watchdog: CRITICAL — task #%d no progress for %s (activity: %s, sessionActive: %v, autoCancel: %v)", t.ID, sinceProgress.Round(time.Second), activity.status, sessionActive, shouldAutoCancel)
 
 			} else if sinceProgress > w.progressWarningThresh && currentLevel == "" {
 				switch {
 				case activity.status == workerActive || sessionActive:
-					// Suppress warning — worker is actively producing output or making
-					// tool calls, just not calling report_progress. Will alert at
-					// critical threshold if it continues.
+					w.alertedTasks[t.ID] = "warning"
+					var content string
 					if sessionActive {
-						w.logger.Printf("Watchdog: task #%d no progress for %s but session is active — suppressing warning",
-							t.ID, sinceProgress.Round(time.Second))
+						content = fmt.Sprintf("⚠️ **Reporting violation**: Worker %s has not called `report_progress` on task #%d (%s) for %s. "+
+							"Session is active — worker MUST call report_progress every 2-3 minutes. "+
+							"Auto-cancellation will follow at the critical threshold if reporting does not resume.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
 					} else {
-						w.logger.Printf("Watchdog: task #%d no progress for %s but process is active (last output %s ago) — suppressing warning",
-							t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
+						content = fmt.Sprintf("⚠️ **Reporting violation**: Worker %s has not called `report_progress` on task #%d (%s) for %s "+
+							"(process active, last output %s ago). "+
+							"Worker MUST call report_progress every 2-3 minutes. Auto-cancellation imminent if not corrected.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+							activity.sinceOutput.Round(time.Second))
 					}
+					state.Messages = append(state.Messages, domain.Message{
+						ID: state.NextMsgID, From: "system", To: driver,
+						Content: content, Timestamp: now,
+					})
+					state.NextMsgID++
+					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (active but non-compliant)", t.ID, sinceProgress.Round(time.Second))
 				case activity.status == workerSilent:
 					w.alertedTasks[t.ID] = "warning"
-					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
-						"and the process has been silent for %s. The worker may be stuck. "+
+					content := fmt.Sprintf("⚠️ **Warning — imminent auto-cancel**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and the process has been silent for %s. Worker will be auto-cancelled at the critical threshold. "+
 						"Use `worker_output task_id=%d` to check.",
 						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
 						activity.sinceOutput.Round(time.Second), t.ID)
@@ -484,18 +554,18 @@ func (w *Watchdog) check() {
 						Content: content, Timestamp: now,
 					})
 					state.NextMsgID++
-					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (SILENT for %s)", t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
+					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (SILENT for %s, auto-cancel imminent)", t.ID, sinceProgress.Round(time.Second), activity.sinceOutput.Round(time.Second))
 				default: // workerNoProcess, no session activity
 					w.alertedTasks[t.ID] = "warning"
-					content := fmt.Sprintf("⚠️ **Warning**: Worker %s has not reported progress on task #%d (%s) for %s, "+
-						"and no running process was found. Use `worker_output task_id=%d` to check the log.",
-						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second), t.ID)
+					content := fmt.Sprintf("⚠️ **Warning — imminent auto-cancel**: Worker %s has not reported progress on task #%d (%s) for %s, "+
+						"and no running process was found. Worker will be auto-cancelled at the critical threshold.",
+						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
 					state.Messages = append(state.Messages, domain.Message{
 						ID: state.NextMsgID, From: "system", To: driver,
 						Content: content, Timestamp: now,
 					})
 					state.NextMsgID++
-					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (no process)", t.ID, sinceProgress.Round(time.Second))
+					w.logger.Printf("Watchdog: WARNING — task #%d no progress for %s (no process, auto-cancel imminent)", t.ID, sinceProgress.Round(time.Second))
 				}
 			}
 		}
@@ -539,6 +609,46 @@ func (w *Watchdog) check() {
 		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s)",
 			recoveredTasks, recoveredAgents, prunedSessions)
 	}
+}
+
+// isTaskBoundWorkerAlive checks whether a task-bound worker instance (e.g.
+// "claude-code-task-3") exists and is alive for the given task. This handles
+// the common case where a task is assigned to an agent TYPE (e.g. "claude-code")
+// but the actual worker is a dynamically-created task-bound instance.
+func (w *Watchdog) isTaskBoundWorkerAlive(state *domain.CollabState, t *domain.Task, now time.Time) bool {
+	taskSuffix := fmt.Sprintf("-task-%d", t.ID)
+	for id, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		if !strings.HasSuffix(id, taskSuffix) {
+			continue
+		}
+		// Verify it's the right agent type (e.g. "claude-code-task-3" for agent "claude-code")
+		if inst.AgentType != t.AssignedTo && id != t.AssignedTo {
+			prefix := strings.TrimSuffix(id, taskSuffix)
+			if prefix != t.AssignedTo {
+				continue
+			}
+		}
+		if w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
+			return true
+		}
+	}
+	// Also check process activity: the task-bound worker may be actively
+	// producing output even if it hasn't registered in AgentInstances yet
+	// (e.g., still in its startup phase before the first heartbeat).
+	if w.processActivity != nil {
+		procs := w.processActivity.GetProcessInfo()
+		for id, proc := range procs {
+			if strings.HasSuffix(id, taskSuffix) {
+				if now.Sub(proc.LastOutputAt) < w.heartbeatStaleThresh {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // findInstanceForAgent returns the AgentInstance for an agent name (direct or by type).
