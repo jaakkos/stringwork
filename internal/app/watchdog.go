@@ -308,16 +308,22 @@ func (w *Watchdog) check() {
 				continue
 			}
 
-			// Check if a task-bound worker for THIS specific task is alive.
+			// Check if a task-bound worker for THIS specific task exists.
 			// When a task is assigned to "claude-code" but the actual worker is
 			// "claude-code-task-3", the task-bound instance is the authoritative
 			// liveness signal — not the pre-existing idle instances.
-			taskBoundAlive := w.isTaskBoundWorkerAlive(state, t, now)
-			if taskBoundAlive {
+			tbExists, tbAlive := w.checkTaskBoundWorker(state, t, now)
+			if tbAlive {
 				continue
 			}
 
 			agentDead := deadAgents[t.AssignedTo]
+			if tbExists {
+				// A task-bound worker was created for this task and is dead.
+				// This overrides type-level liveness — the dedicated worker is
+				// the authoritative signal for this specific task.
+				agentDead = true
+			}
 			taskStuck := now.Sub(t.UpdatedAt) > w.taskStuckThresh
 
 			if !agentDead && !taskStuck {
@@ -611,11 +617,11 @@ func (w *Watchdog) check() {
 	}
 }
 
-// isTaskBoundWorkerAlive checks whether a task-bound worker instance (e.g.
-// "claude-code-task-3") exists and is alive for the given task. This handles
-// the common case where a task is assigned to an agent TYPE (e.g. "claude-code")
-// but the actual worker is a dynamically-created task-bound instance.
-func (w *Watchdog) isTaskBoundWorkerAlive(state *domain.CollabState, t *domain.Task, now time.Time) bool {
+// checkTaskBoundWorker checks whether a task-bound worker instance (e.g.
+// "claude-code-task-3") exists for the given task, and if so, whether it is
+// alive. Returns (exists, alive). When exists=true the task-bound worker is
+// the authoritative liveness signal — type-level checks should be overridden.
+func (w *Watchdog) checkTaskBoundWorker(state *domain.CollabState, t *domain.Task, now time.Time) (exists bool, alive bool) {
 	taskSuffix := fmt.Sprintf("-task-%d", t.ID)
 	for id, inst := range state.AgentInstances {
 		if inst == nil {
@@ -631,8 +637,9 @@ func (w *Watchdog) isTaskBoundWorkerAlive(state *domain.CollabState, t *domain.T
 				continue
 			}
 		}
+		exists = true
 		if w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
-			return true
+			return true, true
 		}
 	}
 	// Also check process activity: the task-bound worker may be actively
@@ -642,13 +649,14 @@ func (w *Watchdog) isTaskBoundWorkerAlive(state *domain.CollabState, t *domain.T
 		procs := w.processActivity.GetProcessInfo()
 		for id, proc := range procs {
 			if strings.HasSuffix(id, taskSuffix) {
+				exists = true
 				if now.Sub(proc.LastOutputAt) < w.heartbeatStaleThresh {
-					return true
+					return true, true
 				}
 			}
 		}
 	}
-	return false
+	return exists, false
 }
 
 // findInstanceForAgent returns the AgentInstance for an agent name (direct or by type).

@@ -1228,6 +1228,288 @@ func TestWatchdog_ProgressWarning_NotSuppressedWhenSessionStale(t *testing.T) {
 	})
 }
 
+// ========== Task-bound worker tests ==========
+
+func TestWatchdog_TaskBoundWorkerAlive_PreventsRecovery(t *testing.T) {
+	// Reproduces the production bug: task assigned to "claude-code" type,
+	// stale idle instances (claude-code-1, claude-code-2), but an alive
+	// task-bound instance (claude-code-task-1) is actively heartbeating.
+	// The watchdog must NOT recover the task.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-3 * time.Hour)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	// Stale idle instances from a previous session.
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "offline",
+		LastHeartbeat: staleTime,
+	}
+	state.AgentInstances["claude-code-2"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-2",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "offline",
+		LastHeartbeat: staleTime,
+	}
+	// Alive task-bound worker, heartbeating normally.
+	state.AgentInstances["claude-code-task-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-task-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now.Add(-30 * time.Second),
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         1,
+		Title:      "Review code",
+		Status:     "in_progress",
+		AssignedTo: "claude-code",
+		UpdatedAt:  now.Add(-1 * time.Minute),
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithTaskStuckThreshold(10*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "in_progress" {
+			t.Errorf("task should remain in_progress (task-bound worker is alive), got %q", s.Tasks[0].Status)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_TaskBoundWorkerDead_RecoverTask(t *testing.T) {
+	// All instances are dead, including the task-bound worker.
+	// The task should be recovered.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "offline",
+		LastHeartbeat: staleTime,
+	}
+	// Task-bound worker also dead.
+	state.AgentInstances["claude-code-task-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-task-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         1,
+		Title:      "Dead worker task",
+		Status:     "in_progress",
+		AssignedTo: "claude-code",
+		UpdatedAt:  staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "pending" {
+			t.Errorf("task should be reset to pending (all instances dead), got %q", s.Tasks[0].Status)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_AgentTypeNotDeadWhenAnyInstanceAlive(t *testing.T) {
+	// One instance of "claude-code" is dead, another is alive.
+	// Tasks assigned to a DIFFERENT dead instance should be recovered,
+	// but the type "claude-code" itself should not be blanket-dead.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	// Dead instance with a task.
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: staleTime,
+	}
+	// Alive instance with a different task.
+	state.AgentInstances["claude-code-2"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-2",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{2},
+		LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks,
+		domain.Task{
+			ID: 1, Title: "Task on dead instance", Status: "in_progress",
+			AssignedTo: "claude-code-1", UpdatedAt: staleTime,
+		},
+		domain.Task{
+			ID: 2, Title: "Task on alive instance", Status: "in_progress",
+			AssignedTo: "claude-code-2", UpdatedAt: now,
+		},
+	)
+	state.NextTaskID = 3
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, task := range s.Tasks {
+			switch task.ID {
+			case 1:
+				if task.Status != "pending" {
+					t.Errorf("task #1 (dead instance) should be pending, got %q", task.Status)
+				}
+			case 2:
+				if task.Status != "in_progress" {
+					t.Errorf("task #2 (alive instance) should remain in_progress, got %q", task.Status)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_MultipleTaskBoundWorkers_IndependentLiveness(t *testing.T) {
+	// Two tasks each with their own task-bound worker. One alive, one dead.
+	// Only the dead one's task should be recovered.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	// Alive task-bound worker for task 1.
+	state.AgentInstances["codex-task-1"] = &domain.AgentInstance{
+		InstanceID:    "codex-task-1",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: now.Add(-20 * time.Second),
+	}
+	// Dead task-bound worker for task 2.
+	state.AgentInstances["codex-task-2"] = &domain.AgentInstance{
+		InstanceID:    "codex-task-2",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{2},
+		LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks,
+		domain.Task{
+			ID: 1, Title: "Alive worker task", Status: "in_progress",
+			AssignedTo: "codex", UpdatedAt: now.Add(-1 * time.Minute),
+		},
+		domain.Task{
+			ID: 2, Title: "Dead worker task", Status: "in_progress",
+			AssignedTo: "codex", UpdatedAt: staleTime,
+		},
+	)
+	state.NextTaskID = 3
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, task := range s.Tasks {
+			switch task.ID {
+			case 1:
+				if task.Status != "in_progress" {
+					t.Errorf("task #1 (alive task-bound worker) should remain in_progress, got %q", task.Status)
+				}
+			case 2:
+				if task.Status != "pending" {
+					t.Errorf("task #2 (dead task-bound worker) should be pending, got %q", task.Status)
+				}
+			}
+		}
+		return nil
+	})
+}
+
 // mockTriggerable records Trigger calls.
 type mockTriggerable struct {
 	fn func()
