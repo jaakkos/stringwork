@@ -305,8 +305,8 @@ Workers must report progress while working. The server monitors and escalates:
 | Duration without `report_progress` | What happens |
 |-------------------------------------|-------------|
 | 3 minutes | Warning sent to driver |
-| 5 minutes | Critical alert sent to driver |
-| 10 minutes (no heartbeat) | Task auto-recovered, worker may be cancelled |
+| 5 minutes | Critical alert sent to driver, auto-cancellation imminent |
+| 10 minutes (no heartbeat) | Worker auto-cancelled, output captured, task reset to pending |
 
 Workers call:
 - `heartbeat` every 60-90 seconds with a progress description. On first call, include `session_id` (CLI session/conversation ID) for session continuation on restart.

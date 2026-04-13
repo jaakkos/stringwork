@@ -103,8 +103,8 @@ report_progress agent='claude-code' task_id=5 description='Auth middleware done,
 | Silence duration | Consequence |
 |------------------|-------------|
 | 3 minutes | Warning sent to driver |
-| 5 minutes | Critical alert sent to driver |
-| 10 minutes (no heartbeat) | Task auto-recovered, worker may be cancelled |
+| 5 minutes | Critical alert sent to driver, auto-cancellation imminent |
+| 10 minutes (no heartbeat) | Worker auto-cancelled, output captured, task reset to pending |
 
 ### 5. Worker reports findings
 
@@ -146,12 +146,13 @@ Shows each worker's: agent progress (heartbeat info), task progress (description
 cancel_agent agent='claude-code' cancelled_by='cursor' reason='taking too long'
 ```
 
-This does three things atomically:
-1. Cancels all in-progress tasks for the agent
-2. Sends a STOP message to the agent
-3. Kills the spawned worker process
+This does four things atomically:
+1. Captures the worker's recent output and stores it in the task's work context
+2. Cancels all in-progress tasks for the agent
+3. Sends a STOP message to the agent
+4. Kills the spawned worker process
 
-When the worker is respawned (via `replay_task`, new task assignment, or unread messages), the server injects the stored CLI session ID so the new process resumes the previous conversation context (`--resume` for Claude/Gemini, `--session` for Codex).
+When the worker is respawned (via `replay_task`, new task assignment, or unread messages), the server injects both the stored CLI session ID (for conversation resume) and the previous worker's output (so no information is lost). The replacement worker sees the captured output prominently in its prompt and can continue where the previous worker left off.
 
 ### Create tasks with SLAs
 

@@ -52,9 +52,13 @@ cmd/mcp-server (main, CLI)
 2. `TaskOrchestrator` assigns it to a worker type based on strategy (least_loaded or capability_match)
 3. `WorkerManager` spawns the worker process with the configured command (includes constraint compliance rules in spawn prompt; for Gemini, auto-generates `GEMINI_SYSTEM_MD`)
 4. Worker connects to MCP server, claims the task (constraints surfaced inline), calls `get_work_context` to check constraints, does work
-5. `Watchdog` monitors heartbeats and progress reports, escalates if silent
+5. `Watchdog` monitors heartbeats and progress reports, escalates if silent, auto-cancels unresponsive workers
 6. Worker completes task and sends findings; process exits
 7. `WorkerManager` cleans up (worktree, process resources)
+
+If a worker is cancelled or crashes mid-task, `WorkerManager` captures its recent output and stores it in the task's `WorkContext.PreviousOutput`. When a replacement worker is spawned, this output is injected into its prompt so no information is lost across restarts.
+
+The watchdog uses task-bound worker instances (e.g. `claude-code-task-3`) as the authoritative liveness signal for each task, preventing false recoveries when idle instances from previous sessions have stale heartbeats.
 
 ### State management
 
