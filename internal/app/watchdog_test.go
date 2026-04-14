@@ -1510,6 +1510,509 @@ func TestWatchdog_MultipleTaskBoundWorkers_IndependentLiveness(t *testing.T) {
 	})
 }
 
+func TestWatchdog_ActiveProcess_PreventsAgentKill(t *testing.T) {
+	// Reproduces the Codex bug: agent has stale heartbeat (never called heartbeat)
+	// but its spawned process is actively producing stdout output. The watchdog
+	// should treat process output as a liveness signal and NOT mark it offline.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID:    "codex",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{3},
+		LastHeartbeat: staleTime, // never heartbeated properly
+	}
+	state.AgentInstances["codex-task-3"] = &domain.AgentInstance{
+		InstanceID:    "codex-task-3",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{3},
+		LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         3,
+		Title:      "Review plan",
+		Status:     "in_progress",
+		AssignedTo: "codex",
+		UpdatedAt:  staleTime,
+	})
+	state.NextTaskID = 4
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-3": {
+				InstanceID:   "codex-task-3",
+				StartedAt:    now.Add(-5 * time.Minute),
+				LastOutputAt: now.Add(-30 * time.Second), // actively producing output
+				OutputBytes:  750000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "in_progress" {
+			t.Errorf("task with active process output should remain in_progress, got %q", s.Tasks[0].Status)
+		}
+		return nil
+	})
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["codex"]
+		if inst.Status == "offline" {
+			t.Error("agent with active process output should not be marked offline")
+		}
+		inst = s.AgentInstances["codex-task-3"]
+		if inst.Status == "offline" {
+			t.Error("task-bound instance with active process output should not be marked offline")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_StaleProcess_StillKillsAgent(t *testing.T) {
+	// Process exists but its output is older than the threshold.
+	// Agent SHOULD be marked offline and task SHOULD be recovered.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Stale process task", Status: "in_progress",
+		AssignedTo: "codex", UpdatedAt: staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-1": {
+				InstanceID:   "codex-task-1",
+				StartedAt:    staleTime,
+				LastOutputAt: now.Add(-5 * time.Minute), // output older than 2min threshold
+				OutputBytes:  1000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status == "in_progress" {
+			t.Error("task with stale process output should be recovered")
+		}
+		return nil
+	})
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["codex"]
+		if inst.Status != "offline" {
+			t.Errorf("agent with stale process should be offline, got %q", inst.Status)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_NoProcessProvider_BackwardCompatible(t *testing.T) {
+	// When WithProcessActivity is NOT set, behavior should be unchanged:
+	// stale heartbeat → agent is killed. No panic from nil provider.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "No provider task", Status: "in_progress",
+		AssignedTo: "codex", UpdatedAt: staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// No WithProcessActivity — provider is nil
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status == "in_progress" {
+			t.Error("without process provider, stale heartbeat should still kill agent")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_DirectProcessMatch_PreventsKill(t *testing.T) {
+	// Process is registered under the exact agent name "codex" (not task-bound).
+	// Should still prevent the agent from being killed.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Direct match task", Status: "in_progress",
+		AssignedTo: "codex", UpdatedAt: staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex": {
+				InstanceID:   "codex",
+				StartedAt:    now.Add(-3 * time.Minute),
+				LastOutputAt: now.Add(-10 * time.Second),
+				OutputBytes:  50000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "in_progress" {
+			t.Errorf("direct process match should keep task alive, got %q", s.Tasks[0].Status)
+		}
+		inst := s.AgentInstances["codex"]
+		if inst.Status == "offline" {
+			t.Error("direct process match should prevent offline")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_ProcessPrefixNoFalsePositive(t *testing.T) {
+	// Agent "codex-extra" has an active process. Agent "codex" should NOT be
+	// kept alive by it — prefix match requires "codex-" but "codex-extra" is
+	// a separate agent, not a task-bound child of "codex".
+	// However, strings.HasPrefix("codex-extra", "codex-") IS true, so this
+	// tests that the prefix-based approach does match other instances of the
+	// same agent type. In practice, task-bound IDs use "codex-task-N" format
+	// and "codex-extra" would be a different numbered instance.
+	// The important safety check: "codex-extra" should NOT match agent "code".
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["code"] = &domain.AgentInstance{
+		InstanceID: "code", AgentType: "code",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Prefix safety task", Status: "in_progress",
+		AssignedTo: "code", UpdatedAt: staleTime,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			// "codex-task-5" should NOT match agent "code" (prefix "code-" != "codex-task-5")
+			"codex-task-5": {
+				InstanceID:   "codex-task-5",
+				StartedAt:    now.Add(-1 * time.Minute),
+				LastOutputAt: now.Add(-5 * time.Second),
+				OutputBytes:  100000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status == "in_progress" {
+			t.Error("agent 'code' should not be kept alive by process 'codex-task-5'")
+		}
+		inst := s.AgentInstances["code"]
+		if inst.Status != "offline" {
+			t.Errorf("agent 'code' should be offline, got %q", inst.Status)
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_ActiveProcess_PreventsSessionPrune(t *testing.T) {
+	// Agent has a session registered but stale heartbeat. Process is producing
+	// output. Session should NOT be pruned.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID:    "codex",
+		AgentType:     "codex",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{1},
+		LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-1": {
+				InstanceID:   "codex-task-1",
+				StartedAt:    now.Add(-3 * time.Minute),
+				LastOutputAt: now.Add(-20 * time.Second),
+				OutputBytes:  400000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	registry.SetAgent("codex-session", "codex")
+	registry.BackdateActivity("codex-session", staleTime)
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithSessionStaleThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	if !registry.HasActiveSession("codex") {
+		t.Error("session should not be pruned when process is producing output")
+	}
+}
+
+func TestWatchdog_StaleProcess_AllowsSessionPrune(t *testing.T) {
+	// Process exists but output is stale. Session SHOULD be pruned.
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-1": {
+				InstanceID:   "codex-task-1",
+				StartedAt:    staleTime,
+				LastOutputAt: now.Add(-5 * time.Minute), // stale output
+				OutputBytes:  1000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	registry.SetAgent("codex-session", "codex")
+	registry.BackdateActivity("codex-session", staleTime)
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithSessionStaleThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	if registry.HasActiveSession("codex") {
+		t.Error("session should be pruned when process output is stale")
+	}
+}
+
+func TestWatchdog_MultipleProcesses_MixedLiveness(t *testing.T) {
+	// Two tasks for "codex", each with a task-bound process. One active, one stale.
+	// The active one keeps the agent type alive, but the stale task should still
+	// be recovered via checkTaskBoundWorker (existing logic).
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-10 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex"] = &domain.AgentInstance{
+		InstanceID: "codex", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1, 2}, LastHeartbeat: staleTime,
+	}
+	state.AgentInstances["codex-task-1"] = &domain.AgentInstance{
+		InstanceID: "codex-task-1", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{1}, LastHeartbeat: now.Add(-30 * time.Second),
+	}
+	state.AgentInstances["codex-task-2"] = &domain.AgentInstance{
+		InstanceID: "codex-task-2", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{2}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks,
+		domain.Task{
+			ID: 1, Title: "Active task", Status: "in_progress",
+			AssignedTo: "codex", UpdatedAt: now.Add(-1 * time.Minute),
+		},
+		domain.Task{
+			ID: 2, Title: "Dead task", Status: "in_progress",
+			AssignedTo: "codex", UpdatedAt: staleTime,
+		},
+	)
+	state.NextTaskID = 3
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-1": {
+				InstanceID:   "codex-task-1",
+				StartedAt:    now.Add(-3 * time.Minute),
+				LastOutputAt: now.Add(-15 * time.Second), // active
+				OutputBytes:  500000,
+			},
+			"codex-task-2": {
+				InstanceID:   "codex-task-2",
+				StartedAt:    staleTime,
+				LastOutputAt: now.Add(-8 * time.Minute), // stale
+				OutputBytes:  2000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+		WithProcessActivity(mock),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, task := range s.Tasks {
+			switch task.ID {
+			case 1:
+				if task.Status != "in_progress" {
+					t.Errorf("task #1 (active process) should stay in_progress, got %q", task.Status)
+				}
+			case 2:
+				if task.Status != "pending" {
+					t.Errorf("task #2 (stale process) should be recovered to pending, got %q", task.Status)
+				}
+			}
+		}
+		return nil
+	})
+
+	// codex type should NOT be offline — it has an active child process
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["codex"]
+		if inst.Status == "offline" {
+			t.Error("agent type with an active child process should not be offline")
+		}
+		return nil
+	})
+}
+
 // mockTriggerable records Trigger calls.
 type mockTriggerable struct {
 	fn func()

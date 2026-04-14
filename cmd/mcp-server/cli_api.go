@@ -20,14 +20,29 @@ import (
 // tool handlers use, so state is consistent.
 type workerAPI struct {
 	svc               *app.CollabService
+	registry          *app.SessionRegistry
 	logger            *log.Logger
 	sessionIDRecorder interface {
 		SetWorkerSessionID(instanceID, sessionID string)
 	}
 }
 
-func newWorkerAPI(svc *app.CollabService, logger *log.Logger) *workerAPI {
-	return &workerAPI{svc: svc, logger: logger}
+func newWorkerAPI(svc *app.CollabService, registry *app.SessionRegistry, logger *log.Logger) *workerAPI {
+	return &workerAPI{svc: svc, registry: registry, logger: logger}
+}
+
+// touchCLISession creates or refreshes a synthetic session entry for a CLI worker
+// so that session-based liveness checks (isAgentAlive, pruneStaleSessions) work
+// uniformly for both MCP and CLI workers.
+func (w *workerAPI) touchCLISession(agent string) {
+	if w.registry == nil {
+		return
+	}
+	sessionID := "cli-" + agent
+	if !w.registry.HasActiveSession(agent) {
+		w.registry.SetAgent(sessionID, agent)
+	}
+	w.registry.TouchSession(sessionID)
 }
 
 // RegisterRoutes mounts all worker API endpoints on the given mux.
@@ -95,6 +110,7 @@ func (w *workerAPI) handleHeartbeat(rw http.ResponseWriter, r *http.Request) {
 		writeError(rw, err.Error())
 		return
 	}
+	w.touchCLISession(req.Agent)
 	if req.SessionID != "" && w.sessionIDRecorder != nil {
 		w.sessionIDRecorder.SetWorkerSessionID(req.Agent, req.SessionID)
 	}
@@ -170,6 +186,7 @@ func (w *workerAPI) handleProgress(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.touchCLISession(req.Agent)
 	response := fmt.Sprintf("Progress recorded for task #%d", req.TaskID)
 	if req.PercentComplete >= 0 {
 		response += fmt.Sprintf(" (%d%% complete)", req.PercentComplete)
@@ -462,7 +479,7 @@ func (w *workerAPI) handlePresence(rw http.ResponseWriter, r *http.Request) {
 		}
 		state.Presence[req.Agent] = presence
 
-		if inst, ok := state.AgentInstances[req.Agent]; ok && inst != nil {
+		if inst := findInstance(state, req.Agent); inst != nil {
 			inst.LastHeartbeat = now
 			if inst.Status == "offline" {
 				inst.Status = "idle"
@@ -480,6 +497,7 @@ func (w *workerAPI) handlePresence(rw http.ResponseWriter, r *http.Request) {
 		w.logger.Printf("Workspace root updated to %s (set by %s)", req.Workspace, req.Agent)
 	}
 
+	w.touchCLISession(req.Agent)
 	msg := fmt.Sprintf("Presence updated: %s is now %s", req.Agent, req.Status)
 	if req.Workspace != "" {
 		msg += fmt.Sprintf(" (workspace: %s)", req.Workspace)
@@ -512,7 +530,7 @@ func (w *workerAPI) handleContext(rw http.ResponseWriter, r *http.Request) {
 		state.ProjectInfo = projectInfo
 
 		now := time.Now()
-		if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
+		if inst := findInstance(state, agent); inst != nil {
 			inst.LastHeartbeat = now
 			if inst.Status == "offline" {
 				inst.Status = "idle"
@@ -570,6 +588,7 @@ func (w *workerAPI) handleContext(rw http.ResponseWriter, r *http.Request) {
 		writeError(rw, err.Error())
 		return
 	}
+	w.touchCLISession(agent)
 	writeText(rw, result)
 }
 

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -740,6 +741,9 @@ func (m *WorkerManager) Check() {
 		if m.sessionChecker != nil && (m.sessionChecker(c.InstanceID) || m.sessionChecker(c.AgentType)) {
 			continue
 		}
+		if m.isWorkerProcessRunning(c.InstanceID) || m.isWorkerProcessRunning(c.AgentType) {
+			continue
+		}
 		if len(c.Command) == 0 {
 			continue
 		}
@@ -884,6 +888,23 @@ func (m *WorkerManager) IsWorkerRunning(instanceID string) bool {
 			if c.InstanceID == id && c.AgentType == instanceID {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isWorkerProcessRunning returns true if a process for the given instance or
+// any task-bound child (e.g. "codex-task-3") is currently tracked in processRuntime.
+func (m *WorkerManager) isWorkerProcessRunning(instanceID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.processRuntime[instanceID]; ok {
+		return true
+	}
+	prefix := instanceID + "-"
+	for id := range m.processRuntime {
+		if strings.HasPrefix(id, prefix) {
+			return true
 		}
 	}
 	return false
@@ -1786,8 +1807,15 @@ type runResult struct {
 	Output string // tail of stdout+stderr (trimmed); empty on success
 }
 
+// activityAwareTimeout is the grace period after the configured timeout.
+// If the worker produced output within this window, the deadline is extended.
+const activityGracePeriod = 2 * time.Minute
+
+// hardTimeoutMultiplier caps total runtime regardless of activity.
+const hardTimeoutMultiplier = 3
+
 func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attempt int) runResult {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Track the cancel func so CancelWorker can kill this process.
@@ -1880,15 +1908,62 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		cmd.Stdout = mw
 		cmd.Stderr = mw
 	}
+	// Output-aware timeout: instead of a fixed deadline, monitor process activity.
+	// If the worker is still producing output when the configured timeout fires,
+	// extend the deadline by activityGracePeriod. Cap at hardTimeoutMultiplier * Timeout.
 	start := time.Now()
+	var timedOut atomic.Bool
+	hardLimit := c.Timeout * time.Duration(hardTimeoutMultiplier)
+	go func() {
+		softDeadline := time.After(c.Timeout)
+		hardDeadline := time.After(hardLimit)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hardDeadline:
+				timedOut.Store(true)
+				cancel()
+				return
+			case <-softDeadline:
+				// Soft timeout reached — check if worker is still active
+				m.mu.Lock()
+				lastOutput := pInfo.LastOutputAt
+				m.mu.Unlock()
+				if time.Since(lastOutput) > activityGracePeriod {
+					timedOut.Store(true)
+					cancel()
+					return
+				}
+				m.logger.Printf("WorkerManager: %s soft timeout reached but process active (last output %s ago), extending", c.InstanceID, time.Since(lastOutput).Round(time.Second))
+			case <-ticker.C:
+				if timedOut.Load() {
+					return
+				}
+				m.mu.Lock()
+				lastOutput := pInfo.LastOutputAt
+				m.mu.Unlock()
+				elapsed := time.Since(start)
+				if elapsed > c.Timeout && time.Since(lastOutput) > activityGracePeriod {
+					timedOut.Store(true)
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	if err := cmd.Run(); err != nil {
 		elapsed := time.Since(start).Round(time.Millisecond)
 		output := strings.TrimSpace(tail.String())
-		if ctx.Err() == context.DeadlineExceeded {
+		m.reconcileAfterExit(c)
+		if timedOut.Load() {
 			if output != "" {
-				return runResult{Err: fmt.Errorf("timed out after %s", c.Timeout), Output: output}
+				return runResult{Err: fmt.Errorf("timed out after %s", elapsed), Output: output}
 			}
-			return runResult{Err: fmt.Errorf("timed out after %s", c.Timeout)}
+			return runResult{Err: fmt.Errorf("timed out after %s", elapsed)}
 		}
 		if output != "" {
 			return runResult{

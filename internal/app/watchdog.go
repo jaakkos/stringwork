@@ -71,12 +71,17 @@ type Watchdog struct {
 	sessionStaleThresh     time.Duration
 	progressWarningThresh  time.Duration
 	progressCriticalThresh time.Duration
-	maxTaskFailures        int
-	notifier               Triggerable
-	processActivity        ProcessActivityProvider
-	autoCanceller          WorkerAutoCanceller
-	stopCh                 chan struct{}
-	doneCh                 chan struct{}
+	// processSilentThresh is how long a process can go without stdout/stderr
+	// before it is classified as "silent" (vs "active"). Derived from
+	// progressWarningThresh to maintain a consistent threshold ladder:
+	//   processSilentThresh < progressWarningThresh < progressCriticalThresh
+	processSilentThresh time.Duration
+	maxTaskFailures     int
+	notifier            Triggerable
+	processActivity     ProcessActivityProvider
+	autoCanceller       WorkerAutoCanceller
+	stopCh              chan struct{}
+	doneCh              chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
 	// Key: taskID, Value: "warning" or "critical".
 	alertedTasks map[int]string
@@ -180,6 +185,12 @@ func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logg
 			w.maxTaskFailures = mf
 		}
 	}
+	// Derive processSilentThresh from progressWarningThresh to maintain
+	// a consistent threshold ladder. Default: warning - 1min, min 1min.
+	w.processSilentThresh = w.progressWarningThresh - 1*time.Minute
+	if w.processSilentThresh < 1*time.Minute {
+		w.processSilentThresh = 1 * time.Minute
+	}
 	return w
 }
 
@@ -218,8 +229,9 @@ func (w *Watchdog) CheckOnce() {
 }
 
 // isAgentAlive checks if an agent has shown any sign of life recently.
-// It checks both the state heartbeat AND the session registry's activity tracking
-// (updated on every tool call via PiggybackMiddleware.TouchSession).
+// It checks the state heartbeat, session registry activity (updated on every
+// tool call via PiggybackMiddleware.TouchSession), AND process output activity
+// (stdout/stderr writes from spawned worker processes).
 func (w *Watchdog) isAgentAlive(agent string, inst *domain.AgentInstance, now time.Time, threshold time.Duration) bool {
 	// Check 1: Session registry activity (most reliable — updated on every tool call)
 	lastActivity := w.registry.LastActivityForAgent(agent)
@@ -250,6 +262,72 @@ func (w *Watchdog) isAgentAlive(agent string, inst *domain.AgentInstance, now ti
 		return true
 	}
 
+	// Check 4: Process output activity (stdout/stderr from spawned workers).
+	// Workers like Codex may not call heartbeat reliably but actively produce
+	// output while working. A process writing to stdout is clearly not dead.
+	if w.processActivity != nil {
+		if w.isProcessAlive(agent, now, threshold) {
+			return true
+		}
+		if inst != nil && inst.InstanceID != agent {
+			if w.isProcessAlive(inst.InstanceID, now, threshold) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isProcessAlive checks whether a spawned process for the given agent (or any
+// task-bound child like "codex-task-3") has produced output within threshold.
+func (w *Watchdog) isProcessAlive(agent string, now time.Time, threshold time.Duration) bool {
+	procs := w.processActivity.GetProcessInfo()
+	if proc, ok := procs[agent]; ok {
+		if !proc.LastOutputAt.IsZero() && now.Sub(proc.LastOutputAt) <= threshold {
+			return true
+		}
+	}
+	// Check task-bound instances (e.g. "codex-task-3" for agent "codex")
+	prefix := agent + "-"
+	for id, proc := range procs {
+		if strings.HasPrefix(id, prefix) {
+			if !proc.LastOutputAt.IsZero() && now.Sub(proc.LastOutputAt) <= threshold {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAnyActivity returns true if the instance has ever shown any sign of life
+// from any source: session registry, process output, or a non-zero heartbeat.
+// Used to distinguish "brand-new instance, no signals yet" from "instance that
+// was active and is now dead."
+func (w *Watchdog) hasAnyActivity(agent string, inst *domain.AgentInstance, now time.Time) bool {
+	if !w.registry.LastActivityForAgent(agent).IsZero() {
+		return true
+	}
+	if inst != nil && inst.InstanceID != agent {
+		if !w.registry.LastActivityForAgent(inst.InstanceID).IsZero() {
+			return true
+		}
+	}
+	if w.registry.HasActiveSession(agent) {
+		return true
+	}
+	if w.processActivity != nil {
+		procs := w.processActivity.GetProcessInfo()
+		if _, ok := procs[agent]; ok {
+			return true
+		}
+		prefix := agent + "-"
+		for id := range procs {
+			if strings.HasPrefix(id, prefix) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -278,13 +356,13 @@ func (w *Watchdog) check() {
 			if inst.Role == domain.RoleDriver {
 				continue
 			}
-			if inst.LastHeartbeat.IsZero() {
-				continue
-			}
-			if !w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
-				deadInstances[id] = true
-			} else {
+			if w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
 				aliveTypes[inst.AgentType] = true
+			} else if !inst.LastHeartbeat.IsZero() || w.hasAnyActivity(id, inst, now) {
+				// Only mark as dead if the instance has shown SOME sign of life
+				// in the past (non-zero heartbeat, session, or process). Brand-new
+				// instances that haven't had time to register any signal get a pass.
+				deadInstances[id] = true
 			}
 		}
 		// An agent TYPE is only dead if ALL its instances (including task-bound) are dead.
@@ -650,7 +728,7 @@ func (w *Watchdog) checkTaskBoundWorker(state *domain.CollabState, t *domain.Tas
 		for id, proc := range procs {
 			if strings.HasSuffix(id, taskSuffix) {
 				exists = true
-				if now.Sub(proc.LastOutputAt) < w.heartbeatStaleThresh {
+				if now.Sub(proc.LastOutputAt) <= w.heartbeatStaleThresh {
 					return true, true
 				}
 			}
@@ -673,7 +751,8 @@ func findInstanceForAgent(state *domain.CollabState, agent string) *domain.Agent
 }
 
 // pruneStaleSessions removes sessions from the registry whose agents show no
-// recent activity from ANY source: session tool calls, state heartbeats, or presence.
+// recent activity from ANY source checked by isAgentAlive: session tool calls,
+// state heartbeats, or process output (stdout/stderr).
 func (w *Watchdog) pruneStaleSessions() int {
 	pruned := 0
 	now := time.Now()
@@ -785,10 +864,7 @@ type workerActivityInfo struct {
 	snippet     string // sanitized tail of recent output (for SILENT workers)
 }
 
-const (
-	silentThreshold = 2 * time.Minute
-	maxSnippetBytes = 500
-)
+const maxSnippetBytes = 500
 
 // classifyWorkerActivity checks process activity for a worker and returns
 // a classification. Falls back to workerNoProcess when no provider is set
@@ -820,7 +896,7 @@ func (w *Watchdog) classifyWorkerActivity(assignedTo string, now time.Time) work
 		outputBytes: proc.OutputBytes,
 	}
 
-	if sinceOutput < silentThreshold {
+	if sinceOutput < w.processSilentThresh {
 		info.status = workerActive
 	} else {
 		info.status = workerSilent

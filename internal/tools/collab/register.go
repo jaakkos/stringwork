@@ -142,7 +142,7 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider, o.backoffProvider)
 	registerWorkerOutput(s, svc, logger, o.processProvider)
 	registerHeartbeat(s, svc, logger, o.sessionIDRecorder)
-	registerCancelAgent(s, svc, logger, o.canceller)
+	registerCancelAgent(s, svc, logger, o.canceller, o.processProvider)
 
 	// Progress monitoring tools (1)
 	registerReportProgress(s, svc, logger)

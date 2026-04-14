@@ -24,7 +24,7 @@ type WorkerCanceller interface {
 
 // registerCancelAgent registers the cancel_agent tool.
 // canceller is optional; when nil, only soft cancellation (state + messages) is performed.
-func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, canceller WorkerCanceller) {
+func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, canceller WorkerCanceller, pip ProcessInfoProvider) {
 	s.AddTool(
 		mcp.NewTool("cancel_agent",
 			mcp.WithDescription("Cancel a worker agent's current work. Cancels all in-progress tasks for the agent, sends a STOP message, and kills the spawned process if running. Use this when you no longer need the agent's work."),
@@ -150,6 +150,23 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 
 			// Build response
 			var parts []string
+
+			// Warn if the worker was actively producing output when cancelled
+			if pip != nil {
+				procs := pip.GetProcessInfo()
+				prefix := agent + "-"
+				for id, p := range procs {
+					if id == agent || strings.HasPrefix(id, prefix) {
+						if !p.LastOutputAt.IsZero() {
+							age := time.Since(p.LastOutputAt)
+							if age < 30*time.Second {
+								parts = append(parts, fmt.Sprintf("⚠️  worker was actively producing output (last output %s ago, %d bytes total)", age.Round(time.Second), p.OutputBytes))
+							}
+						}
+					}
+				}
+			}
+
 			if len(cancelledTasks) > 0 {
 				taskIDs := make([]string, len(cancelledTasks))
 				for i, id := range cancelledTasks {

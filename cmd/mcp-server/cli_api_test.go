@@ -45,7 +45,8 @@ func setupTestAPI(t *testing.T) (*workerAPI, *app.CollabService) {
 		return nil
 	})
 
-	api := newWorkerAPI(svc, logger)
+	registry := app.NewSessionRegistry()
+	api := newWorkerAPI(svc, registry, logger)
 	return api, svc
 }
 

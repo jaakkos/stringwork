@@ -133,9 +133,10 @@ type WorkerController interface {
 
 // Handler holds dependencies for dashboard HTTP handlers.
 type Handler struct {
-	svc      *app.CollabService
-	registry *app.SessionRegistry
-	workers  WorkerController // optional; nil when no orchestration configured
+	svc                *app.CollabService
+	registry           *app.SessionRegistry
+	workers            WorkerController // optional; nil when no orchestration configured
+	heartbeatThreshold time.Duration    // max age for heartbeat to be "reachable"; 0 = 5min default
 }
 
 // NewHandler creates a dashboard handler.
@@ -153,6 +154,19 @@ type HandlerOption func(*Handler)
 // WithWorkerController sets the WorkerController for the restart-workers endpoint.
 func WithWorkerController(wc WorkerController) HandlerOption {
 	return func(h *Handler) { h.workers = wc }
+}
+
+// WithHeartbeatThreshold sets the reachability threshold for heartbeat age,
+// matching the watchdog's worker_timeout_seconds from config.
+func WithHeartbeatThreshold(d time.Duration) HandlerOption {
+	return func(h *Handler) { h.heartbeatThreshold = d }
+}
+
+func (h *Handler) heartbeatReachableThreshold() time.Duration {
+	if h.heartbeatThreshold > 0 {
+		return h.heartbeatThreshold
+	}
+	return 5 * time.Minute
 }
 
 // RegisterRoutes adds dashboard routes to the given mux.
@@ -407,10 +421,11 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 					a.ProgressAge = relTime(inst.ProgressUpdatedAt, now)
 				}
 			}
+			hbThresh := h.heartbeatReachableThreshold()
 			a.Reachable = a.Connected
 			if !a.Reachable {
 				if inst, ok := state.AgentInstances[name]; ok && inst != nil &&
-					!inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+					!inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < hbThresh {
 					a.Reachable = true
 				}
 				if !a.Reachable && !p.LastSeen.IsZero() && now.Sub(p.LastSeen) < 2*time.Minute &&
@@ -440,7 +455,7 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 				a.ProgressAge = relTime(inst.ProgressUpdatedAt, now)
 			}
 			a.Reachable = a.Connected
-			if !a.Reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+			if !a.Reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < h.heartbeatReachableThreshold() {
 				a.Reachable = true
 			}
 			snap.Agents = append(snap.Agents, a)
@@ -552,7 +567,7 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			reachable := connectedAgents[id]
-			if !reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < 5*time.Minute {
+			if !reachable && !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) < h.heartbeatReachableThreshold() {
 				reachable = true
 			}
 			ws := WorkerSnapshot{

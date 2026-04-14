@@ -62,9 +62,25 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 					if p == nil {
 						continue
 					}
-					isStale := now.Sub(p.LastSeen) > ttl
+					presenceStale := now.Sub(p.LastSeen) > ttl
+					// Check AgentInstance heartbeat as a supplemental signal.
+					// Presence can go stale while the agent actively heartbeats
+					// (e.g. CLI workers that call heartbeat but not set_presence).
+					heartbeatFresh := false
+					if inst := findAgentInstance(state, p.Agent); inst != nil {
+						if !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) <= ttl {
+							heartbeatFresh = true
+						}
+					}
+					// Also check session registry activity
+					sessionFresh := false
+					lastActivity := registry.LastActivityForAgent(p.Agent)
+					if !lastActivity.IsZero() && now.Sub(lastActivity) <= ttl {
+						sessionFresh = true
+					}
+
 					statusStr := p.Status
-					if isStale {
+					if presenceStale && !heartbeatFresh && !sessionFresh {
 						statusStr += " (offline)"
 					}
 					fmt.Fprintf(&buf, "  %s: %s", p.Agent, statusStr)

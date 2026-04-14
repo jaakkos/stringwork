@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -70,7 +71,9 @@ func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *l
 					if len(inst.CurrentTasks) > 0 {
 						tasks = fmt.Sprintf(" (tasks: %v)", inst.CurrentTasks)
 					}
-					result += fmt.Sprintf("  - %s [%s] %s%s, heartbeat: %s\n", id, inst.AgentType, inst.Status, tasks, ago)
+					// Unified liveness verdict: combine heartbeat, session, and process output.
+					verdict := livenessVerdict(id, inst, now, pip)
+					result += fmt.Sprintf("  - %s [%s] %s%s, heartbeat: %s  %s\n", id, inst.AgentType, inst.Status, tasks, ago, verdict)
 
 					// Show agent-level progress
 					if inst.Progress != "" {
@@ -183,4 +186,42 @@ type taskProgressInfo struct {
 	Percent       int
 	SinceProgress string
 	SLAStatus     string
+}
+
+// livenessVerdict returns a short string like "ALIVE (heartbeat 30s ago)" or
+// "DEAD (no signal for 5m12s)" by checking the best available signal.
+func livenessVerdict(id string, inst *domain.AgentInstance, now time.Time, pip ProcessInfoProvider) string {
+	type signal struct {
+		source string
+		age    time.Duration
+	}
+	var best *signal
+
+	if !inst.LastHeartbeat.IsZero() {
+		age := now.Sub(inst.LastHeartbeat)
+		best = &signal{"heartbeat", age}
+	}
+
+	if pip != nil {
+		procs := pip.GetProcessInfo()
+		prefix := id + "-"
+		for pid, p := range procs {
+			if pid == id || strings.HasPrefix(pid, prefix) {
+				if !p.LastOutputAt.IsZero() {
+					age := now.Sub(p.LastOutputAt)
+					if best == nil || age < best.age {
+						best = &signal{"process output", age}
+					}
+				}
+			}
+		}
+	}
+
+	if best == nil {
+		return "[UNKNOWN — no signals]"
+	}
+	if best.age < 2*time.Minute {
+		return fmt.Sprintf("[ALIVE — %s %s ago]", best.source, best.age.Round(time.Second))
+	}
+	return fmt.Sprintf("[UNRESPONSIVE — last signal: %s %s ago]", best.source, best.age.Round(time.Second))
 }

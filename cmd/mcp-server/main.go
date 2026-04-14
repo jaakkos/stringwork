@@ -441,10 +441,13 @@ func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handl
 	if bundle.wm != nil {
 		dashOpts = append(dashOpts, dashboard.WithWorkerController(bundle.wm))
 	}
+	if o := bundle.svc.Policy().Orchestration(); o != nil && o.WorkerTimeoutSeconds > 0 {
+		dashOpts = append(dashOpts, dashboard.WithHeartbeatThreshold(time.Duration(o.WorkerTimeoutSeconds)*time.Second))
+	}
 	dash := dashboard.NewHandler(bundle.svc, bundle.registry, dashOpts...)
 	dash.RegisterRoutes(mux)
 
-	wAPI := newWorkerAPI(bundle.svc, bundle.logger)
+	wAPI := newWorkerAPI(bundle.svc, bundle.registry, bundle.logger)
 	if bundle.wm != nil {
 		wAPI.sessionIDRecorder = bundle.wm
 	}
