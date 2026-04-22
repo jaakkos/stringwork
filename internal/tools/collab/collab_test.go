@@ -359,6 +359,362 @@ func lifecycleExtractTaskID(t *testing.T, resp string) int {
 	return 0
 }
 
+// TestReview_RegisterAgentClaimNext_PhantomAssignment is a regression test
+// that exposes a real production bug discovered while live-driving the
+// stringwork binary end-to-end via raw MCP JSON-RPC over stdio.
+//
+// SCENARIO (reproduces a real install with workers: [] in config):
+//  1. register_agent("claude-code") succeeds (it's not in AgentInstances
+//     yet, so the M1 collision check doesn't reject it; only a
+//     RegisteredAgents row is created — not an AgentInstance).
+//  2. create_task assigned_to="claude-code" succeeds.
+//  3. claim_next agent="claude-code" succeeds: ValidateAgent accepts
+//     the registered name, and the tool flips task.Status to
+//     "in_progress" with task.AssignedTo="claude-code".
+//  4. AddTaskToInstance(state, taskID, "claude-code") then silently
+//     returns because there is no AgentInstance to add to and no
+//     candidate AgentInstance whose AgentType=="claude-code".
+//
+// RESULT: the task is in_progress, AssignedTo="claude-code", but no
+// AgentInstance owns it. The watchdog has nothing to monitor for
+// liveness. report_progress's worker-side heartbeat update silently
+// no-ops because findAgentInstance returns nil. cancel_agent("claude-
+// code") finds nothing in CurrentTasks to clean up. This is the
+// "phantom assignment" failure mode that Commit 9's matrix tests do
+// NOT exercise — they always pre-seed an AgentInstance via
+// seedStaticAndTaskBound.
+//
+// CORRECT BEHAVIOR (asserted by this test): EITHER claim_next must
+// fail with a clear error when no AgentInstance is available to
+// receive ownership, OR claim_next must materialize an AgentInstance
+// for the agent so CurrentTasks can record the claim. A successful
+// claim with no owning instance is never acceptable.
+//
+// Today, this test FAILS — that is the point. It is the user-requested
+// "test that stringwork is not working correctly" and stays in the
+// suite as a real regression net once the underlying bug is fixed.
+func TestReview_RegisterAgentClaimNext_PhantomAssignment(t *testing.T) {
+	repo := newMockRepository()
+	pol := &emptyWorkersPolicy{mockPolicy: newMockPolicy()}
+	logger := log.New(io.Discard, "", 0)
+	svc := app.NewCollabService(repo, pol, logger)
+
+	canceller := &lifecycleCanceller{outputs: map[string]string{}}
+	srv := lifecycleServer(t, svc, logger, canceller)
+
+	if _, err := callTool(t, srv, "register_agent", map[string]any{
+		"name": "claude-code", "registered_by": "cursor",
+		"capabilities": []any{"coding"},
+	}); err != nil {
+		t.Fatalf("register_agent: %v", err)
+	}
+
+	if _, exists := repo.state.AgentInstances["claude-code"]; exists {
+		t.Logf("note: register_agent created an AgentInstance for claude-code (good)")
+	} else {
+		t.Logf("repro point: after register_agent, AgentInstances has no claude-code row; only RegisteredAgents")
+	}
+
+	createRes, err := callTool(t, srv, "create_task", map[string]any{
+		"title": "phantom-assignment-repro", "created_by": "cursor",
+		"assigned_to": "claude-code",
+	})
+	if err != nil {
+		t.Fatalf("create_task: %v", err)
+	}
+	taskID := lifecycleExtractTaskID(t, resultText(t, createRes))
+
+	claimRes, claimErr := callTool(t, srv, "claim_next", map[string]any{
+		"agent": "claude-code",
+	})
+
+	if claimErr != nil {
+		t.Logf("claim_next correctly refused with no AgentInstance available: %v", claimErr)
+		return
+	}
+
+	tk := lifecycleFindTask(t, repo.state, taskID)
+	if tk.Status != "in_progress" {
+		t.Logf("claim_next did not transition task (status=%q); acceptable as long as no phantom claim occurred", tk.Status)
+		return
+	}
+
+	var owner string
+	for id, inst := range repo.state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		for _, tid := range inst.CurrentTasks {
+			if tid == taskID {
+				owner = id
+				break
+			}
+		}
+		if owner != "" {
+			break
+		}
+	}
+
+	if owner == "" {
+		t.Errorf("PHANTOM ASSIGNMENT: claim_next succeeded (response=%q) and set task #%d status=in_progress, AssignedTo=%q, "+
+			"but no AgentInstance owns the task in CurrentTasks. The watchdog has no liveness target, "+
+			"report_progress cannot refresh a heartbeat, and cancel_agent cannot reach a process. "+
+			"AgentInstances at the time of the bad state: %v",
+			resultText(t, claimRes), taskID, tk.AssignedTo, lifecycleInstanceKeys(repo.state))
+	}
+}
+
+// emptyWorkersPolicy mirrors mockPolicy but reports no configured workers,
+// matching a real install whose config.yaml uses `workers: []`. Used to
+// reproduce the phantom-assignment bug where register_agent + claim_next
+// produces a task in_progress with no owning AgentInstance.
+type emptyWorkersPolicy struct{ *mockPolicy }
+
+func (p *emptyWorkersPolicy) Orchestration() *policy.OrchestrationConfig {
+	return &policy.OrchestrationConfig{Driver: "cursor"}
+}
+
+func lifecycleInstanceKeys(state *domain.CollabState) []string {
+	keys := make([]string, 0, len(state.AgentInstances))
+	for id := range state.AgentInstances {
+		keys = append(keys, id)
+	}
+	return keys
+}
+
+// TestReview_StringworkLifecycleStrict is a code-review companion to
+// TestMatrix_StaticPlusTaskBound_FullLifecycle (Commit 9). The matrix
+// test passes today, but its assertions are intentionally narrow — it
+// only checks "no instance owns the task" after handoff and "task is
+// not in_progress" after cancel_agent, leaving several side-effects
+// unverified that a real failure mode could regress silently:
+//
+//   - claim_next: task.Status must flip to "in_progress" and AssignedTo
+//     must be the canonical parent type (not the task-bound ID).
+//   - report_progress: task.ProgressDescription, ProgressPercent, and
+//     LastProgressAt must all advance, and the worker's heartbeat must
+//     refresh.
+//   - handoff: task.AssignedTo must become the recipient's parent type,
+//     task.Status must reset to "pending", and a notification message
+//     must be enqueued from sender to recipient.
+//   - cancel_agent: task.Status must be "cancelled" (not just "not
+//     in_progress"), task.ResultSummary must be populated with the
+//     cancelled-by attribution, the task-bound AgentInstance + Presence
+//     rows must be reaped, the static sibling must be untouched, the
+//     STOP message must be enqueued addressed to the task-bound ID,
+//     and the canceller's CancelWorker must have been called for the
+//     task-bound process.
+//
+// If any of these tighter assertions fails, the matrix lifecycle test
+// is hiding a real regression behind its narrower asserts.
+func TestReview_StringworkLifecycleStrict(t *testing.T) {
+	const parentType = "claude-code"
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	canceller := &lifecycleCanceller{outputs: map[string]string{}}
+	srv := lifecycleServer(t, svc, logger, canceller)
+
+	_ = svc.Run(func(state *domain.CollabState) error {
+		state.AgentInstances[parentType] = &domain.AgentInstance{
+			InstanceID: parentType, AgentType: parentType,
+			Role: domain.RoleWorker, Status: "idle", MaxTasks: 1,
+			CurrentTasks: []int{}, LastHeartbeat: time.Now(),
+		}
+		state.AgentInstances["cursor"] = &domain.AgentInstance{
+			InstanceID: "cursor", AgentType: "cursor",
+			Role: domain.RoleDriver, Status: "idle",
+		}
+		return nil
+	})
+
+	createRes, err := callTool(t, srv, "create_task", map[string]any{
+		"title": "review-strict", "created_by": "cursor", "assigned_to": parentType,
+	})
+	if err != nil {
+		t.Fatalf("create_task: %v", err)
+	}
+	taskID := lifecycleExtractTaskID(t, resultText(t, createRes))
+
+	seedStaticAndTaskBound(t, repo.state, parentType, taskID)
+	taskBoundID := fmt.Sprintf("%s-task-%d", parentType, taskID)
+
+	_ = svc.Run(func(state *domain.CollabState) error {
+		inst := state.AgentInstances[taskBoundID]
+		inst.CurrentTasks = []int{}
+		inst.Status = "idle"
+		for i := range state.Tasks {
+			if state.Tasks[i].ID == taskID {
+				state.Tasks[i].Status = "pending"
+				state.Tasks[i].AssignedTo = parentType
+			}
+		}
+		return nil
+	})
+
+	t.Run("claim_next_assertions", func(t *testing.T) {
+		if _, err := callTool(t, srv, "claim_next", map[string]any{
+			"agent": taskBoundID,
+		}); err != nil {
+			t.Fatalf("claim_next: %v", err)
+		}
+		tk := lifecycleFindTask(t, repo.state, taskID)
+		if tk.Status != "in_progress" {
+			t.Errorf("post-claim task.Status = %q, want \"in_progress\"", tk.Status)
+		}
+		if tk.AssignedTo != parentType {
+			t.Errorf("post-claim task.AssignedTo = %q, want canonical %q (not the task-bound ID)", tk.AssignedTo, parentType)
+		}
+	})
+
+	t.Run("report_progress_assertions", func(t *testing.T) {
+		preHB := repo.state.AgentInstances[taskBoundID].LastHeartbeat
+		time.Sleep(2 * time.Millisecond)
+		if _, err := callTool(t, srv, "report_progress", map[string]any{
+			"agent": taskBoundID, "task_id": taskID,
+			"description": "halfway through", "percent_complete": 42,
+		}); err != nil {
+			t.Fatalf("report_progress: %v", err)
+		}
+		tk := lifecycleFindTask(t, repo.state, taskID)
+		if tk.ProgressDescription != "halfway through" {
+			t.Errorf("ProgressDescription = %q, want %q", tk.ProgressDescription, "halfway through")
+		}
+		if tk.ProgressPercent != 42 {
+			t.Errorf("ProgressPercent = %d, want 42", tk.ProgressPercent)
+		}
+		if tk.LastProgressAt.IsZero() {
+			t.Error("LastProgressAt should have been set")
+		}
+		if !repo.state.AgentInstances[taskBoundID].LastHeartbeat.After(preHB) {
+			t.Errorf("worker heartbeat did not advance: pre=%v post=%v",
+				preHB, repo.state.AgentInstances[taskBoundID].LastHeartbeat)
+		}
+	})
+
+	t.Run("handoff_assertions", func(t *testing.T) {
+		preMsgCount := len(repo.state.Messages)
+		if _, err := callTool(t, srv, "handoff", map[string]any{
+			"from": taskBoundID, "to": "cursor", "task_id": taskID,
+			"summary": "did some work", "next_steps": "pls review",
+		}); err != nil {
+			t.Fatalf("handoff: %v", err)
+		}
+		tk := lifecycleFindTask(t, repo.state, taskID)
+		if tk.AssignedTo != "cursor" {
+			t.Errorf("post-handoff task.AssignedTo = %q, want \"cursor\"", tk.AssignedTo)
+		}
+		if tk.Status != "pending" {
+			t.Errorf("post-handoff task.Status = %q, want \"pending\"", tk.Status)
+		}
+
+		var found *domain.Message
+		for i := preMsgCount; i < len(repo.state.Messages); i++ {
+			m := &repo.state.Messages[i]
+			if m.From == taskBoundID && m.To == "cursor" && strings.Contains(m.Content, "Handoff") {
+				found = m
+				break
+			}
+		}
+		if found == nil {
+			t.Errorf("expected handoff message from %q to \"cursor\"; got %d new messages, none matched",
+				taskBoundID, len(repo.state.Messages)-preMsgCount)
+		} else {
+			if !strings.Contains(found.Content, "did some work") {
+				t.Errorf("handoff message missing summary; got %q", found.Content)
+			}
+			if !strings.Contains(found.Content, "pls review") {
+				t.Errorf("handoff message missing next_steps; got %q", found.Content)
+			}
+		}
+	})
+
+	_ = svc.Run(func(state *domain.CollabState) error {
+		for i := range state.Tasks {
+			if state.Tasks[i].ID == taskID {
+				state.Tasks[i].Status = "in_progress"
+				state.Tasks[i].AssignedTo = parentType
+			}
+		}
+		app.AddTaskToInstance(state, taskID, taskBoundID)
+		return nil
+	})
+
+	t.Run("cancel_agent_assertions", func(t *testing.T) {
+		preStaticHB := repo.state.AgentInstances[parentType].LastHeartbeat
+		preStaticStatus := repo.state.AgentInstances[parentType].Status
+		preMsgCount := len(repo.state.Messages)
+
+		if _, err := callTool(t, srv, "cancel_agent", map[string]any{
+			"agent": taskBoundID, "cancelled_by": "cursor", "reason": "review cancel",
+		}); err != nil {
+			t.Fatalf("cancel_agent: %v", err)
+		}
+
+		tk := lifecycleFindTask(t, repo.state, taskID)
+		if tk.Status != "cancelled" {
+			t.Errorf("post-cancel task.Status = %q, want \"cancelled\"", tk.Status)
+		}
+		if !strings.Contains(tk.ResultSummary, "cursor") {
+			t.Errorf("post-cancel task.ResultSummary = %q, want it to mention canceller \"cursor\"", tk.ResultSummary)
+		}
+		if !strings.Contains(tk.ResultSummary, "review cancel") {
+			t.Errorf("post-cancel task.ResultSummary = %q, want it to include reason \"review cancel\"", tk.ResultSummary)
+		}
+
+		if _, exists := repo.state.AgentInstances[taskBoundID]; exists {
+			t.Errorf("task-bound AgentInstance %q should have been reaped", taskBoundID)
+		}
+		if _, exists := repo.state.Presence[taskBoundID]; exists {
+			t.Errorf("task-bound Presence %q should have been reaped", taskBoundID)
+		}
+
+		static := repo.state.AgentInstances[parentType]
+		if static == nil {
+			t.Fatalf("static sibling %q must NOT be reaped", parentType)
+		}
+		if static.LastHeartbeat != preStaticHB {
+			t.Errorf("static sibling heartbeat changed (pre=%v, post=%v); cancel of task-bound must not touch sibling",
+				preStaticHB, static.LastHeartbeat)
+		}
+		_ = preStaticStatus
+
+		var stop *domain.Message
+		for i := preMsgCount; i < len(repo.state.Messages); i++ {
+			m := &repo.state.Messages[i]
+			if m.From == "system" && m.To == taskBoundID && strings.Contains(m.Content, "STOP") {
+				stop = m
+				break
+			}
+		}
+		if stop == nil {
+			t.Errorf("expected STOP system message addressed to task-bound %q; %d new messages found, none matched",
+				taskBoundID, len(repo.state.Messages)-preMsgCount)
+		}
+
+		killed := false
+		for _, id := range canceller.cancels {
+			if id == taskBoundID {
+				killed = true
+				break
+			}
+		}
+		if !killed {
+			t.Errorf("CancelWorker(%q) was never called; canceller.cancels=%v", taskBoundID, canceller.cancels)
+		}
+	})
+}
+
+func lifecycleFindTask(t *testing.T, state *domain.CollabState, id int) *domain.Task {
+	t.Helper()
+	for i := range state.Tasks {
+		if state.Tasks[i].ID == id {
+			return &state.Tasks[i]
+		}
+	}
+	t.Fatalf("task #%d not found", id)
+	return nil
+}
+
 func lifecycleAssertSingleOwner(t *testing.T, state *domain.CollabState, taskID int, label string) {
 	t.Helper()
 	owners := []string{}
