@@ -444,6 +444,12 @@ func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handl
 	if bundle.wm != nil {
 		dashOpts = append(dashOpts, dashboard.WithWorkerController(bundle.wm))
 	}
+	if bundle.watchdog != nil {
+		dashOpts = append(dashOpts, dashboard.WithGCStatsProvider(bundle.watchdog))
+	}
+	if bundle.logger != nil {
+		dashOpts = append(dashOpts, dashboard.WithLogger(bundle.logger))
+	}
 	if o := bundle.svc.Policy().Orchestration(); o != nil && o.WorkerTimeoutSeconds > 0 {
 		dashOpts = append(dashOpts, dashboard.WithHeartbeatThreshold(time.Duration(o.WorkerTimeoutSeconds)*time.Second))
 	}
@@ -576,15 +582,28 @@ func setupLogger(logFilePath string) *log.Logger {
 	return log.New(io.MultiWriter(writers...), "[mcp-pair] ", log.LstdFlags|log.Lshortfile)
 }
 
-// loadConfig loads policy configuration from MCP_CONFIG or defaults.
+// loadConfig loads policy configuration from MCP_CONFIG, falling back to
+// ~/.config/stringwork/config.yaml when present, and finally to compiled-in
+// defaults. The auto-discovery step matters because bare invocations like
+// `mcp-stringwork --daemon` (or admin CLI subcommands) have no MCP launcher
+// to pass MCP_CONFIG in their environment, but should still honour the same
+// config file the install scripts and dashboard documentation reference.
 func loadConfig(logger *log.Logger) *policy.Config {
 	cfg := policy.DefaultConfig()
-	if configPath := os.Getenv("MCP_CONFIG"); configPath != "" {
-		var err error
-		cfg, err = policy.LoadConfig(configPath)
+	configPath := os.Getenv("MCP_CONFIG")
+	if configPath == "" {
+		if defaultPath := policy.DefaultConfigFile(); defaultPath != "" {
+			if _, err := os.Stat(defaultPath); err == nil {
+				configPath = defaultPath
+			}
+		}
+	}
+	if configPath != "" {
+		loaded, err := policy.LoadConfig(configPath)
 		if err != nil {
 			logger.Printf("Warning: failed to load config %s: %v, using defaults", configPath, err)
-			cfg = policy.DefaultConfig()
+		} else {
+			cfg = loaded
 		}
 	}
 	if cfg.WorkspaceRoot == "" {

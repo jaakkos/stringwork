@@ -25,6 +25,15 @@ func GlobalStateFile() string {
 	return filepath.Join(GlobalStateDir(), "state.sqlite")
 }
 
+// DefaultConfigFile returns the conventional config-file path
+// (~/.config/stringwork/config.yaml). Used as the auto-discovery fallback
+// when MCP_CONFIG isn't set in the environment, so that bare invocations like
+// `mcp-stringwork --daemon` honour the user's config file the same way
+// MCP-launched stdio invocations do.
+func DefaultConfigFile() string {
+	return filepath.Join(GlobalStateDir(), "config.yaml")
+}
+
 // DefaultSocketPath returns the default unix socket path for daemon communication.
 // Useful for CLI commands that don't load the full config.
 func DefaultSocketPath() string {
