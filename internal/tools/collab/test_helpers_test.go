@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/domain"
 )
 
 // testServer creates a MCPServer with all tools registered for testing.
@@ -90,4 +92,95 @@ func resultText(t *testing.T, result *mcp.CallToolResult) string {
 	}
 	t.Fatal("no text content in result")
 	return ""
+}
+
+// seedStaticAndTaskBound seeds the coexistence pattern that exposes most of
+// the deep-review findings: a static pool instance (the parent agentType
+// itself, e.g. "claude-code") AND a task-bound child instance
+// ("claude-code-task-N") for the same parent agent type. The static row
+// owns no tasks and is idle; the task-bound row owns taskID and is busy.
+//
+// Both instances share AgentType=agentType — that's the critical detail
+// that triggers the parent-type-vs-instance-id bugs. Tests can override
+// any field after the helper returns.
+//
+// The agent type is registered in RegisteredAgents so ValidateAgent and
+// ResolveParentAgentType resolve cleanly.
+func seedStaticAndTaskBound(t *testing.T, state *domain.CollabState, agentType string, taskID int) (staticID, taskBoundID string) {
+	t.Helper()
+	if state == nil {
+		t.Fatal("seedStaticAndTaskBound: state is nil")
+	}
+	if state.RegisteredAgents == nil {
+		state.RegisteredAgents = make(map[string]*domain.RegisteredAgent)
+	}
+	if _, ok := state.RegisteredAgents[agentType]; !ok {
+		state.RegisteredAgents[agentType] = &domain.RegisteredAgent{
+			Name:         agentType,
+			RegisteredAt: time.Now(),
+			LastSeen:     time.Now(),
+		}
+	}
+	if state.AgentInstances == nil {
+		state.AgentInstances = make(map[string]*domain.AgentInstance)
+	}
+	staticID = agentType
+	taskBoundID = fmt.Sprintf("%s-task-%d", agentType, taskID)
+	now := time.Now()
+	state.AgentInstances[staticID] = &domain.AgentInstance{
+		InstanceID:    staticID,
+		AgentType:     agentType,
+		Role:          domain.RoleWorker,
+		Status:        "idle",
+		MaxTasks:      1,
+		CurrentTasks:  []int{},
+		LastHeartbeat: now,
+	}
+	state.AgentInstances[taskBoundID] = &domain.AgentInstance{
+		InstanceID:    taskBoundID,
+		AgentType:     agentType,
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		MaxTasks:      1,
+		CurrentTasks:  []int{taskID},
+		LastHeartbeat: now,
+	}
+	return staticID, taskBoundID
+}
+
+// seedDeadAgent seeds a single AgentInstance whose LastHeartbeat is in the
+// past by lastHeartbeatAgo. The instance is registered in RegisteredAgents
+// and marked offline. Used to test watchdog dead-agent recovery, session
+// fallback heartbeat broadcast, and piggyback liveness gates.
+//
+// Returns the seeded instance ID (== agentType, since it represents the
+// canonical static-pool row).
+func seedDeadAgent(t *testing.T, state *domain.CollabState, agentType string, lastHeartbeatAgo time.Duration) string {
+	t.Helper()
+	if state == nil {
+		t.Fatal("seedDeadAgent: state is nil")
+	}
+	if state.RegisteredAgents == nil {
+		state.RegisteredAgents = make(map[string]*domain.RegisteredAgent)
+	}
+	if _, ok := state.RegisteredAgents[agentType]; !ok {
+		state.RegisteredAgents[agentType] = &domain.RegisteredAgent{
+			Name:         agentType,
+			RegisteredAt: time.Now().Add(-2 * lastHeartbeatAgo),
+			LastSeen:     time.Now().Add(-lastHeartbeatAgo),
+		}
+	}
+	if state.AgentInstances == nil {
+		state.AgentInstances = make(map[string]*domain.AgentInstance)
+	}
+	state.AgentInstances[agentType] = &domain.AgentInstance{
+		InstanceID:    agentType,
+		AgentType:     agentType,
+		Role:          domain.RoleWorker,
+		Status:        "offline",
+		MaxTasks:      1,
+		CurrentTasks:  []int{},
+		LastHeartbeat: time.Now().Add(-lastHeartbeatAgo),
+	}
+	return agentType
 }
