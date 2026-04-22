@@ -32,6 +32,17 @@ func runDaemon(bundle *serverBundle) {
 		bundle.logger.Fatalf("Daemon socket cleanup: %v", err)
 	}
 
+	// Create the tracker and wire MCP session callbacks BEFORE the HTTP
+	// listener starts accepting, so any Streamable HTTP client that
+	// connects is counted from the moment its session is registered.
+	// Historically only unix-socket connections were tracked, which meant
+	// a TCP-direct MCP driver could be actively using the daemon while an
+	// unrelated transient unix probe flipped the counter 0→1→0 and tripped
+	// the grace timer, silently shutting the daemon down mid-session.
+	tracker := newDriverTracker(time.Duration(graceSecs)*time.Second, bundle.logger)
+	bundle.onMCPSessionOpen = tracker.mcpSessionConnected
+	bundle.onMCPSessionClose = tracker.mcpSessionDisconnected
+
 	baseURL, handler, httpShutdown := setupAndServeHTTP(bundle)
 	bundle.logger.Printf("Daemon: TCP server ready at %s", baseURL)
 
@@ -43,9 +54,6 @@ func runDaemon(bundle *serverBundle) {
 		bundle.logger.Printf("Warning: chmod socket: %v", err)
 	}
 
-	// Track driver connections via unix socket connection lifecycle.
-	// All unix socket connections come from proxy processes; TCP is for workers.
-	tracker := newDriverTracker(time.Duration(graceSecs)*time.Second, bundle.logger)
 	trackingLn := &connTrackingListener{
 		Listener:     unixLn,
 		onConnect:    tracker.driverConnected,
@@ -114,10 +122,29 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-// driverTracker counts connected driver proxies and triggers shutdown when
-// the last one disconnects after a grace period.
+// driverTracker counts connected drivers and triggers shutdown when the last
+// one disconnects after a grace period. A "driver" is any client that the
+// daemon should stay alive for:
+//
+//   - Unix-socket connections (tracked via driverConnected / driverDisconnected)
+//     — these are typically proxy processes spawned by CLI drivers.
+//   - MCP client sessions (tracked via mcpSessionConnected /
+//     mcpSessionDisconnected) — these are drivers that talk to the daemon's
+//     Streamable HTTP endpoint directly over TCP, without going through a
+//     unix-socket proxy (e.g. an IDE MCP client pointing at http://localhost:8943/mcp,
+//     or the end-to-end lifecycle test).
+//
+// The grace period starts only once BOTH counters drop to zero. Reconnecting
+// on either channel cancels a pending grace period.
+//
+// Previously only unix connections were counted, which meant a TCP-direct
+// driver could be actively using the daemon while a transient unix probe
+// (e.g. `isDaemonRunning` during startup) toggled the unix count 0→1→0 and
+// tripped the grace timer, silently shutting the daemon down out from under
+// the still-connected MCP client.
 type driverTracker struct {
-	count      atomic.Int64
+	unixCount  atomic.Int64
+	mcpCount   atomic.Int64
 	grace      time.Duration
 	logger     interface{ Printf(string, ...any) }
 	ctx        context.Context
@@ -140,31 +167,64 @@ func newDriverTracker(grace time.Duration, logger interface{ Printf(string, ...a
 }
 
 func (dt *driverTracker) driverConnected() {
-	n := dt.count.Add(1)
-	dt.logger.Printf("Daemon: driver connection opened (count=%d)", n)
-	dt.mu.Lock()
-	if dt.graceTimer != nil {
-		dt.graceTimer.Stop()
-		dt.graceTimer = nil
-		dt.logger.Printf("Daemon: grace period cancelled")
-	}
-	dt.mu.Unlock()
+	n := dt.unixCount.Add(1)
+	dt.logger.Printf("Daemon: driver connection opened (unix=%d, mcp=%d)", n, dt.mcpCount.Load())
+	dt.cancelGraceLocked("unix driver connected")
 }
 
 func (dt *driverTracker) driverDisconnected() {
-	n := dt.count.Add(-1)
-	dt.logger.Printf("Daemon: driver connection closed (count=%d)", n)
-	if n <= 0 {
-		dt.mu.Lock()
-		if dt.graceTimer == nil {
-			dt.graceTimer = time.AfterFunc(dt.grace, func() {
-				dt.logger.Printf("Daemon: grace period expired, signaling shutdown")
-				dt.doneOnce.Do(func() { close(dt.doneCh) })
-			})
-			dt.logger.Printf("Daemon: grace period started (%s)", dt.grace)
-		}
-		dt.mu.Unlock()
+	n := dt.unixCount.Add(-1)
+	dt.logger.Printf("Daemon: driver connection closed (unix=%d, mcp=%d)", n, dt.mcpCount.Load())
+	dt.maybeStartGrace()
+}
+
+// mcpSessionConnected notifies the tracker that a Streamable HTTP MCP
+// session has been registered. Call this from the mcp-go BeforeInitialize
+// hook.
+func (dt *driverTracker) mcpSessionConnected() {
+	n := dt.mcpCount.Add(1)
+	dt.logger.Printf("Daemon: MCP session opened (unix=%d, mcp=%d)", dt.unixCount.Load(), n)
+	dt.cancelGraceLocked("mcp session connected")
+}
+
+// mcpSessionDisconnected notifies the tracker that a Streamable HTTP MCP
+// session has ended. Call this from the mcp-go OnUnregisterSession hook.
+func (dt *driverTracker) mcpSessionDisconnected() {
+	n := dt.mcpCount.Add(-1)
+	dt.logger.Printf("Daemon: MCP session closed (unix=%d, mcp=%d)", dt.unixCount.Load(), n)
+	dt.maybeStartGrace()
+}
+
+// cancelGraceLocked stops any pending grace-period timer. Safe to call even
+// when no timer is scheduled.
+func (dt *driverTracker) cancelGraceLocked(reason string) {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.graceTimer != nil {
+		dt.graceTimer.Stop()
+		dt.graceTimer = nil
+		dt.logger.Printf("Daemon: grace period cancelled (%s)", reason)
 	}
+}
+
+// maybeStartGrace starts the grace timer iff both counters are at or below
+// zero and no timer is currently scheduled. It tolerates being called after
+// a spurious extra "disconnected" (which would push a counter negative) by
+// gating on <=0 rather than ==0.
+func (dt *driverTracker) maybeStartGrace() {
+	if dt.unixCount.Load() > 0 || dt.mcpCount.Load() > 0 {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.graceTimer != nil {
+		return
+	}
+	dt.graceTimer = time.AfterFunc(dt.grace, func() {
+		dt.logger.Printf("Daemon: grace period expired, signaling shutdown")
+		dt.doneOnce.Do(func() { close(dt.doneCh) })
+	})
+	dt.logger.Printf("Daemon: grace period started (%s)", dt.grace)
 }
 
 func (dt *driverTracker) done() <-chan struct{} {

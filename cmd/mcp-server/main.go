@@ -47,6 +47,14 @@ type serverBundle struct {
 	watchdog  *app.Watchdog
 	cleanup   func()
 	ctx       context.Context // cancelled on SIGINT/SIGTERM
+
+	// onMCPSessionOpen / onMCPSessionClose are optional callbacks invoked by
+	// the MCP BeforeInitialize / OnUnregisterSession hooks. The daemon wires
+	// these to the driverTracker so a TCP-direct MCP client (no unix proxy)
+	// still counts as an active driver. Set before the HTTP listener starts
+	// accepting connections.
+	onMCPSessionOpen  func()
+	onMCPSessionClose func()
 }
 
 func main() {
@@ -180,6 +188,12 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	registry := app.NewSessionRegistry()
 	sessions := newSessionStore()
 
+	// Declare the bundle up front so the MCP lifecycle hooks below can
+	// close over its pointer and observe callbacks that are set later
+	// (by runDaemon / runHTTP / runStdio) — e.g. the daemon's
+	// driverTracker callbacks, wired before the HTTP listener accepts.
+	bundle := &serverBundle{}
+
 	hooks := &server.Hooks{}
 	hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result any) {
 		if message != nil {
@@ -197,12 +211,18 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		} else {
 			logger.Printf("Client session unregistered: %s", sid)
 		}
+		if cb := bundle.onMCPSessionClose; cb != nil {
+			cb()
+		}
 	})
 
 	hooks.AddBeforeInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest) {
 		if session := server.ClientSessionFromContext(ctx); session != nil {
 			sessions.set(session.SessionID(), session)
 			logger.Printf("Client session registered: %s", session.SessionID())
+		}
+		if cb := bundle.onMCPSessionOpen; cb != nil {
+			cb()
 		}
 		if message != nil {
 			ci := message.Params.ClientInfo
@@ -332,6 +352,12 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		wm.SetSessionChecker(func(instanceOrType string) bool {
 			return registry.HasActiveSession(instanceOrType)
 		})
+		// Route CLI-mode workers to THIS daemon's socket (not whatever the
+		// global default happens to be on the machine). Without this, a
+		// developer running two daemons — e.g. their personal one plus a
+		// test daemon — would have the test's workers accidentally dial
+		// back into the personal daemon and get "unknown agent" errors.
+		wm.SetSocketPath(pol.SocketPath())
 		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
 			var entries []app.MCPServerEntry
 			for name, sc := range mcpCfg {
@@ -416,21 +442,20 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		}
 	}
 
-	return &serverBundle{
-		mcpServer: mcpServer,
-		cfg:       cfg,
-		pol:       pol,
-		logger:    logger,
-		registry:  registry,
-		sessions:  sessions,
-		hooks:     hooks,
-		svc:       svc,
-		wm:        wm,
-		notifier:  notifier,
-		watchdog:  watchdog,
-		cleanup:   cleanupFunc,
-		ctx:       ctx,
-	}
+	bundle.mcpServer = mcpServer
+	bundle.cfg = cfg
+	bundle.pol = pol
+	bundle.logger = logger
+	bundle.registry = registry
+	bundle.sessions = sessions
+	bundle.hooks = hooks
+	bundle.svc = svc
+	bundle.wm = wm
+	bundle.notifier = notifier
+	bundle.watchdog = watchdog
+	bundle.cleanup = cleanupFunc
+	bundle.ctx = ctx
+	return bundle
 }
 
 // buildHTTPHandler creates the HTTP handler with all routes (MCP, SSE, dashboard, health, auth).

@@ -1984,3 +1984,86 @@ func TestNewWorkerManager_PropagatesModel(t *testing.T) {
 		}
 	}
 }
+
+// effectiveEnv parses a slice produced by buildWorkerEnv and returns the value
+// the child process would actually observe for key. Go's env map is built with
+// "first occurrence wins", so when the same key appears twice the earlier
+// entry (typically inherited from the parent) overrides any later entry (such
+// as an override the daemon intended to inject for the worker).
+func effectiveEnv(env []string, key string) string {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return strings.TrimPrefix(e, prefix)
+		}
+	}
+	return ""
+}
+
+// TestBuildWorkerEnv_StringworkEnvOverrideWinsAgainstParent is a regression
+// test for a real bug we hit while writing the end-to-end lifecycle test:
+//
+// If the parent process already has STRINGWORK_SOCKET (or STRINGWORK_AGENT,
+// STRINGWORK_WORKSPACE, STRINGWORK_BIN) set — which is ALWAYS the case on a
+// developer machine running the daemon out of `~/.config/stringwork/` —
+// buildWorkerEnv used to append its own value instead of replacing the
+// inherited one. Go's env map resolves duplicates "first occurrence wins",
+// so the parent's value silently won and the spawned worker talked to the
+// wrong daemon.
+//
+// The symptom in the wild: on a dev machine with a running daemon on the
+// default socket, running a second daemon (e.g. the e2e test) and spawning a
+// CLI worker through it would route the worker's heartbeat calls to the
+// FIRST daemon, which replied "unknown agent" because it didn't know about
+// the test daemon's tasks. Very hard to diagnose because everything looks
+// correct in logs on both sides.
+//
+// The fix is to have buildWorkerEnv use setEnvVar (replace-or-append) for
+// every var it owns, so the daemon's intent is authoritative.
+func TestBuildWorkerEnv_StringworkEnvOverrideWinsAgainstParent(t *testing.T) {
+	t.Setenv("STRINGWORK_SOCKET", "/parent/should/not/leak.sock")
+	t.Setenv("STRINGWORK_AGENT", "parent-agent")
+	t.Setenv("STRINGWORK_WORKSPACE", "/parent/workspace")
+	t.Setenv("STRINGWORK_BIN", "/parent/bin/mcp-stringwork")
+
+	c := WorkerSpawnConfig{
+		InstanceID:    "claude-code-task-42",
+		AgentType:     "claude-code",
+		Communication: "cli",
+	}
+	env := buildWorkerEnv(c, "/daemon/workspace", "/daemon/server.sock")
+
+	if got := effectiveEnv(env, "STRINGWORK_AGENT"); got != "claude-code-task-42" {
+		t.Errorf("STRINGWORK_AGENT: parent leak — got %q, want %q", got, "claude-code-task-42")
+	}
+	if got := effectiveEnv(env, "STRINGWORK_WORKSPACE"); got != "/daemon/workspace" {
+		t.Errorf("STRINGWORK_WORKSPACE: parent leak — got %q, want %q", got, "/daemon/workspace")
+	}
+	// The daemon passed "/daemon/server.sock" explicitly — that exact
+	// value must be what the child sees, not the parent's leaked one.
+	if got := effectiveEnv(env, "STRINGWORK_SOCKET"); got != "/daemon/server.sock" {
+		t.Errorf("STRINGWORK_SOCKET: got %q, want %q", got, "/daemon/server.sock")
+	}
+	// STRINGWORK_BIN should point at the current executable, not whatever
+	// the parent had. We can't assert the exact path portably, but it
+	// must not equal the parent's intentionally-wrong value.
+	if got := effectiveEnv(env, "STRINGWORK_BIN"); got == "/parent/bin/mcp-stringwork" {
+		t.Errorf("STRINGWORK_BIN: parent value leaked through — got %q", got)
+	}
+
+	// Double-check: the daemon's intended values must be present exactly
+	// once in the slice. Duplicates (the old broken behavior) mean the
+	// child could read different values depending on whether it uses
+	// Go's first-wins map or a last-wins enumerator (some tools do).
+	counts := map[string]int{}
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			counts[k]++
+		}
+	}
+	for _, key := range []string{"STRINGWORK_AGENT", "STRINGWORK_WORKSPACE", "STRINGWORK_SOCKET", "STRINGWORK_BIN"} {
+		if counts[key] > 1 {
+			t.Errorf("%s appears %d times in worker env; must be exactly 1 so no enumerator sees the parent's value", key, counts[key])
+		}
+	}
+}

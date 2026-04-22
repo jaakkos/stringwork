@@ -12,7 +12,7 @@ func TestBuildWorkerEnv_DefaultInheritsAll(t *testing.T) {
 		AgentType:  "claude-code",
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 
 	// Should contain all parent env vars + STRINGWORK_AGENT + STRINGWORK_WORKSPACE
 	envMap := envToMap(env)
@@ -40,7 +40,7 @@ func TestBuildWorkerEnv_InheritNone(t *testing.T) {
 		InheritEnv: []string{"none"},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	// Should only have STRINGWORK_AGENT and STRINGWORK_WORKSPACE
@@ -73,7 +73,7 @@ func TestBuildWorkerEnv_InheritPatterns(t *testing.T) {
 		InheritEnv: []string{"TEST_GH_*", "TEST_GITHUB_*"},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	if envMap["TEST_GH_TOKEN"] != "ghp_test123" {
@@ -101,7 +101,7 @@ func TestBuildWorkerEnv_CustomEnvVars(t *testing.T) {
 		},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	if envMap["CUSTOM_VAR"] != "custom_value" {
@@ -125,7 +125,7 @@ func TestBuildWorkerEnv_EnvExpansion(t *testing.T) {
 		},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	if envMap["DERIVED"] != "expanded_value" {
@@ -148,7 +148,7 @@ func TestBuildWorkerEnv_EnvOverridesInherited(t *testing.T) {
 		},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	if envMap["TEST_OVERRIDE_ME"] != "overridden" {
@@ -167,7 +167,7 @@ func TestBuildWorkerEnv_MissingExpansionEmpty(t *testing.T) {
 		},
 	}
 
-	env := buildWorkerEnv(c, "/tmp/workspace")
+	env := buildWorkerEnv(c, "/tmp/workspace", "")
 	envMap := envToMap(env)
 
 	if envMap["MISSING"] != "" {

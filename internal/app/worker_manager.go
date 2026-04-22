@@ -106,6 +106,11 @@ type WorkerManager struct {
 	// via heartbeat. Preserved across restarts so the respawned process can resume
 	// the previous CLI session instead of starting fresh.
 	lastSessionID map[string]string
+	// socketPath is the unix socket path that CLI-mode workers should dial
+	// back on. When empty, falls back to policy.DefaultSocketPath(). The
+	// daemon sets this explicitly so workers hit THIS daemon, not whichever
+	// one happens to own the default path on the machine.
+	socketPath string
 }
 
 // ProcessInfo holds runtime process metadata for a worker instance.
@@ -236,6 +241,29 @@ func (m *WorkerManager) SetMCPServerURL(url string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mcpServerURL = strings.TrimSuffix(url, "/")
+}
+
+// SetSocketPath sets the unix socket path that CLI-mode workers should use
+// to dial back. When unset, buildWorkerEnv falls back to
+// policy.DefaultSocketPath(); the daemon should always call this with its
+// configured socket path so that CLI workers reach THIS daemon even when
+// another one happens to own the default socket (as is typical on a dev
+// machine).
+func (m *WorkerManager) SetSocketPath(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.socketPath = path
+}
+
+// socketPathForWorker returns the unix socket path to hand to a freshly
+// spawned CLI worker. Falls back to the default when unset.
+func (m *WorkerManager) socketPathForWorker() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.socketPath != "" {
+		return m.socketPath
+	}
+	return policy.DefaultSocketPath()
 }
 
 // GetProcessInfo returns process activity info for all running workers.
@@ -1246,7 +1274,15 @@ func (m *WorkerManager) sendTerminalFailureAck(instanceID string, info workerErr
 //  1. Base: inherited from parent process (filtered by InheritEnv patterns if set)
 //  2. STRINGWORK_AGENT and STRINGWORK_WORKSPACE always injected
 //  3. Config env vars merged on top (with ${VAR} expansion from parent env)
-func buildWorkerEnv(c WorkerSpawnConfig, workspaceDir string) []string {
+//
+// buildWorkerEnv builds the environment slice for a worker process.
+//
+// socketPath is the unix-socket the worker's CLI subcommands should dial
+// back on. When empty, it falls back to policy.DefaultSocketPath(); callers
+// that have a configured daemon socket (like the running daemon itself)
+// should always pass it explicitly so workers reach THIS daemon and not
+// whichever one happens to own the default socket on the machine.
+func buildWorkerEnv(c WorkerSpawnConfig, workspaceDir string, socketPath string) []string {
 	parentEnv := os.Environ()
 	parentMap := make(map[string]string, len(parentEnv))
 	for _, e := range parentEnv {
@@ -1278,14 +1314,23 @@ func buildWorkerEnv(c WorkerSpawnConfig, workspaceDir string) []string {
 		base = append([]string(nil), parentEnv...)
 	}
 
-	// Always inject our own vars
-	base = append(base, "STRINGWORK_AGENT="+c.InstanceID, "STRINGWORK_WORKSPACE="+workspaceDir)
+	// Always inject our own vars. Use setEnvVar (replace-or-append) instead
+	// of plain append: if the parent already has any of these set — very
+	// common on a dev machine whose shell has STRINGWORK_SOCKET pointing at
+	// the user's daemon — a plain append leaves TWO entries in the slice.
+	// Go's env map is "first occurrence wins", so the parent's value would
+	// silently defeat the daemon's intent and the worker would dial the
+	// wrong server.
+	base = setEnvVar(base, "STRINGWORK_AGENT", c.InstanceID)
+	base = setEnvVar(base, "STRINGWORK_WORKSPACE", workspaceDir)
 
 	if c.Communication != "mcp" {
-		socketPath := policy.DefaultSocketPath()
-		base = append(base, "STRINGWORK_SOCKET="+socketPath)
+		if socketPath == "" {
+			socketPath = policy.DefaultSocketPath()
+		}
+		base = setEnvVar(base, "STRINGWORK_SOCKET", socketPath)
 		if binPath, err := os.Executable(); err == nil {
-			base = append(base, "STRINGWORK_BIN="+binPath)
+			base = setEnvVar(base, "STRINGWORK_BIN", binPath)
 		}
 	}
 
@@ -1954,7 +1999,7 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workspaceDir
-	env := buildWorkerEnv(c, workspaceDir)
+	env := buildWorkerEnv(c, workspaceDir, m.socketPathForWorker())
 	if strings.Contains(c.AgentType, "gemini") {
 		env = ensureGeminiSystemPrompt(env)
 	}
