@@ -46,6 +46,21 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 			if _, isTaskBound := app.StripTaskBoundSuffix(name); isTaskBound {
 				return nil, fmt.Errorf("agent name %q is a task-bound instance ID; task-bound workers must not be registered as top-level agents", name)
 			}
+			// M1: Reject collisions with built-in / pool-managed agents.
+			// If a name already exists in AgentInstances (either as a
+			// concrete InstanceID or as the AgentType of any instance), it
+			// is owned by the spawn pool. Letting register_agent overwrite
+			// or shadow it creates a phantom RegisteredAgent row that
+			// confuses ValidateAgent and lets workers self-publish
+			// capabilities the pool didn't grant.
+			if collisionErr := svc.Query(func(state *domain.CollabState) error {
+				if app.IsBuiltinAgent(name, state) {
+					return fmt.Errorf("agent name %q collides with a built-in / pool-managed agent; built-in agent slots are not user-registerable", name)
+				}
+				return nil
+			}); collisionErr != nil {
+				return nil, collisionErr
+			}
 
 			var capabilities []string
 			if caps, ok := args["capabilities"].([]any); ok {

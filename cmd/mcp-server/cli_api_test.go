@@ -468,6 +468,73 @@ func TestWorkContextEndpoint(t *testing.T) {
 	}
 }
 
+// TestResolveWorkerAgent_PrefixMatchCreatesSpuriousInstance pins the M1 fix:
+// resolveWorkerAgent must NOT silently auto-create an AgentInstance when the
+// caller's agent string only loosely prefix-matches a registered type. The
+// historical behavior allowed "claud-code-task-99" (typo) or
+// "codex-task-7" with no real spawn record to materialize a phantom instance,
+// which then leaked into watchdog tracking and worker-pool dashboards.
+//
+// After the fix, only known instance IDs, known parent types, or task-bound
+// IDs whose parent type is actually registered/instanced are accepted —
+// everything else returns the input unchanged and creates nothing.
+func TestResolveWorkerAgent_PrefixMatchCreatesSpuriousInstance(t *testing.T) {
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code",
+		Role: domain.RoleWorker, Status: "idle",
+	}
+
+	cases := []struct {
+		name        string
+		agent       string
+		wantCreated bool
+	}{
+		{"unknown_typo", "claud-code-task-1", false},
+		{"unknown_completely_unrelated", "totally-fake-agent", false},
+		{"task_bound_with_no_registered_parent", "ghost-agent-task-5", false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(state.AgentInstances)
+			resolveWorkerAgent(state, tc.agent)
+			after := len(state.AgentInstances)
+			if !tc.wantCreated && after != before {
+				t.Errorf("resolveWorkerAgent(%q) created an instance (size %d -> %d); should be a no-op for unknown agents",
+					tc.agent, before, after)
+			}
+			if _, exists := state.AgentInstances[tc.agent]; exists != tc.wantCreated {
+				t.Errorf("AgentInstances[%q] exists=%v, want %v", tc.agent, exists, tc.wantCreated)
+			}
+		})
+	}
+
+	state.AgentInstances["codex-1"] = &domain.AgentInstance{
+		InstanceID: "codex-1", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "idle",
+	}
+	beforeKnown := len(state.AgentInstances)
+	resolveWorkerAgent(state, "codex-1")
+	if len(state.AgentInstances) != beforeKnown {
+		t.Errorf("known instance lookup mutated state: size %d -> %d", beforeKnown, len(state.AgentInstances))
+	}
+	resolveWorkerAgent(state, "claude-code")
+	if len(state.AgentInstances) != beforeKnown {
+		t.Errorf("known parent type lookup mutated state: size %d -> %d", beforeKnown, len(state.AgentInstances))
+	}
+
+	resolveWorkerAgent(state, "claude-code-task-7")
+	inst, ok := state.AgentInstances["claude-code-task-7"]
+	if !ok {
+		t.Fatal("legitimate task-bound id with registered parent type should be created")
+	}
+	if inst.AgentType != "claude-code" {
+		t.Errorf("task-bound instance AgentType = %q, want \"claude-code\"", inst.AgentType)
+	}
+}
+
 func TestHeartbeatEndpoint_BannerWithUnread(t *testing.T) {
 	api, svc := setupTestAPI(t)
 

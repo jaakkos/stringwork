@@ -685,6 +685,25 @@ func MigrateTaskBoundCorruption(state *domain.CollabState) TaskBoundCorruptionRe
 		return report
 	}
 
+	// M2 phase 1: delete polluted RegisteredAgents FIRST. If a task-bound
+	// name like "claude-code-task-2" lives in RegisteredAgents, the
+	// subsequent ResolveParentAgentType calls (used in phase 2 and 3)
+	// would short-circuit on it and resolve to the polluted value instead
+	// of the canonical parent type. Removing the pollution up front makes
+	// the rewrites operate on a clean lookup graph.
+	for name := range state.RegisteredAgents {
+		if _, ok := StripTaskBoundSuffix(name); !ok {
+			continue
+		}
+		report.Mutations = append(report.Mutations,
+			fmt.Sprintf("registered_agent %q: removed (task-bound IDs are not top-level agents)", name))
+		delete(state.RegisteredAgents, name)
+		report.RegisteredAgentsGone++
+	}
+
+	// M2 phase 2: rewrite task assignments now that the lookup graph is
+	// clean. Any task whose AssignedTo holds a stale instance ID or
+	// task-bound name resolves to its canonical parent type.
 	for i := range state.Tasks {
 		t := &state.Tasks[i]
 		if t.AssignedTo == "" || t.AssignedTo == "any" {
@@ -699,6 +718,9 @@ func MigrateTaskBoundCorruption(state *domain.CollabState) TaskBoundCorruptionRe
 		}
 	}
 
+	// M2 phase 3: retype AgentInstances whose AgentType still carries a
+	// task-bound suffix. By now phases 1 and 2 have eliminated every
+	// upstream reference that could have re-confused the resolver.
 	for id, inst := range state.AgentInstances {
 		if inst == nil {
 			continue
@@ -718,16 +740,6 @@ func MigrateTaskBoundCorruption(state *domain.CollabState) TaskBoundCorruptionRe
 			fmt.Sprintf("instance %q: AgentType %q -> %q", id, inst.AgentType, canonical))
 		inst.AgentType = canonical
 		report.InstancesRetyped++
-	}
-
-	for name := range state.RegisteredAgents {
-		if _, ok := StripTaskBoundSuffix(name); !ok {
-			continue
-		}
-		report.Mutations = append(report.Mutations,
-			fmt.Sprintf("registered_agent %q: removed (task-bound IDs are not top-level agents)", name))
-		delete(state.RegisteredAgents, name)
-		report.RegisteredAgentsGone++
 	}
 
 	return report

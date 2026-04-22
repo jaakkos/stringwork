@@ -732,15 +732,33 @@ func resolveWorkerAgent(state *domain.CollabState, agent string) string {
 		}
 	}
 	parentType := app.ResolveParentAgentType(state, agent)
-	if parentType != "" && parentType != agent {
-		state.AgentInstances[agent] = &domain.AgentInstance{
-			InstanceID:   agent,
-			AgentType:    parentType,
-			Role:         domain.RoleWorker,
-			Status:       "idle",
-			CurrentTasks: []int{},
-		}
+	if parentType == "" || parentType == agent {
 		return agent
+	}
+	// M1: Only auto-materialize an AgentInstance when the resolved parent
+	// type is actually known to the system. Otherwise a typo
+	// ("claud-code-task-99") or a worker that was never spawned by the
+	// pool ("ghost-agent-task-5") silently leaks a phantom instance into
+	// AgentInstances, polluting list_agents and corrupting watchdog
+	// liveness tracking. Caller-side ValidateAgent then surfaces the
+	// "unknown agent" error to the worker, which is the correct outcome.
+	_, parentRegistered := state.RegisteredAgents[parentType]
+	parentHasInstance := false
+	for _, inst := range state.AgentInstances {
+		if inst != nil && inst.AgentType == parentType {
+			parentHasInstance = true
+			break
+		}
+	}
+	if !parentRegistered && !parentHasInstance {
+		return agent
+	}
+	state.AgentInstances[agent] = &domain.AgentInstance{
+		InstanceID:   agent,
+		AgentType:    parentType,
+		Role:         domain.RoleWorker,
+		Status:       "idle",
+		CurrentTasks: []int{},
 	}
 	return agent
 }

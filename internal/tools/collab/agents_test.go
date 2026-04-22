@@ -148,6 +148,93 @@ func TestRegisterAgent_RejectsTaskBoundNames(t *testing.T) {
 	}
 }
 
+// TestRegisterAgent_RejectsBuiltinNameCollision pins the M1 invariant: a
+// built-in (already-instanced) agent type like "claude-code" or "codex" is
+// owned by the orchestrator's spawn pool. Allowing user-driven register_agent
+// to overwrite it via RegisteredAgents creates a phantom RegisteredAgent row
+// that confuses ValidateAgent and lets workers self-publish capabilities the
+// pool didn't grant.
+//
+// After the fix, register_agent must reject a name that is already an
+// AgentInstance (or AgentType) so the built-in pool stays canonical.
+func TestRegisterAgent_RejectsBuiltinNameCollision(t *testing.T) {
+	cases := []string{"claude-code", "codex", "cursor"}
+	for _, name := range cases {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			svc, repo := newTestService()
+			_ = svc.Run(func(state *domain.CollabState) error {
+				state.AgentInstances[name] = &domain.AgentInstance{
+					InstanceID: name, AgentType: name,
+					Role: domain.RoleWorker, Status: "idle",
+				}
+				return nil
+			})
+
+			logger := log.New(io.Discard, "", 0)
+			srv := testServer(svc, logger)
+
+			_, err := callTool(t, srv, "register_agent", map[string]any{
+				"name": name,
+			})
+			if err == nil {
+				t.Fatalf("expected error for built-in name collision %q", name)
+			}
+			if !strings.Contains(err.Error(), "built-in") && !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("error should mention built-in collision, got %q", err.Error())
+			}
+			if _, exists := repo.state.RegisteredAgents[name]; exists {
+				t.Errorf("agent %q should not have been registered (collides with built-in)", name)
+			}
+		})
+	}
+}
+
+// TestAgentInstance_TaskBoundIDDoesNotConflictWithStatic ensures that a
+// task-bound instance ID (e.g. "claude-code-task-1") never overwrites or
+// pollutes the static-pool row "claude-code". This was the seed of several
+// historical bugs: heartbeat and resolveWorkerAgent paths used to upsert
+// task-bound IDs into AgentInstances with AgentType="claude-code-task-1",
+// which then masked the real "claude-code" pool entry from list_agents.
+func TestAgentInstance_TaskBoundIDDoesNotConflictWithStatic(t *testing.T) {
+	svc, repo := newTestService()
+	_ = svc.Run(func(state *domain.CollabState) error {
+		state.AgentInstances["claude-code"] = &domain.AgentInstance{
+			InstanceID: "claude-code", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "idle", CurrentTasks: []int{},
+		}
+		return nil
+	})
+
+	_, taskBoundID := seedStaticAndTaskBound(t, repo.state, "claude-code", 7)
+
+	if _, exists := repo.state.AgentInstances["claude-code"]; !exists {
+		t.Fatal("static pool row 'claude-code' must remain after task-bound seed")
+	}
+	staticInst := repo.state.AgentInstances["claude-code"]
+	if staticInst.AgentType != "claude-code" {
+		t.Errorf("static AgentType corrupted: %q", staticInst.AgentType)
+	}
+	if staticInst.InstanceID != "claude-code" {
+		t.Errorf("static InstanceID corrupted: %q", staticInst.InstanceID)
+	}
+
+	tbInst, exists := repo.state.AgentInstances[taskBoundID]
+	if !exists {
+		t.Fatalf("task-bound instance %q missing", taskBoundID)
+	}
+	if tbInst.AgentType == taskBoundID {
+		t.Errorf("task-bound AgentType holds task-bound ID %q (should be parent type)", tbInst.AgentType)
+	}
+	if tbInst.AgentType != "claude-code" {
+		t.Errorf("task-bound AgentType = %q, want \"claude-code\"", tbInst.AgentType)
+	}
+
+	if _, exists := repo.state.RegisteredAgents[taskBoundID]; exists {
+		t.Errorf("task-bound ID %q must NOT appear in RegisteredAgents", taskBoundID)
+	}
+}
+
 func TestRegisterAgent_MinimalRegistration(t *testing.T) {
 	svc, repo := newTestService()
 	logger := log.New(io.Discard, "", 0)

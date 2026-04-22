@@ -467,6 +467,54 @@ func TestMigrateTaskBoundCorruption_NilState(t *testing.T) {
 	}
 }
 
+// TestMigrateTaskBoundCorruption_NonTaskBoundCorruption locks in the M2 phase
+// reordering: the migration must remove polluted RegisteredAgents BEFORE
+// reassigning task.AssignedTo and retyping AgentInstances. If the order is
+// wrong, ResolveParentAgentType (called inside the task-rewrite loop) will
+// hit the still-present "registered_agents[claude-code-task-2]" entry and
+// resolve to the polluted value instead of stripping back to the parent type.
+//
+// This test deliberately pre-seeds a corrupted RegisteredAgents row whose
+// presence would mask the bug — and asserts the rewrite still lands on the
+// canonical parent type.
+func TestMigrateTaskBoundCorruption_NonTaskBoundCorruption(t *testing.T) {
+	state := domain.NewCollabState()
+	state.RegisteredAgents["claude-code"] = &domain.RegisteredAgent{Name: "claude-code"}
+	state.RegisteredAgents["claude-code-task-2"] = &domain.RegisteredAgent{Name: "claude-code-task-2"}
+
+	state.AgentInstances["claude-code-task-2"] = &domain.AgentInstance{
+		InstanceID: "claude-code-task-2",
+		AgentType:  "claude-code-task-2",
+		Role:       domain.RoleWorker,
+		Status:     "busy",
+	}
+
+	state.Tasks = append(state.Tasks,
+		domain.Task{ID: 1, Title: "Polluted assignment", Status: "in_progress", AssignedTo: "claude-code-task-2"},
+	)
+
+	report := MigrateTaskBoundCorruption(state)
+
+	if got := state.Tasks[0].AssignedTo; got != "claude-code" {
+		t.Errorf("task #1 AssignedTo = %q, want \"claude-code\" (was the polluted RegisteredAgents row consulted before being deleted?)", got)
+	}
+	if inst := state.AgentInstances["claude-code-task-2"]; inst == nil {
+		t.Fatal("expected claude-code-task-2 instance to remain")
+	} else if inst.AgentType != "claude-code" {
+		t.Errorf("claude-code-task-2 AgentType = %q, want \"claude-code\"", inst.AgentType)
+	}
+	if _, exists := state.RegisteredAgents["claude-code-task-2"]; exists {
+		t.Error("polluted registered agent should be removed")
+	}
+	if _, exists := state.RegisteredAgents["claude-code"]; !exists {
+		t.Error("legitimate parent registered agent must be preserved")
+	}
+	if report.Total() < 3 {
+		t.Errorf("expected at least 3 mutations (task + instance + registered), got %d (%v)",
+			report.Total(), report.Mutations)
+	}
+}
+
 // TestResolveParentAgentType_Table covers the resolution precedence order
 // used by every write path and watchdog correlation site. The resolver
 // must never emit a "-task-N" fragment as an AgentType under any input.
