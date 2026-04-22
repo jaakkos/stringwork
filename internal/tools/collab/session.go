@@ -264,8 +264,14 @@ func registerSetPresence(s *server.MCPServer, svc *app.CollabService, logger *lo
 // This is called from set_presence and get_session_context so that any agent
 // interaction counts as proof of liveness for the watchdog, not just the
 // explicit "heartbeat" tool.
+//
+// H2: When the caller pings a parent agent type (e.g. "claude-code") and
+// the fallback loop runs, task-bound sibling instances (e.g.
+// "claude-code-task-7") are explicitly skipped. They have their own
+// independent lifecycle and a parent-type ping is not evidence that the
+// task-bound worker is still alive — the watchdog must be free to recover
+// the task on its own staleness signal.
 func touchAgentHeartbeat(state *domain.CollabState, agent string, now time.Time) {
-	// Direct instance lookup
 	if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
 		inst.LastHeartbeat = now
 		if inst.Status == "offline" {
@@ -273,14 +279,16 @@ func touchAgentHeartbeat(state *domain.CollabState, agent string, now time.Time)
 		}
 		return
 	}
-	// Fallback: match by AgentType (e.g. "claude-code" matches instance "claude-code-1")
-	for _, inst := range state.AgentInstances {
-		if inst != nil && inst.AgentType == agent {
-			inst.LastHeartbeat = now
-			if inst.Status == "offline" {
-				inst.Status = "idle"
-			}
-			// Don't break: update all instances of this type that might be tracked
+	for id, inst := range state.AgentInstances {
+		if inst == nil || inst.AgentType != agent {
+			continue
+		}
+		if app.IsTaskBoundInstance(state, id) {
+			continue
+		}
+		inst.LastHeartbeat = now
+		if inst.Status == "offline" {
+			inst.Status = "idle"
 		}
 	}
 }

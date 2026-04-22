@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,4 +204,108 @@ func TestWorkerStatus_FreshOfflineProgressShown(t *testing.T) {
 	if !strings.Contains(text, "Reviewing files") {
 		t.Errorf("recent Progress line should still appear even when offline, got:\n%s", text)
 	}
+}
+
+// TestTouchAgentHeartbeat_DoesNotReviveDeadTaskBound (H2) —
+// touchAgentHeartbeat is called from set_presence and
+// get_session_context whenever an agent does any work. When the caller
+// pings a parent agent type (e.g. "claude-code") and there is no exact
+// instance row, the fallback loop must NOT bump the heartbeat of any
+// task-bound sibling (e.g. "claude-code-task-7") that happens to share
+// the type. Otherwise a parent-type ping silently revives a dead
+// task-bound worker, blocking the watchdog from recovering its task.
+func TestTouchAgentHeartbeat_DoesNotReviveDeadTaskBound(t *testing.T) {
+	now := time.Now()
+	deadHB := now.Add(-1 * time.Hour)
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "idle",
+		LastHeartbeat: deadHB,
+	}
+	state.AgentInstances["claude-code-task-7"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-task-7",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{7},
+		LastHeartbeat: deadHB,
+	}
+
+	touchAgentHeartbeat(state, "claude-code", now)
+
+	tb := state.AgentInstances["claude-code-task-7"]
+	if !tb.LastHeartbeat.Equal(deadHB) {
+		t.Errorf("task-bound sibling heartbeat must NOT be refreshed by parent-type ping; was %s, want %s", tb.LastHeartbeat, deadHB)
+	}
+	if tb.Status != "busy" {
+		t.Errorf("task-bound sibling status must NOT be revived by parent-type ping; got %q", tb.Status)
+	}
+
+	pool := state.AgentInstances["claude-code-1"]
+	if pool.LastHeartbeat.Equal(deadHB) {
+		t.Errorf("static-pool sibling SHOULD have been refreshed; heartbeat unchanged: %s", pool.LastHeartbeat)
+	}
+}
+
+// TestSetPresence_HeartbeatRaceWithRegister (H3) — two concurrent
+// touchAgentHeartbeat calls (e.g. set_presence and a piggyback
+// auto-heartbeat firing in the same window) must not corrupt the
+// AgentInstance state. Locks the contract: the final LastHeartbeat is
+// monotonic (>= every input) and the agent ends up idle, never offline.
+func TestSetPresence_HeartbeatRaceWithRegister(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "offline",
+		LastHeartbeat: now.Add(-1 * time.Hour),
+	}
+
+	svc, _ := newTestService()
+	_ = svc.Run(func(s *domain.CollabState) error {
+		s.AgentInstances = state.AgentInstances
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	tries := 50
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < tries; i++ {
+			_ = svc.Run(func(s *domain.CollabState) error {
+				touchAgentHeartbeat(s, "claude-code", time.Now())
+				return nil
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < tries; i++ {
+			_ = svc.Run(func(s *domain.CollabState) error {
+				touchAgentHeartbeat(s, "claude-code", time.Now())
+				return nil
+			})
+		}
+	}()
+	wg.Wait()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["claude-code"]
+		if inst == nil {
+			t.Fatal("agent instance unexpectedly removed")
+		}
+		if inst.Status != "idle" {
+			t.Errorf("agent should be marked idle after heartbeats; got %q", inst.Status)
+		}
+		if time.Since(inst.LastHeartbeat) > 5*time.Second {
+			t.Errorf("heartbeat should be near-now after refresh; got %s ago", time.Since(inst.LastHeartbeat))
+		}
+		return nil
+	})
 }

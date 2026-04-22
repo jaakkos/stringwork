@@ -114,15 +114,24 @@ func (h *heartbeatTracker) track(svc *app.CollabService, agent string) {
 	}
 
 	_ = svc.Run(func(state *domain.CollabState) error {
+		// H3 — two-pass match. First pass: exact InstanceID. Second
+		// pass: parent-type fallback that excludes task-bound siblings,
+		// and updates EVERY matching static-pool instance (not just
+		// whichever the map iteration lands on first), so the same
+		// ping cannot leave one sibling stale while refreshing another
+		// non-deterministically.
 		if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
 			inst.LastHeartbeat = now
 			return nil
 		}
-		for _, inst := range state.AgentInstances {
-			if inst != nil && inst.AgentType == agent {
-				inst.LastHeartbeat = now
-				return nil
+		for id, inst := range state.AgentInstances {
+			if inst == nil || inst.AgentType != agent {
+				continue
 			}
+			if app.IsTaskBoundInstance(state, id) {
+				continue
+			}
+			inst.LastHeartbeat = now
 		}
 		return nil
 	})

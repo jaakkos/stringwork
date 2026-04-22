@@ -543,3 +543,96 @@ func TestAutoHeartbeat_RefreshesAliveWorker(t *testing.T) {
 		return nil
 	})
 }
+
+// TestPiggybackAutoHeartbeat_PrefersAliveOverDead (H3) — a parent-type
+// ping like "claude-code" must NEVER refresh the LastHeartbeat of a
+// task-bound sibling like "claude-code-task-7". The fallback was a
+// single-pass map iteration that could land on the task-bound row
+// first, silently reviving a dead task-bound instance and preventing
+// the watchdog from recovering its task.
+//
+// Two-pass contract:
+//  1. exact InstanceID match (preferred)
+//  2. AgentType match excluding task-bound siblings (fallback)
+func TestPiggybackAutoHeartbeat_PrefersAliveOverDead(t *testing.T) {
+	hbt := newHeartbeatTracker()
+
+	svc, repo := newPiggybackTestService()
+	deadHB := time.Now().Add(-1 * time.Hour)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code-1": {
+			InstanceID:    "claude-code-1",
+			AgentType:     "claude-code",
+			Role:          domain.RoleWorker,
+			Status:        "idle",
+			LastHeartbeat: deadHB,
+		},
+		"claude-code-task-7": {
+			InstanceID:    "claude-code-task-7",
+			AgentType:     "claude-code",
+			Role:          domain.RoleWorker,
+			Status:        "busy",
+			CurrentTasks:  []int{7},
+			LastHeartbeat: deadHB,
+		},
+	}
+
+	hbt.track(svc, "claude-code")
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		tb := s.AgentInstances["claude-code-task-7"]
+		if !tb.LastHeartbeat.Equal(deadHB) {
+			t.Errorf("task-bound sibling MUST NOT be refreshed by parent-type ping; was %s, want %s", tb.LastHeartbeat, deadHB)
+		}
+		pool := s.AgentInstances["claude-code-1"]
+		if pool.LastHeartbeat.Equal(deadHB) {
+			t.Errorf("static-pool sibling SHOULD have been refreshed; heartbeat unchanged")
+		}
+		return nil
+	})
+}
+
+// TestPiggybackAutoHeartbeat_MultiInstanceDeterministic (H3) — when
+// multiple non-task-bound instances of the same parent type are
+// registered, the fallback must update ALL of them deterministically
+// (not just whichever the map iteration happens to land on first).
+// This avoids races where one ping refreshes "claude-code-1" and the
+// next refreshes "claude-code-2", leaving each individual instance
+// looking stale to the watchdog.
+func TestPiggybackAutoHeartbeat_MultiInstanceDeterministic(t *testing.T) {
+	hbt := newHeartbeatTracker()
+
+	svc, repo := newPiggybackTestService()
+	deadHB := time.Now().Add(-1 * time.Hour)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code-1": {
+			InstanceID: "claude-code-1", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "idle", LastHeartbeat: deadHB,
+		},
+		"claude-code-2": {
+			InstanceID: "claude-code-2", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "idle", LastHeartbeat: deadHB,
+		},
+		"claude-code-task-9": {
+			InstanceID: "claude-code-task-9", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{9},
+			LastHeartbeat: deadHB,
+		},
+	}
+
+	hbt.track(svc, "claude-code")
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, id := range []string{"claude-code-1", "claude-code-2"} {
+			inst := s.AgentInstances[id]
+			if inst.LastHeartbeat.Equal(deadHB) {
+				t.Errorf("static-pool sibling %s SHOULD have been refreshed", id)
+			}
+		}
+		tb := s.AgentInstances["claude-code-task-9"]
+		if !tb.LastHeartbeat.Equal(deadHB) {
+			t.Errorf("task-bound sibling MUST be skipped; was refreshed to %s", tb.LastHeartbeat)
+		}
+		return nil
+	})
+}
