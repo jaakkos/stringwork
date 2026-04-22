@@ -428,3 +428,107 @@ func TestReplayTask_NoReviewGateCleared(t *testing.T) {
 		t.Errorf("ReviewedBy = %q, want empty", task.ReviewedBy)
 	}
 }
+
+// TestReplayTask_PreservesPreviousOutputAcrossAgentTypes (M5
+// guardrail) — when a task is replayed and reassigned from one agent
+// type to another (e.g. claude-code → codex), the previously captured
+// worker output stored on the WorkContext must survive the replay so
+// the new assignee can read what the prior worker did.
+func TestReplayTask_PreservesPreviousOutputAcrossAgentTypes(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 1, Title: "Cross-type replay", Status: "blocked",
+			AssignedTo:    "claude-code",
+			CreatedBy:     "cursor",
+			ContextID:     "ctx-1",
+			FailureCount:  1,
+			FailureReason: "watchdog timeout",
+		},
+	}
+	repo.state.WorkContexts = map[string]*domain.WorkContext{
+		"ctx-1": {
+			ID:             "ctx-1",
+			TaskID:         1,
+			PreviousOutput: "claude-code transcript: started step 1, hit error E",
+			SharedNotes:    map[string]string{},
+		},
+	}
+	repo.state.NextTaskID = 2
+
+	srv := testServer(svc, logger)
+	args := map[string]any{
+		"id":          float64(1),
+		"updated_by":  "cursor",
+		"reassign_to": "codex",
+	}
+	if _, err := callTool(t, srv, "replay_task", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := repo.state.Tasks[0]
+	if task.AssignedTo != "codex" {
+		t.Errorf("expected reassign to codex, got %q", task.AssignedTo)
+	}
+	wc := repo.state.WorkContexts[task.ContextID]
+	if wc == nil {
+		t.Fatalf("expected WorkContext to survive replay; ContextID=%q", task.ContextID)
+	}
+	if !strings.Contains(wc.PreviousOutput, "started step 1") {
+		t.Errorf("PreviousOutput must survive replay across agent types; got %q", wc.PreviousOutput)
+	}
+}
+
+// TestTaskBoundCycle_PendingInProgressBlockedRepeated (M5 guardrail) —
+// drives a task through pending → in_progress → blocked → pending →
+// in_progress → completed, asserting that the AgentInstance.CurrentTasks
+// slice never accumulates duplicates and never leaks between cycles.
+// This catches the recurring class of CurrentTasks corruption bugs that
+// motivated the "always-scan removal" pattern in handoff/cancel.
+func TestTaskBoundCycle_PendingInProgressBlockedRepeated(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle"},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Cycle", Status: "pending", AssignedTo: "claude-code",
+			CreatedBy: "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}
+	repo.state.NextTaskID = 2
+
+	steps := []map[string]any{
+		{"id": float64(1), "updated_by": "claude-code", "status": "in_progress"},
+		{"id": float64(1), "updated_by": "claude-code", "status": "blocked"},
+		{"id": float64(1), "updated_by": "cursor", "status": "pending"},
+		{"id": float64(1), "updated_by": "claude-code", "status": "in_progress"},
+		{"id": float64(1), "updated_by": "claude-code", "status": "completed"},
+	}
+	for i, args := range steps {
+		if _, err := callTool(t, srv, "update_task", args); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+	}
+
+	cc := repo.state.AgentInstances["claude-code"]
+	if cc == nil {
+		t.Fatal("claude-code instance unexpectedly missing")
+	}
+	for _, id := range cc.CurrentTasks {
+		if id == 1 {
+			t.Errorf("CurrentTasks should not contain completed task #1; got %v", cc.CurrentTasks)
+		}
+	}
+	seen := map[int]bool{}
+	for _, id := range cc.CurrentTasks {
+		if seen[id] {
+			t.Errorf("CurrentTasks contains duplicate task IDs: %v", cc.CurrentTasks)
+		}
+		seen[id] = true
+	}
+}

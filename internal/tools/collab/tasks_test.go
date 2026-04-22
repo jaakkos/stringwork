@@ -991,3 +991,190 @@ func TestReplayTask_Basic(t *testing.T) {
 		t.Errorf("expected ReviewStatus pending for RequiresReview task, got %q", task.ReviewStatus)
 	}
 }
+
+// TestUpdateTask_BlockedByEmptyClearsBlock (H6) — passing blocked_by=""
+// must clear the BlockedBy field. If all dependencies are complete, the
+// task transitions back to "pending" so workers can pick it up. Without
+// this, a task once marked blocked stays blocked forever even after the
+// external blocker is resolved.
+func TestUpdateTask_BlockedByEmptyClearsBlock(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 1, Title: "Stuck task", Status: "blocked", AssignedTo: "claude-code",
+			BlockedBy: "waiting on auth design",
+			CreatedBy: "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+	}
+	repo.state.NextTaskID = 2
+
+	args := map[string]any{
+		"id":         float64(1),
+		"updated_by": "cursor",
+		"blocked_by": "",
+	}
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := repo.state.Tasks[0]
+	if got.BlockedBy != "" {
+		t.Errorf("expected BlockedBy cleared, got %q", got.BlockedBy)
+	}
+	if got.Status != "pending" {
+		t.Errorf("expected status to flip back to pending after blocker cleared (no deps); got %q", got.Status)
+	}
+}
+
+// TestUpdateTask_BlockedByEmptyDoesNotUnblockIncompleteDeps (H6
+// guardrail) — clearing blocked_by must NOT silently flip a task to
+// pending when dependencies are still incomplete. Otherwise we resurrect
+// tasks before their prerequisites are done.
+func TestUpdateTask_BlockedByEmptyDoesNotUnblockIncompleteDeps(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 1, Title: "Dep task", Status: "in_progress", AssignedTo: "claude-code",
+			CreatedBy: "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+		{
+			ID: 2, Title: "Blocked task", Status: "blocked", AssignedTo: "claude-code",
+			BlockedBy:    "waiting on dep",
+			Dependencies: []int{1},
+			CreatedBy:    "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+	}
+	repo.state.NextTaskID = 3
+
+	args := map[string]any{
+		"id":         float64(2),
+		"updated_by": "cursor",
+		"blocked_by": "",
+	}
+	_, err := callTool(t, srv, "update_task", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := repo.state.Tasks[1]
+	if got.BlockedBy != "" {
+		t.Errorf("expected BlockedBy cleared, got %q", got.BlockedBy)
+	}
+	if got.Status == "pending" {
+		t.Errorf("expected task to remain blocked while deps incomplete; got %q", got.Status)
+	}
+}
+
+// TestEnsureWorkContextWorktree_PreservesAcrossPath (H7) — the create
+// flow runs orch.AssignTask first, which can install a WorkContext
+// carrying a WorktreeName, then ensureWorkContextForTask installs
+// another one carrying RelevantFiles. The second pass must NOT throw
+// away the worktree association — the worker would then run in the
+// wrong checkout.
+func TestEnsureWorkContextWorktree_PreservesAcrossPath(t *testing.T) {
+	state := domain.NewCollabState()
+	task := &domain.Task{ID: 42, Status: "pending", AssignedTo: "claude-code"}
+	state.Tasks = []domain.Task{*task}
+
+	app.EnsureWorkContextWorktree(state, &state.Tasks[0], "claude-code-task-42")
+
+	ctxID := state.Tasks[0].ContextID
+	if ctxID == "" {
+		t.Fatalf("expected ContextID set after EnsureWorkContextWorktree")
+	}
+	wc := state.WorkContexts[ctxID]
+	if wc == nil || wc.WorktreeName == "" {
+		t.Fatalf("expected worktree to be set on context")
+	}
+
+	ensureWorkContextForTask(state, 42, []string{"foo.go"}, "background notes", []string{"don't do X"}, "")
+
+	finalCtxID := state.Tasks[0].ContextID
+	finalWC := state.WorkContexts[finalCtxID]
+	if finalWC == nil {
+		t.Fatalf("task lost its WorkContext after ensureWorkContextForTask")
+	}
+	if finalWC.WorktreeName != "claude-code-task-42" {
+		t.Errorf("worktree association lost across path; got %q", finalWC.WorktreeName)
+	}
+	if len(finalWC.RelevantFiles) == 0 || finalWC.RelevantFiles[0] != "foo.go" {
+		t.Errorf("relevant files lost; got %v", finalWC.RelevantFiles)
+	}
+	if finalWC.Background != "background notes" {
+		t.Errorf("background lost; got %q", finalWC.Background)
+	}
+	if len(finalWC.Constraints) == 0 {
+		t.Errorf("constraints lost; got %v", finalWC.Constraints)
+	}
+}
+
+// TestTaskDependencies_DetectsCycle (M5) — adding a dependency that
+// would form a cycle (A depends on B, B depends on A) must be rejected.
+// Without this check, a deadlocked pair silently sits in the queue
+// because each is waiting on the other.
+func TestTaskDependencies_DetectsCycle(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "A", Status: "pending", AssignedTo: "claude-code", CreatedBy: "cursor",
+			Dependencies: []int{2}, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: 2, Title: "B", Status: "pending", AssignedTo: "claude-code", CreatedBy: "cursor",
+			CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}
+	repo.state.NextTaskID = 3
+
+	args := map[string]any{
+		"id":             float64(2),
+		"updated_by":     "cursor",
+		"add_dependency": float64(1),
+	}
+	_, err := callTool(t, srv, "update_task", args)
+	if err == nil {
+		t.Fatalf("expected error for circular dependency, got nil; deps=%v", repo.state.Tasks[1].Dependencies)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "cycle") &&
+		!strings.Contains(strings.ToLower(err.Error()), "circular") {
+		t.Errorf("error should mention cycle/circular: %v", err)
+	}
+	if len(repo.state.Tasks[1].Dependencies) != 0 {
+		t.Errorf("dependency must NOT be added on cycle rejection; got %v", repo.state.Tasks[1].Dependencies)
+	}
+}
+
+// TestTaskDependencies_RejectsAddOnActive (M5 guardrail) — adding a
+// dependency to an in_progress or completed task changes its readiness
+// retroactively, which is almost always a bug. Reject it with an
+// explicit error so callers must explicitly transition the task back
+// to pending first if they really need to do this.
+func TestTaskDependencies_RejectsAddOnActive(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Live work", Status: "in_progress", AssignedTo: "claude-code",
+			CreatedBy: "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: 2, Title: "Other", Status: "pending", AssignedTo: "claude-code",
+			CreatedBy: "cursor", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}
+	repo.state.NextTaskID = 3
+
+	args := map[string]any{
+		"id":             float64(1),
+		"updated_by":     "cursor",
+		"add_dependency": float64(2),
+	}
+	_, err := callTool(t, srv, "update_task", args)
+	if err == nil {
+		t.Fatalf("expected error when adding dep to in_progress task; deps=%v", repo.state.Tasks[0].Dependencies)
+	}
+}

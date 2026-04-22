@@ -132,6 +132,43 @@ func ensureWorkContextForTask(state *domain.CollabState, taskID int, relevantFil
 	if len(relevantFiles) == 0 && background == "" && len(constraints) == 0 {
 		return ""
 	}
+	if state.WorkContexts == nil {
+		state.WorkContexts = make(map[string]*domain.WorkContext)
+	}
+
+	// H7 — preserve any existing context the task may already have.
+	// orch.AssignTask runs first and can install a context carrying a
+	// WorktreeName (and possibly other metadata). Replacing it whole
+	// here would silently drop the worktree association so the worker
+	// runs in the wrong checkout. Locate the existing context (if any)
+	// and merge our additions into it instead of allocating a new one.
+	for i := range state.Tasks {
+		if state.Tasks[i].ID != taskID {
+			continue
+		}
+		if existingID := state.Tasks[i].ContextID; existingID != "" {
+			if existing := state.WorkContexts[existingID]; existing != nil {
+				if len(relevantFiles) > 0 {
+					existing.RelevantFiles = relevantFiles
+				}
+				if background != "" {
+					existing.Background = background
+				}
+				if len(constraints) > 0 {
+					existing.Constraints = constraints
+				}
+				if parentCtxID != "" {
+					existing.ParentCtxID = parentCtxID
+				}
+				if existing.SharedNotes == nil {
+					existing.SharedNotes = make(map[string]string)
+				}
+				return existingID
+			}
+		}
+		break
+	}
+
 	contextID = fmt.Sprintf("ctx-%d-%d", taskID, time.Now().UnixNano())
 	wc := &domain.WorkContext{
 		ID:            contextID,

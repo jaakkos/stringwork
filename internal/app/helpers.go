@@ -21,6 +21,49 @@ func ConfiguredDriver(state *domain.CollabState) string {
 	return "cursor"
 }
 
+// HasDependencyCycle returns true if adding any of newDeps to taskID's
+// dependency list would form a cycle in the dependency graph. Walks the
+// graph via DFS; safe against missing tasks and self-loops in the
+// existing graph (a defensive check, not a guarantee — callers should
+// also reject self-deps explicitly).
+func HasDependencyCycle(state *domain.CollabState, taskID int, newDeps []int) bool {
+	if state == nil {
+		return false
+	}
+	for _, dep := range newDeps {
+		if dep == taskID {
+			return true
+		}
+	}
+	deps := map[int][]int{}
+	for _, t := range state.Tasks {
+		copied := make([]int, len(t.Dependencies))
+		copy(copied, t.Dependencies)
+		deps[t.ID] = copied
+	}
+	deps[taskID] = append(deps[taskID], newDeps...)
+
+	color := map[int]int{} // 0 unvisited, 1 in-stack, 2 done
+	var dfs func(int) bool
+	dfs = func(u int) bool {
+		if color[u] == 1 {
+			return true
+		}
+		if color[u] == 2 {
+			return false
+		}
+		color[u] = 1
+		for _, v := range deps[u] {
+			if dfs(v) {
+				return true
+			}
+		}
+		color[u] = 2
+		return false
+	}
+	return dfs(taskID)
+}
+
 // Truncate truncates s to max runes (Unicode-safe).
 func Truncate(s string, max int) string {
 	runes := []rune(s)

@@ -114,6 +114,12 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 						return fmt.Errorf("dependency task #%d not found", depID)
 					}
 				}
+				// M5 — cycle detection at create. The task being
+				// created has ID state.NextTaskID and the proposed
+				// deps are `dependencies`.
+				if app.HasDependencyCycle(state, state.NextTaskID, dependencies) {
+					return fmt.Errorf("cannot create task: dependencies %v would form a circular dependency cycle", dependencies)
+				}
 
 				requiresReview, _ := args["requires_review"].(bool)
 				reviewStatus := ""
@@ -430,6 +436,18 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 						if v != "" && task.Status != "blocked" {
 							task.Status = "blocked"
 						}
+						// H6 — clearing blocked_by must actively
+						// reopen the task. If all dependencies are
+						// complete, transition back to pending so
+						// claim_next can pick it up. If any deps
+						// remain incomplete, hold it as blocked
+						// (the deps themselves are the new blocker).
+						if v == "" && task.Status == "blocked" {
+							incomplete := checkDependenciesCompleteState(state, task.ID)
+							if len(incomplete) == 0 {
+								task.Status = "pending"
+							}
+						}
 						if v != "" && orch != nil {
 							blockerType := updatedBy
 							if inst, ok := state.AgentInstances[updatedBy]; ok && inst != nil {
@@ -475,6 +493,18 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 						}
 						if depIDInt == task.ID {
 							return fmt.Errorf("task cannot depend on itself")
+						}
+						// M5 — disallow add-dep on already-active or
+						// completed tasks. Adding a dep retroactively
+						// changes its readiness, which is almost
+						// always a bug. Caller can transition back to
+						// pending first if they really need to.
+						if task.Status == "in_progress" || task.Status == "completed" {
+							return fmt.Errorf("cannot add dependency to task #%d in status %q; transition to pending first", task.ID, task.Status)
+						}
+						// M5 — cycle detection.
+						if app.HasDependencyCycle(state, task.ID, []int{depIDInt}) {
+							return fmt.Errorf("cannot add dependency #%d to task #%d: would create a circular dependency cycle", depIDInt, task.ID)
 						}
 						alreadyDep := false
 						for _, d := range task.Dependencies {

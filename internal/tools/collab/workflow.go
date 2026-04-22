@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -314,6 +315,25 @@ func registerRequestReview(s *server.MCPServer, svc *app.CollabService, logger *
 				state.Tasks = append(state.Tasks, task)
 				taskID = task.ID
 				state.NextTaskID++
+
+				// H5 — notify the reviewer. Without this the review
+				// task sits silent in their pending queue (no banner,
+				// no nudge) until the reviewer happens to call
+				// list_tasks. This was the original asymmetry between
+				// "create work" and "request review".
+				notice := fmt.Sprintf("📝 **Review requested for task #%d** by %s — %s",
+					taskID, from, app.Truncate(description, 120))
+				if len(files) > 0 {
+					notice += fmt.Sprintf(" (files: %s)", strings.Join(files, ", "))
+				}
+				state.Messages = append(state.Messages, domain.Message{
+					ID:        state.NextMsgID,
+					From:      "system",
+					To:        to,
+					Content:   notice,
+					Timestamp: time.Now(),
+				})
+				state.NextMsgID++
 				return nil
 			}); err != nil {
 				return nil, err

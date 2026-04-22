@@ -1,6 +1,7 @@
 package collab
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"strconv"
@@ -910,5 +911,55 @@ func TestRequestReview_TruncatesLongDescription(t *testing.T) {
 	}
 	if !strings.HasSuffix(task.Title, "...") {
 		t.Error("truncated title should end with ...")
+	}
+}
+
+// TestRequestReview_NotifiesReviewer (H5) — request_review must enqueue
+// a system message addressed to the reviewer. Without it, a review task
+// silently sits in the reviewer's pending queue with no banner, no
+// nudge, no signal — the original asymmetry that masked H5 in code
+// reviews where the reviewer never started reading.
+func TestRequestReview_NotifiesReviewer(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"from":        "cursor",
+		"to":          "claude-code",
+		"description": "review the auth refactor",
+		"files":       []interface{}{"auth.go"},
+	}
+
+	_, err := callTool(t, srv, "request_review", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(repo.state.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(repo.state.Tasks))
+	}
+	taskID := repo.state.Tasks[0].ID
+
+	var found bool
+	for _, msg := range repo.state.Messages {
+		if msg.To != "claude-code" {
+			continue
+		}
+		if msg.From != "system" && msg.From != "cursor" {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(msg.Content), "review") {
+			continue
+		}
+		if !strings.Contains(msg.Content, fmt.Sprintf("#%d", taskID)) {
+			continue
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Errorf("expected a system/cursor message to claude-code referencing review task #%d; got %d messages: %+v",
+			taskID, len(repo.state.Messages), repo.state.Messages)
 	}
 }
