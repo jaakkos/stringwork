@@ -31,6 +31,35 @@ func testServerWithOrch(svc *app.CollabService, logger *log.Logger, orch *app.Ta
 	return s
 }
 
+// testServerWithSpawner creates a MCPServer with a TaskSpawner for testing
+// post-lock spawn behaviour (create_task / update_task / replay_task spawn paths).
+func testServerWithSpawner(svc *app.CollabService, logger *log.Logger, spawner TaskSpawner) *server.MCPServer {
+	s := server.NewMCPServer("test", "1.0.0")
+	registry := app.NewSessionRegistry()
+	Register(s, svc, logger, registry, nil, WithTaskSpawner(spawner))
+	return s
+}
+
+// fakeSpawner records SpawnForTask calls made by the task tools so tests can
+// assert spawn behaviour (or lack thereof). Optionally invokes onSpawn before
+// recording, useful for tests that want to assert state at the moment of spawn.
+type fakeSpawner struct {
+	calls   []spawnCall
+	onSpawn func(taskID int, assignedTo string)
+}
+
+type spawnCall struct {
+	TaskID     int
+	AssignedTo string
+}
+
+func (f *fakeSpawner) SpawnForTask(taskID int, assignedTo string) {
+	if f.onSpawn != nil {
+		f.onSpawn(taskID, assignedTo)
+	}
+	f.calls = append(f.calls, spawnCall{TaskID: taskID, AssignedTo: assignedTo})
+}
+
 // callTool calls a registered tool via the MCPServer's HandleMessage.
 // Returns the parsed CallToolResult or an error.
 func callTool(t *testing.T, s *server.MCPServer, name string, args map[string]any) (*mcp.CallToolResult, error) {

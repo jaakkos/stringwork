@@ -3,6 +3,7 @@ package collab
 import (
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -414,6 +415,169 @@ func TestClaimNext_InvalidAgent(t *testing.T) {
 	_, err := callTool(t, srv, "claim_next", args)
 	if err == nil {
 		t.Error("expected error for invalid agent")
+	}
+}
+
+// TestClaimNext_AddsCurrentTasksWhenPreAssigned (C1) — when a task is
+// already assigned to the parent agent type but no instance has it in
+// CurrentTasks (e.g. orchestrator picked the assignee but bookkeeping
+// wasn't applied, or the instance was respawned), claim_next must still
+// add the task to the claimant's CurrentTasks so the worker actually
+// owns the work. The previous "wasAssignedElsewhere" guard suppressed
+// this fix when AssignedTo already matched the parent type.
+func TestClaimNext_AddsCurrentTasksWhenPreAssigned(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Pre-assigned", Status: "pending", AssignedTo: "claude-code", CreatedBy: "cursor", Priority: 3},
+	}
+	repo.state.NextTaskID = 2
+	if inst, ok := repo.state.AgentInstances["claude-code"]; ok && inst != nil {
+		inst.CurrentTasks = []int{}
+		inst.Status = "idle"
+	}
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{"agent": "claude-code"}
+	if _, err := callTool(t, srv, "claim_next", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inst := repo.state.AgentInstances["claude-code"]
+	if inst == nil {
+		t.Fatal("claude-code instance missing after claim_next")
+	}
+	found := false
+	for _, id := range inst.CurrentTasks {
+		if id == 1 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected task 1 in CurrentTasks for static instance after claim_next; got %v", inst.CurrentTasks)
+	}
+	if inst.Status != "busy" {
+		t.Errorf("expected static instance to be 'busy' after claiming, got %q", inst.Status)
+	}
+}
+
+// TestClaimNext_DistinguishesMultipleTaskBoundInstances (C1/M6) — when
+// no instance keyed by the agent name exists but multiple instances of
+// the same parent type do (one static-pool, several task-bound siblings
+// for unrelated tasks), claim_next must add the new task to the static
+// pool row, not to a task-bound sibling. The previous fallback iterated
+// the AgentInstances map non-deterministically and could land on a
+// task-bound row, which would later be reaped when its OWN task
+// completed — silently losing the just-claimed task.
+//
+// We seed many task-bound siblings against a single static row and
+// repeat the claim across fresh states so the random map iteration is
+// statistically guaranteed to expose the bug pre-fix.
+func TestClaimNext_DistinguishesMultipleTaskBoundInstances(t *testing.T) {
+	const iterations = 30
+	const taskBoundSiblings = 8
+
+	for iter := 0; iter < iterations; iter++ {
+		svc, repo := newTestService()
+		logger := log.New(io.Discard, "", 0)
+
+		delete(repo.state.AgentInstances, "claude-code")
+		repo.state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+			InstanceID:    "claude-code-1",
+			AgentType:     "claude-code",
+			Role:          domain.RoleWorker,
+			Status:        "idle",
+			MaxTasks:      1,
+			CurrentTasks:  []int{},
+			LastHeartbeat: time.Now(),
+		}
+		for i := 0; i < taskBoundSiblings; i++ {
+			oldTaskID := 100 + i
+			id := "claude-code-task-" + strconv.Itoa(oldTaskID)
+			repo.state.AgentInstances[id] = &domain.AgentInstance{
+				InstanceID:    id,
+				AgentType:     "claude-code",
+				Role:          domain.RoleWorker,
+				Status:        "busy",
+				MaxTasks:      1,
+				CurrentTasks:  []int{oldTaskID},
+				LastHeartbeat: time.Now(),
+			}
+		}
+
+		repo.state.Tasks = []domain.Task{
+			{ID: 7, Title: "New work", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", Priority: 3},
+		}
+		repo.state.NextTaskID = 8
+
+		srv := testServer(svc, logger)
+
+		args := map[string]any{"agent": "claude-code"}
+		if _, err := callTool(t, srv, "claim_next", args); err != nil {
+			t.Fatalf("iter %d: unexpected error: %v", iter, err)
+		}
+
+		staticInst := repo.state.AgentInstances["claude-code-1"]
+		staticOwns := false
+		for _, id := range staticInst.CurrentTasks {
+			if id == 7 {
+				staticOwns = true
+				break
+			}
+		}
+		if !staticOwns {
+			t.Fatalf("iter %d: static instance should own claimed task #7, got CurrentTasks=%v", iter, staticInst.CurrentTasks)
+		}
+
+		for instID, inst := range repo.state.AgentInstances {
+			if instID == "claude-code-1" {
+				continue
+			}
+			for _, id := range inst.CurrentTasks {
+				if id == 7 {
+					t.Fatalf("iter %d: task-bound sibling %q must not own task #7, got CurrentTasks=%v", iter, instID, inst.CurrentTasks)
+				}
+			}
+		}
+	}
+}
+
+// TestPriorityTieBreak_DeterministicByTaskID (M7) — when multiple
+// pending tasks share the same priority, the lowest task ID wins. The
+// previous code used strict `<` on priority alone and then took the
+// first-encountered task in slice order, which is non-deterministic
+// once tasks are inserted out of ID order (e.g. after a replay).
+func TestPriorityTieBreak_DeterministicByTaskID(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 5, Title: "Higher ID first", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", Priority: 2},
+		{ID: 1, Title: "Lower ID later", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", Priority: 2},
+	}
+	repo.state.NextTaskID = 6
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{"agent": "cursor"}
+	result, err := callTool(t, srv, "claim_next", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	text := resultText(t, result)
+	if !strings.Contains(text, "Lower ID later") {
+		t.Errorf("expected lower-ID task to win priority tie; got: %s", text)
+	}
+
+	if repo.state.Tasks[1].Status != "in_progress" {
+		t.Errorf("expected task #1 to be claimed; got status=%q", repo.state.Tasks[1].Status)
+	}
+	if repo.state.Tasks[0].Status != "pending" {
+		t.Errorf("expected task #5 to remain pending; got status=%q", repo.state.Tasks[0].Status)
 	}
 }
 

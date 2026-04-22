@@ -282,10 +282,17 @@ func removeTaskID(inst *domain.AgentInstance, taskID int) {
 }
 
 // AddTaskToInstance adds taskID to the matching AgentInstance's
-// CurrentTasks slice. Tries direct InstanceID lookup first; on miss, scans
-// every instance and uses the first whose AgentType matches `agent`.
+// CurrentTasks slice. Tries direct InstanceID lookup first; on miss,
+// scans every instance and uses the first non-task-bound one whose
+// AgentType matches `agent`, preferring the lexicographically lowest
+// InstanceID for deterministic selection across map-iteration runs.
 // Idempotent: re-adding an already-tracked task is a no-op. On success,
 // flips Status to "busy".
+//
+// Task-bound siblings ("<type>-task-N") are intentionally skipped in
+// the fallback path: they exist solely to run their owning task and
+// must never accumulate other work, otherwise reaping them on terminal
+// transition would silently lose the just-added task.
 //
 // Safe to call when no matching instance exists (no-op).
 func AddTaskToInstance(state *domain.CollabState, taskID int, agent string) {
@@ -294,10 +301,17 @@ func AddTaskToInstance(state *domain.CollabState, taskID int, agent string) {
 	}
 	inst, ok := state.AgentInstances[agent]
 	if !ok || inst == nil {
-		for _, candidate := range state.AgentInstances {
-			if candidate != nil && candidate.AgentType == agent {
+		var bestID string
+		for id, candidate := range state.AgentInstances {
+			if candidate == nil || candidate.AgentType != agent {
+				continue
+			}
+			if IsTaskBoundInstance(state, id) {
+				continue
+			}
+			if inst == nil || id < bestID {
 				inst = candidate
-				break
+				bestID = id
 			}
 		}
 	}

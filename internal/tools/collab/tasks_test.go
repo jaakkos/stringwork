@@ -889,6 +889,64 @@ func TestUpdateTask_ApprovalAllowsCompletion(t *testing.T) {
 	}
 }
 
+// TestSpawnSideEffects_RevalidatesAfterStateLock (M8) — when update_task
+// queues a post-lock spawn for a newly assigned worker, the spawn must
+// be re-validated against the latest state. If another writer cancels
+// the task in the gap between Run releasing the lock and SpawnForTask
+// firing, the spawn is now wasted (a new process starts, finds no work
+// to do, and either idles or self-cancels — but we lit the user's
+// terminal up for nothing). The fix: a final svc.Run that re-checks
+// AssignedTo and Status before letting the spawn through.
+func TestSpawnSideEffects_RevalidatesAfterStateLock(t *testing.T) {
+	repo := newMockRepository()
+	policy := newMockPolicy()
+	logger := log.New(io.Discard, "", 0)
+	svc := app.NewCollabService(repo, policy, logger)
+
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "working", MaxTasks: 5,
+	}
+	repo.state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "idle", MaxTasks: 1, CurrentTasks: []int{},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "T", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", Priority: 3},
+	}
+	repo.state.NextTaskID = 2
+
+	saveCount := 0
+	repo.afterSave = func(state *domain.CollabState) {
+		saveCount++
+		if saveCount == 1 {
+			for i := range state.Tasks {
+				if state.Tasks[i].ID == 1 {
+					state.Tasks[i].Status = "cancelled"
+					state.Tasks[i].AssignedTo = ""
+					return
+				}
+			}
+		}
+	}
+
+	spawner := &fakeSpawner{}
+	srv := testServerWithSpawner(svc, logger, spawner)
+
+	args := map[string]any{
+		"id":          float64(1),
+		"assigned_to": "claude-code",
+		"updated_by":  "cursor",
+	}
+	if _, err := callTool(t, srv, "update_task", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(spawner.calls) != 0 {
+		t.Errorf("spawn should be skipped after state changed; got calls=%v", spawner.calls)
+	}
+}
+
 // ========== replay_task tests ==========
 
 func TestReplayTask_Basic(t *testing.T) {

@@ -28,10 +28,26 @@ func RoundRobinStrategy(task *domain.Task, state *domain.CollabState) *domain.Ag
 	return selectLeastLoaded(state, task.Capabilities)
 }
 
+// isAssignable reports whether an instance is a valid candidate for new
+// task assignment: it must be a worker, online, and not a task-bound
+// child (which exists solely to run its owning task).
+func isAssignable(state *domain.CollabState, inst *domain.AgentInstance) bool {
+	if inst == nil || inst.Role != domain.RoleWorker {
+		return false
+	}
+	if inst.Status == "offline" {
+		return false
+	}
+	if IsTaskBoundInstance(state, inst.InstanceID) {
+		return false
+	}
+	return true
+}
+
 func selectByCapabilityOrLoad(task *domain.Task, state *domain.CollabState) *domain.AgentInstance {
 	candidates := make([]*domain.AgentInstance, 0)
 	for _, inst := range state.AgentInstances {
-		if inst == nil || inst.Role != domain.RoleWorker {
+		if !isAssignable(state, inst) {
 			continue
 		}
 		if len(task.Capabilities) > 0 {
@@ -64,10 +80,12 @@ func selectByCapabilityOrLoad(task *domain.Task, state *domain.CollabState) *dom
 	if len(candidates) == 0 {
 		return nil
 	}
-	// Pick least loaded
+	// Pick least loaded; break ties deterministically by InstanceID so
+	// repeated runs produce stable assignments.
 	best := candidates[0]
 	for _, c := range candidates[1:] {
-		if len(c.CurrentTasks) < len(best.CurrentTasks) {
+		if len(c.CurrentTasks) < len(best.CurrentTasks) ||
+			(len(c.CurrentTasks) == len(best.CurrentTasks) && c.InstanceID < best.InstanceID) {
 			best = c
 		}
 	}
@@ -77,7 +95,7 @@ func selectByCapabilityOrLoad(task *domain.Task, state *domain.CollabState) *dom
 func selectLeastLoaded(state *domain.CollabState, requiredCaps []string) *domain.AgentInstance {
 	var best *domain.AgentInstance
 	for _, inst := range state.AgentInstances {
-		if inst == nil || inst.Role != domain.RoleWorker {
+		if !isAssignable(state, inst) {
 			continue
 		}
 		if len(requiredCaps) > 0 {
@@ -102,7 +120,8 @@ func selectLeastLoaded(state *domain.CollabState, requiredCaps []string) *domain
 		if len(inst.CurrentTasks) >= inst.MaxTasks {
 			continue
 		}
-		if best == nil || len(inst.CurrentTasks) < len(best.CurrentTasks) {
+		if best == nil || len(inst.CurrentTasks) < len(best.CurrentTasks) ||
+			(len(inst.CurrentTasks) == len(best.CurrentTasks) && inst.InstanceID < best.InstanceID) {
 			best = inst
 		}
 	}
@@ -249,7 +268,8 @@ func EnsureWorkContextWorktree(state *domain.CollabState, task *domain.Task, wor
 }
 
 // selectWithExclusions picks the least-loaded worker that matches task capabilities
-// but is not one of the excluded agent types.
+// but is not one of the excluded agent types. Skips offline workers and
+// task-bound child instances (see isAssignable).
 func selectWithExclusions(task *domain.Task, state *domain.CollabState, excludeTypes []string) *domain.AgentInstance {
 	excluded := make(map[string]bool, len(excludeTypes))
 	for _, t := range excludeTypes {
@@ -258,7 +278,7 @@ func selectWithExclusions(task *domain.Task, state *domain.CollabState, excludeT
 
 	var best *domain.AgentInstance
 	for _, inst := range state.AgentInstances {
-		if inst == nil || inst.Role != domain.RoleWorker {
+		if !isAssignable(state, inst) {
 			continue
 		}
 		if excluded[inst.AgentType] {
@@ -289,7 +309,8 @@ func selectWithExclusions(task *domain.Task, state *domain.CollabState, excludeT
 		if len(inst.CurrentTasks) >= inst.MaxTasks {
 			continue
 		}
-		if best == nil || len(inst.CurrentTasks) < len(best.CurrentTasks) {
+		if best == nil || len(inst.CurrentTasks) < len(best.CurrentTasks) ||
+			(len(inst.CurrentTasks) == len(best.CurrentTasks) && inst.InstanceID < best.InstanceID) {
 			best = inst
 		}
 	}

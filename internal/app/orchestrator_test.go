@@ -136,6 +136,64 @@ func TestAssignTask_StoresParentType(t *testing.T) {
 	}
 }
 
+// TestOrchestrator_SkipsOfflineCandidates (H4) — workers with status
+// "offline" must not be selected for new task assignments. Otherwise the
+// orchestrator hands work to a process that isn't connected, the task
+// sits idle until the watchdog reaps it, and the user sees mysterious
+// "task assigned but never started" failures.
+func TestOrchestrator_SkipsOfflineCandidates(t *testing.T) {
+	orch := NewTaskOrchestrator(nil, "least_loaded")
+
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		AgentInstances: map[string]*domain.AgentInstance{
+			"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", MaxTasks: 5},
+			"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "offline", MaxTasks: 1, CurrentTasks: []int{}},
+			"codex":       {InstanceID: "codex", AgentType: "codex", Role: domain.RoleWorker, Status: "idle", MaxTasks: 1, CurrentTasks: []int{}},
+		},
+	}
+
+	task := &domain.Task{ID: 1, Title: "New work", Status: "pending", AssignedTo: "any"}
+
+	result := orch.AssignTask(task, state)
+	if result == "claude-code" {
+		t.Errorf("orchestrator should not assign offline worker; got %q", result)
+	}
+	if result != "codex" {
+		t.Errorf("expected codex (only online candidate); got %q", result)
+	}
+}
+
+// TestOrchestrator_SkipsTaskBoundCandidates (M6) — task-bound instances
+// (InstanceID "<type>-task-N") exist solely to run their owning task and
+// must never be picked up for additional work. Selecting one for a new
+// task results in two tasks racing on the same worker process and a
+// reap surprise when the original task completes.
+func TestOrchestrator_SkipsTaskBoundCandidates(t *testing.T) {
+	orch := NewTaskOrchestrator(nil, "least_loaded")
+
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		AgentInstances: map[string]*domain.AgentInstance{
+			"cursor": {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "working", MaxTasks: 5},
+			"claude-code-task-99": {
+				InstanceID: "claude-code-task-99", AgentType: "claude-code",
+				Role: domain.RoleWorker, Status: "idle", MaxTasks: 1, CurrentTasks: []int{},
+			},
+		},
+	}
+
+	task := &domain.Task{ID: 7, Title: "New work", Status: "pending", AssignedTo: "any"}
+
+	result := orch.AssignTask(task, state)
+	if result == "claude-code" {
+		t.Errorf("orchestrator must not select task-bound instance for new work; got %q", result)
+	}
+	if result != "" {
+		t.Errorf("expected no assignment (only candidate is task-bound); got %q", result)
+	}
+}
+
 // TestReassignTask_StoresParentType ensures ReassignTask follows the same
 // parent-type convention as AssignTask.
 func TestReassignTask_StoresParentType(t *testing.T) {

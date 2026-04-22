@@ -17,9 +17,15 @@ import (
 )
 
 // mockRepository implements app.StateRepository for tests. State is kept in memory.
+//
+// afterSave is an optional hook invoked after each Save (with the lock held).
+// Tests use it to simulate concurrent state mutations between successive
+// CollabService.Run invocations — e.g. the post-lock revalidation window
+// exploited by TestSpawnSideEffects_RevalidatesAfterStateLock.
 type mockRepository struct {
-	state *domain.CollabState
-	mu    sync.Mutex
+	state     *domain.CollabState
+	mu        sync.Mutex
+	afterSave func(state *domain.CollabState)
 }
 
 func newMockRepository() *mockRepository {
@@ -36,6 +42,9 @@ func (m *mockRepository) Save(state *domain.CollabState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state = state
+	if m.afterSave != nil {
+		m.afterSave(state)
+	}
 	return nil
 }
 

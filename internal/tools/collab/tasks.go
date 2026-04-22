@@ -165,8 +165,8 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				effectiveAssignee = assignedTo
 			}
 
-			// Spawn a fresh worker for this task if assigned to a worker
-			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != createdBy {
+			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != createdBy &&
+				revalidateSpawn(svc, taskID, effectiveAssignee) {
 				spawner.SpawnForTask(taskID, effectiveAssignee)
 			}
 
@@ -512,7 +512,8 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				return nil, err
 			}
 
-			if spawner != nil && spawnAssignee != "" && spawnAssignee != updatedBy {
+			if spawner != nil && spawnAssignee != "" && spawnAssignee != updatedBy &&
+				revalidateSpawn(svc, taskID, spawnAssignee) {
 				spawner.SpawnForTask(taskID, spawnAssignee)
 			}
 
@@ -593,7 +594,8 @@ func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				return nil, err
 			}
 
-			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != updatedBy {
+			if spawner != nil && effectiveAssignee != "" && effectiveAssignee != "any" && effectiveAssignee != updatedBy &&
+				revalidateSpawn(svc, taskID, effectiveAssignee) {
 				spawner.SpawnForTask(taskID, effectiveAssignee)
 			}
 
@@ -606,3 +608,34 @@ func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log
 // removeTaskFromInstance and addTaskToInstance moved to internal/app
 // (RemoveTaskFromInstance / AddTaskToInstance) — single source of truth
 // shared with cli_api.go, dashboard/api.go, and watchdog.go.
+
+// revalidateSpawn re-checks task assignment and status under a fresh
+// state lock right before SpawnForTask is invoked. Between the original
+// write transaction releasing the lock and the spawner firing, another
+// writer (watchdog, dashboard, CLI) can cancel, reassign, or complete
+// the task — at which point spawning a worker would launch a process
+// that immediately finds nothing to do. Returns true only if the task
+// is still assigned to the expected agent and is in an active state.
+func revalidateSpawn(svc *app.CollabService, taskID int, expectedAssignee string) bool {
+	if svc == nil || expectedAssignee == "" {
+		return false
+	}
+	ok := false
+	_ = svc.Query(func(state *domain.CollabState) error {
+		for _, t := range state.Tasks {
+			if t.ID != taskID {
+				continue
+			}
+			if t.AssignedTo != expectedAssignee {
+				return nil
+			}
+			if t.Status != "pending" && t.Status != "in_progress" {
+				return nil
+			}
+			ok = true
+			return nil
+		}
+		return nil
+	})
+	return ok
+}

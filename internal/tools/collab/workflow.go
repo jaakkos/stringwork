@@ -182,7 +182,11 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 						if len(incomplete) > 0 {
 							continue
 						}
-						if bestTask == nil || task.Priority < bestTask.Priority {
+						// Deterministic tie-break on (Priority, ID) so two
+						// equal-priority tasks always pick the lower ID.
+						if bestTask == nil ||
+							task.Priority < bestTask.Priority ||
+							(task.Priority == bestTask.Priority && task.ID < bestTask.ID) {
 							bestTask = task
 							bestIdx = i
 						}
@@ -196,29 +200,16 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 							priorityNames[bestTask.Priority], bestTask.ID, escapeJSON(bestTask.Title)))
 						return nil
 					}
-					// Store the parent agent type so the task owner is tracked by
-					// type (not by ephemeral instance ID). Check if task was
-					// previously assigned elsewhere BEFORE the update so the
-					// CurrentTasks bookkeeping below runs only on first claim.
-					wasAssignedElsewhere := state.Tasks[bestIdx].AssignedTo != agentType && state.Tasks[bestIdx].AssignedTo != agent
+					// Store the parent agent type so the task owner is tracked
+					// by type (not by ephemeral instance ID). The CurrentTasks
+					// bookkeeping is delegated to app.AddTaskToInstance, which
+					// correctly skips task-bound siblings in its fallback scan
+					// — so a static-pool worker is always preferred over a
+					// task-bound twin of the same parent type.
 					state.Tasks[bestIdx].Status = "in_progress"
 					state.Tasks[bestIdx].AssignedTo = agentType
 					state.Tasks[bestIdx].UpdatedAt = time.Now()
-					// Track task on the worker instance (orchestrator may have already added when driver assigned)
-					if wasAssignedElsewhere {
-						if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
-							inst.CurrentTasks = append(inst.CurrentTasks, bestTask.ID)
-							inst.Status = "busy"
-						} else {
-							for _, i := range state.AgentInstances {
-								if i != nil && i.AgentType == agent {
-									i.CurrentTasks = append(i.CurrentTasks, bestTask.ID)
-									i.Status = "busy"
-									break
-								}
-							}
-						}
-					}
+					app.AddTaskToInstance(state, bestTask.ID, agent)
 					if state.Tasks[bestIdx].ContextID != "" {
 						autoLockTaskContextFiles(state, state.Tasks[bestIdx].ContextID, agent, svc.Policy().ValidatePath)
 					}
