@@ -390,12 +390,12 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					leavingInProgress := oldStatus == "in_progress" && task.Status != "in_progress"
 					assigneeChanged := oldAssignee != "" && task.AssignedTo != oldAssignee
 					if (leavingInProgress || assigneeChanged) && oldAssignee != "" {
-						removeTaskFromInstance(state, taskID, oldAssignee)
+						app.RemoveTaskFromInstance(state, taskID, oldAssignee)
 					}
 					// Add to new owner when entering in_progress
 					enteringInProgress := task.Status == "in_progress" && (oldStatus != "in_progress" || assigneeChanged)
 					if enteringInProgress && task.AssignedTo != "" && task.AssignedTo != "any" {
-						addTaskToInstance(state, taskID, task.AssignedTo)
+						app.AddTaskToInstance(state, taskID, task.AssignedTo)
 					}
 					// Reap task-bound instances on terminal transitions. A
 					// task-bound worker's whole reason for existing is the
@@ -435,7 +435,7 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 							if inst, ok := state.AgentInstances[updatedBy]; ok && inst != nil {
 								blockerType = inst.AgentType
 							}
-							removeTaskFromInstance(state, taskID, oldAssignee)
+							app.RemoveTaskFromInstance(state, taskID, oldAssignee)
 
 							newAssignee := orch.ReassignTask(task, state, []string{blockerType})
 							driver := app.ConfiguredDriver(state)
@@ -603,67 +603,6 @@ func registerReplayTask(s *server.MCPServer, svc *app.CollabService, logger *log
 	)
 }
 
-// removeTaskFromInstance removes taskID from the given agent's CurrentTasks.
-// Tries direct instance lookup first, then falls back to scanning all instances
-// (handles multi-instance agents where agent name differs from instance key).
-func removeTaskFromInstance(state *domain.CollabState, taskID int, agent string) {
-	if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
-		newTasks := make([]int, 0, len(inst.CurrentTasks))
-		for _, id := range inst.CurrentTasks {
-			if id != taskID {
-				newTasks = append(newTasks, id)
-			}
-		}
-		inst.CurrentTasks = newTasks
-		if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
-			inst.Status = "idle"
-		}
-		return
-	}
-	// Fallback: scan all instances for the task
-	for _, inst := range state.AgentInstances {
-		if inst == nil {
-			continue
-		}
-		for _, id := range inst.CurrentTasks {
-			if id == taskID {
-				newTasks := make([]int, 0, len(inst.CurrentTasks))
-				for _, tid := range inst.CurrentTasks {
-					if tid != taskID {
-						newTasks = append(newTasks, tid)
-					}
-				}
-				inst.CurrentTasks = newTasks
-				if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
-					inst.Status = "idle"
-				}
-				return
-			}
-		}
-	}
-}
-
-// addTaskToInstance adds taskID to the given agent's CurrentTasks (if not already present).
-// Tries direct instance lookup first, then falls back to matching by AgentType.
-func addTaskToInstance(state *domain.CollabState, taskID int, agent string) {
-	inst, ok := state.AgentInstances[agent]
-	if !ok || inst == nil {
-		// Fallback: find by AgentType
-		for _, i := range state.AgentInstances {
-			if i != nil && i.AgentType == agent {
-				inst = i
-				break
-			}
-		}
-	}
-	if inst == nil {
-		return
-	}
-	for _, id := range inst.CurrentTasks {
-		if id == taskID {
-			return // already tracked
-		}
-	}
-	inst.CurrentTasks = append(inst.CurrentTasks, taskID)
-	inst.Status = "busy"
-}
+// removeTaskFromInstance and addTaskToInstance moved to internal/app
+// (RemoveTaskFromInstance / AddTaskToInstance) — single source of truth
+// shared with cli_api.go, dashboard/api.go, and watchdog.go.

@@ -22,9 +22,17 @@ type workerAPI struct {
 	svc               *app.CollabService
 	registry          *app.SessionRegistry
 	logger            *log.Logger
+	spawner           taskSpawner
 	sessionIDRecorder interface {
 		SetWorkerSessionID(instanceID, sessionID string)
 	}
+}
+
+// taskSpawner mirrors collab.TaskSpawner so CLI handlers can request a fresh
+// worker process when a task is reassigned. Defined locally so this file
+// stays compileable without the collab import already present.
+type taskSpawner interface {
+	SpawnForTask(taskID int, assignedTo string)
 }
 
 func newWorkerAPI(svc *app.CollabService, registry *app.SessionRegistry, logger *log.Logger) *workerAPI {
@@ -258,9 +266,10 @@ func (w *workerAPI) handleTaskUpdate(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ID        int    `json:"id"`
-		UpdatedBy string `json:"updated_by"`
-		Status    string `json:"status"`
+		ID         int    `json:"id"`
+		UpdatedBy  string `json:"updated_by"`
+		Status     string `json:"status"`
+		AssignedTo string `json:"assigned_to"`
 	}
 	if !decodeJSON(rw, r, &req) {
 		return
@@ -277,51 +286,50 @@ func (w *workerAPI) handleTaskUpdate(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var result *app.ApplyTaskTransitionResult
+	var taskTitle string
 	err := w.svc.Run(func(state *domain.CollabState) error {
 		resolveWorkerAgent(state, req.UpdatedBy)
 		extra := app.RegisteredAgentNames(state)
 		if err := app.ValidateAgent(req.UpdatedBy, state, false, false, extra...); err != nil {
 			return err
 		}
-		for i := range state.Tasks {
-			if state.Tasks[i].ID != req.ID {
-				continue
+		if req.AssignedTo != "" {
+			if err := app.ValidateAgent(req.AssignedTo, state, true, false, extra...); err != nil {
+				return err
 			}
-			task := &state.Tasks[i]
-			oldStatus := task.Status
-			if req.Status != "" {
-				if req.Status == "completed" && task.RequiresReview && task.ReviewStatus != "approved" {
-					return fmt.Errorf("cannot complete task: review required (current status: %s)", task.ReviewStatus)
-				}
-				task.Status = req.Status
-			}
-			task.UpdatedAt = time.Now()
-
-			if oldStatus != task.Status {
-				if task.Status == "completed" || task.Status == "cancelled" {
-					removeTaskFromInstance(state, task.AssignedTo, task.ID)
-				} else if task.Status == "in_progress" && oldStatus != "in_progress" {
-					addTaskToInstance(state, task.AssignedTo, task.ID)
-				}
-				if task.Status == "completed" {
-					driver := app.ConfiguredDriver(state)
-					state.Messages = append(state.Messages, domain.Message{
-						ID:        state.NextMsgID,
-						From:      "system",
-						To:        driver,
-						Content:   fmt.Sprintf("Task #%d **%s** completed by %s", task.ID, task.Title, req.UpdatedBy),
-						Timestamp: time.Now(),
-					})
-					state.NextMsgID++
-				}
-			}
-			return nil
 		}
-		return fmt.Errorf("task #%d not found", req.ID)
+
+		res, err := app.ApplyTaskTransition(state, req.ID, app.ApplyTaskTransitionOpts{
+			NewStatus:   req.Status,
+			NewAssignee: req.AssignedTo,
+			UpdatedBy:   req.UpdatedBy,
+		})
+		if err != nil {
+			return err
+		}
+		result = res
+		taskTitle = res.Task.Title
+
+		if req.Status == "completed" && res.OldStatus != "completed" {
+			driver := app.ConfiguredDriver(state)
+			state.Messages = append(state.Messages, domain.Message{
+				ID:        state.NextMsgID,
+				From:      "system",
+				To:        driver,
+				Content:   fmt.Sprintf("Task #%d **%s** completed by %s", req.ID, taskTitle, req.UpdatedBy),
+				Timestamp: time.Now(),
+			})
+			state.NextMsgID++
+		}
+		return nil
 	})
 	if err != nil {
 		writeError(rw, err.Error())
 		return
+	}
+	if w.spawner != nil && result != nil && result.NeedsSpawn {
+		w.spawner.SpawnForTask(req.ID, result.SpawnAssignee)
 	}
 	w.logger.Printf("Task #%d updated by %s (status: %s)", req.ID, req.UpdatedBy, req.Status)
 	w.writeWithBanner(rw, fmt.Sprintf("Task #%d updated", req.ID), req.UpdatedBy, "update_task")
@@ -735,32 +743,6 @@ func resolveWorkerAgent(state *domain.CollabState, agent string) string {
 		return agent
 	}
 	return agent
-}
-
-func removeTaskFromInstance(state *domain.CollabState, agent string, taskID int) {
-	inst := findInstance(state, agent)
-	if inst == nil {
-		return
-	}
-	for i, id := range inst.CurrentTasks {
-		if id == taskID {
-			inst.CurrentTasks = append(inst.CurrentTasks[:i], inst.CurrentTasks[i+1:]...)
-			break
-		}
-	}
-}
-
-func addTaskToInstance(state *domain.CollabState, agent string, taskID int) {
-	inst := findInstance(state, agent)
-	if inst == nil {
-		return
-	}
-	for _, id := range inst.CurrentTasks {
-		if id == taskID {
-			return
-		}
-	}
-	inst.CurrentTasks = append(inst.CurrentTasks, taskID)
 }
 
 func formatConstraintsCLI(constraints []string) string {

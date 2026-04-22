@@ -87,7 +87,7 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 						app.SaveOutputToWorkContext(state, t.ID, capturedOutput, agent, t.ProgressDescription, logger)
 					}
 
-					removeTaskFromInstance(state, t.ID, t.AssignedTo)
+					app.RemoveTaskFromInstance(state, t.ID, t.AssignedTo)
 				}
 
 				// Reap task-bound instance rows; idle out static pool rows.

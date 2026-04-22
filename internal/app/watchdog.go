@@ -499,7 +499,7 @@ func (w *Watchdog) check() {
 			}
 
 			// Clean up the agent instance's task list
-			removeTaskFromInstanceByID(state, t.ID, oldAssignee)
+			RemoveTaskFromInstance(state, t.ID, oldAssignee)
 			recoveredTasks++
 		}
 
@@ -681,7 +681,7 @@ func (w *Watchdog) check() {
 						t.Status = "pending"
 						t.ResultSummary = fmt.Sprintf("Auto-cancelled (failure %d/%d): worker did not report progress. Output captured for replacement.", t.FailureCount, w.maxTaskFailures)
 					}
-					removeTaskFromInstanceByID(state, t.ID, oldAssignee)
+					RemoveTaskFromInstance(state, t.ID, oldAssignee)
 					recoveredTasks++
 					content += fmt.Sprintf("\n\nTask reset to %s (failure %d/%d). Previous output captured (%d bytes).",
 						t.Status, t.FailureCount, w.maxTaskFailures, len(capturedOutput))
@@ -969,46 +969,6 @@ func (w *Watchdog) pruneStaleSessions() int {
 	}
 
 	return pruned
-}
-
-// removeTaskFromInstanceByID removes a task ID from the given agent's CurrentTasks.
-// Similar to removeTaskFromInstance in tasks.go but works by instance ID directly.
-func removeTaskFromInstanceByID(state *domain.CollabState, taskID int, agent string) {
-	// Direct instance lookup
-	if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
-		newTasks := make([]int, 0, len(inst.CurrentTasks))
-		for _, id := range inst.CurrentTasks {
-			if id != taskID {
-				newTasks = append(newTasks, id)
-			}
-		}
-		inst.CurrentTasks = newTasks
-		if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
-			inst.Status = "idle"
-		}
-		return
-	}
-	// Fallback: scan all instances
-	for _, inst := range state.AgentInstances {
-		if inst == nil {
-			continue
-		}
-		for _, id := range inst.CurrentTasks {
-			if id == taskID {
-				newTasks := make([]int, 0, len(inst.CurrentTasks))
-				for _, tid := range inst.CurrentTasks {
-					if tid != taskID {
-						newTasks = append(newTasks, tid)
-					}
-				}
-				inst.CurrentTasks = newTasks
-				if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
-					inst.Status = "idle"
-				}
-				return
-			}
-		}
-	}
 }
 
 // workerActivityStatus classifies the state of a worker's process.

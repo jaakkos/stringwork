@@ -467,6 +467,7 @@ func buildHTTPHandler(bundle *serverBundle, baseURL string, port int) http.Handl
 	wAPI := newWorkerAPI(bundle.svc, bundle.registry, bundle.logger)
 	if bundle.wm != nil {
 		wAPI.sessionIDRecorder = bundle.wm
+		wAPI.spawner = bundle.wm
 	}
 	wAPI.RegisterRoutes(mux)
 

@@ -875,7 +875,7 @@ func (h *Handler) handleAPICancelAgent(w http.ResponseWriter, r *http.Request) {
 			if capturedOutput != "" {
 				app.SaveOutputToWorkContext(state, t.ID, capturedOutput, req.Agent, t.ProgressDescription, h.logger)
 			}
-			removeTaskFromInstanceCancel(state, t.ID, t.AssignedTo)
+			app.RemoveTaskFromInstance(state, t.ID, t.AssignedTo)
 		}
 
 		// Reap task-bound rows; idle out static-pool rows (matches
@@ -1368,34 +1368,6 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(map[string]string{"error": msg})
-}
-
-// removeTaskFromInstanceCancel mirrors the helper in collab/tasks.go;
-// duplicated here so the dashboard package can stay free of the collab
-// import (which would pull in mcp-go server bindings into the HTTP layer).
-func removeTaskFromInstanceCancel(state *domain.CollabState, taskID int, agent string) {
-	if state == nil {
-		return
-	}
-	inst, ok := state.AgentInstances[agent]
-	if !ok || inst == nil {
-		for _, candidate := range state.AgentInstances {
-			if candidate != nil && candidate.AgentType == agent {
-				inst = candidate
-				break
-			}
-		}
-	}
-	if inst == nil {
-		return
-	}
-	filtered := inst.CurrentTasks[:0]
-	for _, id := range inst.CurrentTasks {
-		if id != taskID {
-			filtered = append(filtered, id)
-		}
-	}
-	inst.CurrentTasks = filtered
 }
 
 // clonePruneState shallow-copies the maps PrunePresence/PruneInstances

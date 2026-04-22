@@ -236,6 +236,232 @@ func ReapTaskBoundInstanceForTask(state *domain.CollabState, agentType string, t
 	return instanceID
 }
 
+// RemoveTaskFromInstance removes taskID from the matching AgentInstance's
+// CurrentTasks slice. Tries direct InstanceID lookup first; on miss, scans
+// every instance and removes from the first one that lists the task. When
+// the match's CurrentTasks becomes empty and Status is "busy", flips
+// Status back to "idle". Safe to call when no instance owns the task — it
+// becomes a no-op.
+//
+// This is the single canonical implementation. Replaces the four
+// near-identical copies that previously lived in cli_api.go,
+// dashboard/api.go, watchdog.go, and tools/collab/tasks.go (some with
+// swapped argument order).
+func RemoveTaskFromInstance(state *domain.CollabState, taskID int, agent string) {
+	if state == nil || agent == "" {
+		return
+	}
+	if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
+		removeTaskID(inst, taskID)
+		return
+	}
+	for _, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		for _, id := range inst.CurrentTasks {
+			if id == taskID {
+				removeTaskID(inst, taskID)
+				return
+			}
+		}
+	}
+}
+
+func removeTaskID(inst *domain.AgentInstance, taskID int) {
+	filtered := make([]int, 0, len(inst.CurrentTasks))
+	for _, id := range inst.CurrentTasks {
+		if id != taskID {
+			filtered = append(filtered, id)
+		}
+	}
+	inst.CurrentTasks = filtered
+	if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
+		inst.Status = "idle"
+	}
+}
+
+// AddTaskToInstance adds taskID to the matching AgentInstance's
+// CurrentTasks slice. Tries direct InstanceID lookup first; on miss, scans
+// every instance and uses the first whose AgentType matches `agent`.
+// Idempotent: re-adding an already-tracked task is a no-op. On success,
+// flips Status to "busy".
+//
+// Safe to call when no matching instance exists (no-op).
+func AddTaskToInstance(state *domain.CollabState, taskID int, agent string) {
+	if state == nil || agent == "" {
+		return
+	}
+	inst, ok := state.AgentInstances[agent]
+	if !ok || inst == nil {
+		for _, candidate := range state.AgentInstances {
+			if candidate != nil && candidate.AgentType == agent {
+				inst = candidate
+				break
+			}
+		}
+	}
+	if inst == nil {
+		return
+	}
+	for _, id := range inst.CurrentTasks {
+		if id == taskID {
+			return
+		}
+	}
+	inst.CurrentTasks = append(inst.CurrentTasks, taskID)
+	inst.Status = "busy"
+}
+
+// ApplyTaskTransitionOpts configures a task status / assignment change
+// processed by ApplyTaskTransition. NewStatus and NewAssignee are optional:
+// "" leaves the corresponding task field unchanged.
+type ApplyTaskTransitionOpts struct {
+	NewStatus          string // "" leaves task.Status unchanged
+	NewAssignee        string // "" leaves task.AssignedTo unchanged
+	UpdatedBy          string // who is making the update (used to skip self-spawn)
+	SkipReviewGate     bool   // bypass requires_review check (replay paths)
+	SkipDependencyGate bool   // bypass dependency completeness check
+}
+
+// ApplyTaskTransitionResult reports the side effects of a task transition
+// so callers can drive post-lock work (spawning workers, sending messages).
+// The returned Task pointer is into state.Tasks — do not retain past the
+// state-lock release.
+type ApplyTaskTransitionResult struct {
+	Task          *domain.Task
+	OldStatus     string
+	OldAssignee   string
+	IsTerminal    bool   // task ended in completed / cancelled / blocked
+	NeedsSpawn    bool   // caller should call spawner.SpawnForTask
+	SpawnAssignee string // who to spawn for, when NeedsSpawn
+}
+
+// ApplyTaskTransition applies a status/assignment change to a task with
+// uniform validation and bookkeeping across the MCP and CLI write paths.
+// Caller must hold the state lock (typically inside CollabService.Run).
+//
+// Side effects performed when validation passes:
+//   - validates dependency completeness when transitioning to in_progress
+//     (override with SkipDependencyGate)
+//   - validates review approval when transitioning to completed
+//     (override with SkipReviewGate)
+//   - rejects regression from a terminal state (completed/cancelled/blocked)
+//     back to an active state — use replay_task to re-open
+//   - removes taskID from the old assignee's CurrentTasks when leaving
+//     in_progress or when the assignee changes
+//   - adds taskID to the new assignee's CurrentTasks when entering
+//     in_progress
+//   - reaps the task-bound AgentInstance (and its Presence row) on
+//     terminal transitions (completed, cancelled, blocked) — for the
+//     parent agent type only, matching "<type>-task-<taskID>"
+//   - sets task.UpdatedAt to time.Now()
+//
+// Returns an error for invalid transitions; in that case state is not
+// modified. Returns the result describing what changed when successful.
+func ApplyTaskTransition(state *domain.CollabState, taskID int, opts ApplyTaskTransitionOpts) (*ApplyTaskTransitionResult, error) {
+	if state == nil {
+		return nil, fmt.Errorf("ApplyTaskTransition: state is nil")
+	}
+
+	var task *domain.Task
+	for i := range state.Tasks {
+		if state.Tasks[i].ID == taskID {
+			task = &state.Tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task #%d not found", taskID)
+	}
+
+	oldStatus := task.Status
+	oldAssignee := task.AssignedTo
+
+	terminal := func(s string) bool {
+		return s == "completed" || s == "cancelled" || s == "blocked"
+	}
+
+	newStatus := opts.NewStatus
+	if newStatus == "" {
+		newStatus = oldStatus
+	}
+
+	if newStatus != oldStatus && terminal(oldStatus) && !terminal(newStatus) {
+		return nil, fmt.Errorf("cannot transition task #%d from %q to %q: terminal states are write-once (use replay_task to re-open)", taskID, oldStatus, newStatus)
+	}
+
+	if opts.NewStatus != "" && opts.NewStatus == "in_progress" && oldStatus != "in_progress" && !opts.SkipDependencyGate {
+		var incomplete []int
+		for _, depID := range task.Dependencies {
+			for _, t := range state.Tasks {
+				if t.ID == depID && t.Status != "completed" {
+					incomplete = append(incomplete, depID)
+					break
+				}
+			}
+		}
+		if len(incomplete) > 0 {
+			return nil, fmt.Errorf("cannot start: dependencies not complete: %v", incomplete)
+		}
+	}
+
+	if opts.NewStatus == "completed" && task.RequiresReview && task.ReviewStatus != "approved" && !opts.SkipReviewGate {
+		return nil, fmt.Errorf("cannot complete task: review required (current status: %s)", task.ReviewStatus)
+	}
+
+	if opts.NewStatus != "" {
+		task.Status = opts.NewStatus
+	}
+
+	newAssignee := oldAssignee
+	if opts.NewAssignee != "" {
+		task.AssignedTo = opts.NewAssignee
+		newAssignee = opts.NewAssignee
+	}
+
+	leavingInProgress := oldStatus == "in_progress" && task.Status != "in_progress"
+	assigneeChanged := oldAssignee != "" && newAssignee != oldAssignee
+	if (leavingInProgress || assigneeChanged) && oldAssignee != "" {
+		RemoveTaskFromInstance(state, taskID, oldAssignee)
+	}
+
+	enteringInProgress := task.Status == "in_progress" && (oldStatus != "in_progress" || assigneeChanged)
+	if enteringInProgress && newAssignee != "" && newAssignee != "any" {
+		AddTaskToInstance(state, taskID, newAssignee)
+	}
+
+	isTerminal := terminal(task.Status)
+	if isTerminal {
+		if oldAssignee != "" {
+			ReapTaskBoundInstanceForTask(state, oldAssignee, taskID)
+		}
+		if newAssignee != "" && newAssignee != "any" && newAssignee != oldAssignee {
+			ReapTaskBoundInstanceForTask(state, newAssignee, taskID)
+		}
+	}
+
+	task.UpdatedAt = time.Now()
+
+	res := &ApplyTaskTransitionResult{
+		Task:        task,
+		OldStatus:   oldStatus,
+		OldAssignee: oldAssignee,
+		IsTerminal:  isTerminal,
+	}
+
+	// Spawn semantics: a real worker (not "any") was newly assigned (or
+	// re-assigned) and the task is in an active state. Don't self-spawn
+	// when the updater themselves owns the new assignment.
+	if newAssignee != "" && newAssignee != "any" && newAssignee != oldAssignee &&
+		newAssignee != opts.UpdatedBy && (task.Status == "pending" || task.Status == "in_progress") {
+		res.NeedsSpawn = true
+		res.SpawnAssignee = newAssignee
+	}
+
+	return res, nil
+}
+
 // IsBuiltinAgent returns true if agent is a known instance or agent type in state.AgentInstances.
 func IsBuiltinAgent(agent string, state *domain.CollabState) bool {
 	if state == nil {
