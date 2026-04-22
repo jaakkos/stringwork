@@ -156,6 +156,186 @@ func TestHandoff_AutoFindInProgressTask(t *testing.T) {
 	}
 }
 
+// TestHandoff_RemovesTaskFromActualTaskBoundOwner (C2) — when the
+// task is being run by a task-bound child (e.g. "claude-code-task-7")
+// while a static-pool sibling ("claude-code") also exists, handoff must
+// remove the task from the actual owner — the task-bound row — not just
+// from whichever instance happens to match the parent agent name first.
+// Previously the early-return-on-direct-lookup hit the static row,
+// found nothing to remove, and left the task-bound row's CurrentTasks
+// pointing at a now-handed-off task.
+func TestHandoff_RemovesTaskFromActualTaskBoundOwner(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "working", MaxTasks: 5,
+	}
+	staticID, taskBoundID := seedStaticAndTaskBound(t, repo.state, "claude-code", 1)
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "T", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+	}
+	repo.state.NextTaskID = 2
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"from":       "claude-code",
+		"to":         "cursor",
+		"task_id":    float64(1),
+		"summary":    "Handing back",
+		"next_steps": "Take over",
+	}
+	if _, err := callTool(t, srv, "handoff", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	taskBoundInst := repo.state.AgentInstances[taskBoundID]
+	if taskBoundInst == nil {
+		t.Fatalf("task-bound instance %q missing", taskBoundID)
+	}
+	for _, id := range taskBoundInst.CurrentTasks {
+		if id == 1 {
+			t.Errorf("task-bound owner %q must drop task #1 after handoff; got CurrentTasks=%v", taskBoundID, taskBoundInst.CurrentTasks)
+		}
+	}
+	if taskBoundInst.Status != "idle" {
+		t.Errorf("task-bound instance should be idle after losing its only task; got %q", taskBoundInst.Status)
+	}
+
+	// The static-pool sibling never owned the task and should remain idle/empty.
+	staticInst := repo.state.AgentInstances[staticID]
+	if staticInst == nil {
+		t.Fatalf("static instance %q missing", staticID)
+	}
+	if len(staticInst.CurrentTasks) != 0 {
+		t.Errorf("static instance should still have no tasks; got %v", staticInst.CurrentTasks)
+	}
+}
+
+// TestHandoff_NormalizesInstanceIDToParentType (H1) — when the user
+// hands off to a concrete instance ID (e.g. "claude-code-1") or a
+// task-bound ID, the task's AssignedTo must be normalized to the parent
+// agent type so downstream watchdog and liveness checks can correlate
+// task-bound child workers with the assignment. Storing the raw
+// instance ID was the root cause of long-lived "AssignedTo holds an
+// ephemeral ID" corruption that MigrateTaskBoundCorruption had to
+// repair on load.
+func TestHandoff_NormalizesInstanceIDToParentType(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "working", MaxTasks: 5,
+	}
+	delete(repo.state.AgentInstances, "claude-code")
+	repo.state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "idle",
+		MaxTasks:      1,
+		CurrentTasks:  []int{},
+		LastHeartbeat: time.Now(),
+	}
+	repo.state.RegisteredAgents["claude-code"] = &domain.RegisteredAgent{
+		Name: "claude-code", RegisteredAt: time.Now(), LastSeen: time.Now(),
+	}
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "T", Status: "in_progress", AssignedTo: "cursor", CreatedBy: "cursor"},
+	}
+	repo.state.NextTaskID = 2
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"from":       "cursor",
+		"to":         "claude-code-1",
+		"task_id":    float64(1),
+		"summary":    "Handing off",
+		"next_steps": "Implement",
+	}
+	if _, err := callTool(t, srv, "handoff", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if repo.state.Tasks[0].AssignedTo != "claude-code" {
+		t.Errorf("task.AssignedTo should normalize to parent type 'claude-code', got %q", repo.state.Tasks[0].AssignedTo)
+	}
+}
+
+// TestHandoff_TaskIDAcrossMultipleSiblings (C2) — when several
+// task-bound siblings of the same parent type exist and the handoff
+// targets a specific task ID, removal must scan every instance and
+// strip the task from whichever one is actually carrying it. The pre-
+// fix early-return logic broke this when state.AgentInstances had a
+// direct hit on the parent name but the real owner was a sibling.
+func TestHandoff_TaskIDAcrossMultipleSiblings(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "working", MaxTasks: 5,
+	}
+	delete(repo.state.AgentInstances, "claude-code")
+	repo.state.RegisteredAgents["claude-code"] = &domain.RegisteredAgent{
+		Name: "claude-code", RegisteredAt: time.Now(), LastSeen: time.Now(),
+	}
+	repo.state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code",
+		Role: domain.RoleWorker, Status: "idle", MaxTasks: 1, CurrentTasks: []int{},
+	}
+	repo.state.AgentInstances["claude-code-task-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-task-1", AgentType: "claude-code",
+		Role: domain.RoleWorker, Status: "busy", MaxTasks: 1, CurrentTasks: []int{1},
+	}
+	repo.state.AgentInstances["claude-code-task-2"] = &domain.AgentInstance{
+		InstanceID: "claude-code-task-2", AgentType: "claude-code",
+		Role: domain.RoleWorker, Status: "busy", MaxTasks: 1, CurrentTasks: []int{2},
+	}
+
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "T1", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+		{ID: 2, Title: "T2", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+	}
+	repo.state.NextTaskID = 3
+
+	srv := testServer(svc, logger)
+
+	args := map[string]any{
+		"from":       "claude-code",
+		"to":         "cursor",
+		"task_id":    float64(2),
+		"summary":    "Handing back T2",
+		"next_steps": "Finish",
+	}
+	if _, err := callTool(t, srv, "handoff", args); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	owner1 := repo.state.AgentInstances["claude-code-task-1"]
+	owner2 := repo.state.AgentInstances["claude-code-task-2"]
+
+	if owner1 == nil || len(owner1.CurrentTasks) != 1 || owner1.CurrentTasks[0] != 1 {
+		t.Errorf("claude-code-task-1 should still hold task 1, got %v", owner1.CurrentTasks)
+	}
+	if owner2 == nil {
+		t.Fatal("claude-code-task-2 missing")
+	}
+	for _, id := range owner2.CurrentTasks {
+		if id == 2 {
+			t.Errorf("claude-code-task-2 should drop task #2 after handoff, got %v", owner2.CurrentTasks)
+		}
+	}
+}
+
 func TestHandoff_InvalidAgents(t *testing.T) {
 	svc, _ := newTestService()
 	logger := log.New(io.Discard, "", 0)

@@ -58,51 +58,53 @@ func registerHandoff(s *server.MCPServer, svc *app.CollabService, logger *log.Lo
 				}
 
 				if taskID > 0 {
+					// Normalize the new assignee to its parent agent type so
+					// downstream watchdog / liveness correlation works
+					// uniformly whether the caller passes a parent name
+					// ("claude-code"), a static-pool instance ID
+					// ("claude-code-1"), or a task-bound child ID
+					// ("claude-code-task-7"). Storing the raw instance ID was
+					// the root of long-lived AssignedTo corruption that
+					// MigrateTaskBoundCorruption otherwise had to repair.
+					normalizedTo := app.ResolveParentAgentType(state, to)
 					for i := range state.Tasks {
 						if state.Tasks[i].ID == taskID {
-							oldAssignee := state.Tasks[i].AssignedTo
-							state.Tasks[i].AssignedTo = to
+							state.Tasks[i].AssignedTo = normalizedTo
 							state.Tasks[i].Status = "pending"
 							state.Tasks[i].UpdatedAt = time.Now()
-							taskInfo = fmt.Sprintf(" (Task #%d reassigned to %s)", taskID, to)
-							// Clean up old assignee's CurrentTasks.
-							// Try direct instance lookup first; fall back to scanning all instances
-							// (handles multi-instance agents where oldAssignee is "claude-code" but
-							// the instance key is "claude-code-1").
-							if oldAssignee != "" && oldAssignee != to {
-								if inst, ok := state.AgentInstances[oldAssignee]; ok && inst != nil {
-									newTasks := make([]int, 0, len(inst.CurrentTasks))
-									for _, tid := range inst.CurrentTasks {
-										if tid != taskID {
-											newTasks = append(newTasks, tid)
-										}
+							taskInfo = fmt.Sprintf(" (Task #%d reassigned to %s)", taskID, normalizedTo)
+							// Always-scan removal: a task can be carried by a
+							// task-bound child ("claude-code-task-7") even
+							// when the parent name ("claude-code") still has
+							// its own static-pool row in AgentInstances. The
+							// previous direct-lookup-first short-circuit
+							// would hit the static row, find nothing, and
+							// silently leave the actual owner with a stale
+							// CurrentTasks entry. We strip the task from
+							// every instance that lists it.
+							for _, inst := range state.AgentInstances {
+								if inst == nil {
+									continue
+								}
+								owns := false
+								for _, id := range inst.CurrentTasks {
+									if id == taskID {
+										owns = true
+										break
 									}
-									inst.CurrentTasks = newTasks
-									if len(inst.CurrentTasks) == 0 {
-										inst.Status = "idle"
+								}
+								if !owns {
+									continue
+								}
+								newTasks := make([]int, 0, len(inst.CurrentTasks))
+								for _, tid := range inst.CurrentTasks {
+									if tid != taskID {
+										newTasks = append(newTasks, tid)
 									}
-								} else {
-									// Fallback: scan all instances for the task
-									for _, inst := range state.AgentInstances {
-										if inst == nil {
-											continue
-										}
-										for _, id := range inst.CurrentTasks {
-											if id == taskID {
-												newTasks := make([]int, 0, len(inst.CurrentTasks))
-												for _, tid := range inst.CurrentTasks {
-													if tid != taskID {
-														newTasks = append(newTasks, tid)
-													}
-												}
-												inst.CurrentTasks = newTasks
-												if len(inst.CurrentTasks) == 0 {
-													inst.Status = "idle"
-												}
-												break
-											}
-										}
-									}
+								}
+								inst.CurrentTasks = newTasks
+								if len(inst.CurrentTasks) == 0 && inst.Status == "busy" {
+									inst.Status = "idle"
 								}
 							}
 							break
