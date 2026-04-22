@@ -77,16 +77,25 @@ function renderWorkers(state) {
 
   let html = "";
   for (const w of workers) {
-    const agent = agentMap[w.instance_id] || {};
-    const isActive = w.status !== "offline" && w.status !== "idle";
-    const statusClass =
-      w.status === "offline"
-        ? "offline"
-        : w.status === "busy"
-          ? "busy"
-          : w.status === "idle"
-            ? "idle"
-            : "working";
+    // Task-bound workers (e.g. "claude-code-task-7") have no agentMap entry
+    // keyed by instance_id — fall back to the agent_type so role still
+    // resolves. Mirrors the dashboard's grouping logic in page.go.
+    const agent =
+      agentMap[w.instance_id] || agentMap[w.agent_type] || {};
+
+    // Offline / unreachable rules: backend now writes Status="offline" on
+    // stale rows + flips Reachable=false; treat both signals as authoritative
+    // so a stale "busy" row never sneaks "working" UI through.
+    const offline = w.status === "offline" || w.reachable === false;
+    const isActive = !offline && w.status !== "idle";
+
+    const statusClass = offline
+      ? "offline"
+      : w.status === "busy"
+        ? "busy"
+        : w.status === "idle"
+          ? "idle"
+          : "working";
 
     const task = isActive ? taskMap[w.instance_id] : null;
     const taskTitle = task ? truncate(task.title, 45) : "";
@@ -96,16 +105,20 @@ function renderWorkers(state) {
         ? clampPct((w.progress_step / w.progress_total_steps) * 100)
         : null;
 
-    const statusLabel = w.status === "offline"
+    const statusLabel = offline
       ? `<div class="worker-task" style="color:var(--text-dim)">offline${w.last_heartbeat ? " \u00b7 last seen " + escHtml(w.last_heartbeat) : ""}</div>`
       : w.status === "idle"
         ? `<div class="worker-task" style="color:var(--text-dim)">idle</div>`
         : "";
 
+    const taskBoundHint = w.is_task_bound
+      ? ` <span class="task-bound-hint" title="Task-bound worker — lifetime tied to task #${w.bound_task_id || "?"}">task-${w.bound_task_id || "?"}</span>`
+      : "";
+
     html += `<div class="worker-row">
       <span class="worker-dot ${statusClass}"></span>
       <div class="worker-info">
-        <div class="worker-name">${escHtml(w.instance_id)}<span class="role">${escHtml(agent.role || w.agent_type || "")}</span></div>
+        <div class="worker-name">${escHtml(w.instance_id)}${taskBoundHint}<span class="role">${escHtml(agent.role || w.agent_type || "")}</span></div>
         ${!isActive ? statusLabel : ""}
         ${taskTitle ? `<div class="worker-task">${escHtml(taskTitle)}</div>` : ""}
         ${isActive && w.progress ? `<div class="worker-task" title="${escAttr(w.progress)}">${escHtml(truncate(w.progress, 60))}</div>` : ""}

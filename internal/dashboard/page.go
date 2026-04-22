@@ -183,6 +183,8 @@ const dashboardHTML = `<!DOCTYPE html>
   .badge.busy { background: #2a1f0d; color: var(--yellow); }
   .badge.offline { background: #21090d; color: var(--text-dim); }
   .badge.working { background: #0c2d6b; color: var(--accent); }
+  .badge.task-bound { background: #2a1542; color: var(--purple); border: 1px solid #3d1f5e; }
+  .badge.recovered { background: #2a2200; color: var(--orange); border: 1px solid #3d3000; }
 
   /* Priority indicators */
   .priority {
@@ -299,6 +301,16 @@ const dashboardHTML = `<!DOCTYPE html>
     font-style: italic;
   }
   .agent-pill.stale, .worker-card.stale { opacity: 0.5; }
+  .agent-pill.delivery-grace, .worker-card.delivery-grace {
+    border-color: #3d3000;
+    background: linear-gradient(180deg, rgba(210,153,34,0.06), var(--bg));
+  }
+  .agent-dot.delivery-grace { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  .msg.recovered {
+    background: rgba(219,109,40,0.04);
+    border-left: 3px solid var(--orange);
+  }
+  .msg.recovered .msg-from { color: var(--orange); }
   .agent-tasks {
     font-size: 11px;
     color: var(--text-dim);
@@ -456,6 +468,170 @@ const dashboardHTML = `<!DOCTYPE html>
     justify-content: flex-end;
     margin-top: 20px;
   }
+  .modal.wide { max-width: 560px; }
+  .modal label { display: block; font-size: 12px; color: var(--text-dim); margin: 8px 0 4px; }
+  .modal input[type="text"],
+  .modal input[type="number"],
+  .modal select,
+  .modal textarea {
+    width: 100%;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .modal textarea { font-family: monospace; resize: vertical; min-height: 80px; }
+  .modal-result {
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--text-dim);
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .modal-result.error { color: var(--red); border-color: #49282c; }
+
+  /* Worker card menu */
+  .worker-card { position: relative; }
+  .worker-menu {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    background: transparent;
+    border: 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+  }
+  .worker-menu:hover { background: var(--surface-hover); color: var(--text); }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--text);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    z-index: 200;
+    max-width: 420px;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .toast.open { opacity: 1; transform: translateY(0); }
+  .toast.error { border-left-color: var(--red); }
+  .toast.success { border-left-color: var(--green); }
+  .toast .toast-title { font-weight: 600; margin-bottom: 4px; }
+  .toast .toast-detail { color: var(--text-dim); font-size: 12px; word-break: break-word; }
+
+  /* GC stats strip */
+  .gc-strip {
+    padding: 6px 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .gc-strip .gc-label { font-weight: 600; color: var(--text); }
+  .gc-strip .gc-sep { color: var(--border); }
+
+  /* Pool status panel */
+  .pool-panel { padding: 12px 14px; }
+  .pool-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .pool-stat {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .pool-stat .pool-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 4px;
+  }
+  .pool-stat .pool-value { font-size: 18px; font-weight: 600; color: var(--text); }
+  .pool-stat .pool-detail { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .pool-detail .breakdown { font-family: monospace; }
+  .pool-section-header {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin: 8px 0 4px;
+    font-weight: 600;
+  }
+  .pool-card-toggle {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0;
+  }
+  .pool-card-toggle:hover { color: var(--text); }
+
+  /* Send message inline form */
+  .send-form {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-hover);
+    display: none;
+  }
+  .send-form.open { display: block; }
+  .send-form .send-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+  .send-form .send-row label { margin: 0; min-width: 40px; }
+  .send-form select { flex: 1; }
+  .send-form textarea { width: 100%; min-height: 60px; }
+  .send-form .send-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+  .send-form .send-from {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: monospace;
+  }
+  .header-action {
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+  .header-action:hover { color: var(--text); border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -475,6 +651,7 @@ const dashboardHTML = `<!DOCTYPE html>
     </label>
     <button class="btn btn-primary" onclick="showSwitchModal()">Switch Project</button>
     <button class="btn btn-warning" id="restart-btn" onclick="restartWorkers()">Restart Workers</button>
+    <button class="btn btn-secondary" onclick="showPruneModal()">Prune…</button>
     <button class="btn btn-danger" onclick="showResetModal()">Reset State</button>
     <span class="meta">Updated: <span id="updated" class="live">-</span></span>
   </div>
@@ -511,6 +688,55 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Cancel agent modal -->
+<div class="modal-overlay" id="cancel-modal">
+  <div class="modal">
+    <h2>Cancel Agent</h2>
+    <p>Cancel all in-progress tasks for <strong id="cancel-target"></strong>, kill the worker process, and (if applicable) recover any buffered output as a synthetic message.</p>
+    <label>Reason (optional)</label>
+    <input type="text" id="cancel-reason" placeholder="e.g. stuck, no longer needed">
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="hideCancelModal()">Close</button>
+      <button class="btn btn-danger" id="cancel-confirm-btn" onclick="doCancelAgent()">Cancel agent</button>
+    </div>
+    <div class="modal-result" id="cancel-result" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Prune modal -->
+<div class="modal-overlay" id="prune-modal">
+  <div class="modal wide">
+    <h2 style="color:var(--accent)">Prune Stale State</h2>
+    <p>Garbage-collect old presence rows and offline worker instances. Dry-run is on by default — uncheck to commit the deletion.</p>
+    <label class="modal-option"><input type="checkbox" id="prune-presence" checked> Presence (offline registrations)</label>
+    <label class="modal-option"><input type="checkbox" id="prune-instances" checked> Agent instances (offline workers)</label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
+      <div>
+        <label>Older than (days)</label>
+        <input type="number" id="prune-older-days" min="0" value="7">
+      </div>
+      <div>
+        <label>Task-bound older than (hours)</label>
+        <input type="number" id="prune-task-bound-hours" min="0" value="24">
+      </div>
+    </div>
+    <label class="modal-option" style="margin-top:8px">
+      <input type="checkbox" id="prune-dry-run" checked> Dry run (preview only — recommended)
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="hidePruneModal()">Close</button>
+      <button class="btn btn-primary" id="prune-run-btn" onclick="doPrune()">Run</button>
+    </div>
+    <div class="modal-result" id="prune-result" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!-- GC stats strip (populated when /api/state.gc is set) -->
+<div class="gc-strip" id="gc-strip" style="display:none"></div>
+
 <div class="grid">
   <!-- Row 1: Agents (full width) -->
   <div class="card full-width" id="agents-card">
@@ -524,6 +750,14 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="card-body"><div class="worker-list" id="workers"></div></div>
   </div>
 
+  <!-- Row 2b: Pool status (mirrors mcp-stringwork admin pool-status) -->
+  <div class="card full-width" id="pool-card" style="display:none">
+    <div class="card-header">&#128202; Pool Status
+      <button class="pool-card-toggle" id="pool-toggle" onclick="togglePoolPanel()">collapse</button>
+    </div>
+    <div class="card-body pool-panel" id="pool-body"></div>
+  </div>
+
   <!-- Row 3: Tasks (full width) -->
   <div class="card full-width" id="tasks-card">
     <div class="card-header">&#9745; Tasks <span class="count" id="tasks-count">0</span></div>
@@ -532,7 +766,24 @@ const dashboardHTML = `<!DOCTYPE html>
 
   <!-- Row 4: Messages + Plans/Notes/Locks -->
   <div class="card" id="messages-card">
-    <div class="card-header">&#128172; Messages <span class="count" id="messages-count">0</span></div>
+    <div class="card-header">&#128172; Messages <span class="count" id="messages-count">0</span>
+      <button class="header-action" id="send-toggle" onclick="toggleSendForm()">Send Message</button>
+    </div>
+    <div class="send-form" id="send-form">
+      <div class="send-row">
+        <label>From:</label>
+        <span class="send-from" id="send-from-display">(driver)</span>
+      </div>
+      <div class="send-row">
+        <label>To:</label>
+        <select id="send-to"></select>
+      </div>
+      <textarea id="send-content" placeholder="Message body…"></textarea>
+      <div class="send-actions">
+        <button class="btn btn-secondary" onclick="toggleSendForm(false)">Cancel</button>
+        <button class="btn btn-primary" id="send-confirm-btn" onclick="doSendMessage()">Send</button>
+      </div>
+    </div>
     <div class="card-body msg-list" id="messages"></div>
   </div>
 
@@ -559,6 +810,28 @@ function statusDotClass(status, reachable) {
   return 'online';
 }
 
+// progressAgeSec parses the relative-time strings the API returns
+// ("3m ago", "45s ago", "2h ago", "just now", "never", or absolute date)
+// and returns the age in seconds. Used to suppress stale progress lines on
+// offline rows once the watchdog has stopped updating them. Returns
+// Infinity for "never" or absolute dates so the >120s suppression rule
+// always trips for anything older than a day.
+function progressAgeSec(s) {
+  if (!s) return Infinity;
+  s = String(s).trim();
+  if (s === 'just now') return 0;
+  if (s === 'never') return Infinity;
+  const m = s.match(/^(\d+)\s*([smh])\s*ago$/);
+  if (!m) return Infinity;
+  const n = parseInt(m[1], 10);
+  switch (m[2]) {
+    case 's': return n;
+    case 'm': return n * 60;
+    case 'h': return n * 3600;
+    default: return Infinity;
+  }
+}
+
 function renderAgents(agents) {
   const el = document.getElementById('agents');
   document.getElementById('agents-count').textContent = agents ? agents.length : 0;
@@ -567,14 +840,26 @@ function renderAgents(agents) {
     return;
   }
   el.innerHTML = agents.map(a => {
-    const dotCls = statusDotClass(a.status, a.reachable);
-    const stale = !a.reachable ? ' stale' : '';
+    const dotCls = a.in_delivery_grace ? 'delivery-grace' : statusDotClass(a.status, a.reachable);
+    const classes = [];
+    if (!a.reachable) classes.push('stale');
+    if (a.in_delivery_grace) classes.push('delivery-grace');
+    const cardClass = classes.length ? ' ' + classes.join(' ') : '';
     const roleClass = a.role === 'driver' ? ' driver' : '';
     const roleBadge = a.role ? '<span class="agent-role' + roleClass + '">' + esc(a.role) + '</span>' : '';
     const meta = [a.last_seen || '', a.note || ''].filter(Boolean).join(' · ');
+    const dotTitle = a.in_delivery_grace
+      ? 'Delivery grace — last send ' + (a.last_send_age || 'just now')
+      : (a.reachable ? '' : 'offline');
+    const dotAttr = dotTitle ? ' title="' + escAttr(dotTitle) + '"' : '';
+    const statusText = a.reachable ? esc(a.status || 'unknown') : 'offline';
 
+    // Suppress stale progress lines on offline rows once they're >2min old —
+    // matches the backend rule in worker_status.go so the dashboard doesn't
+    // display ghost progress from days-old sessions.
     let progressHTML = '';
-    if (a.progress) {
+    const showProgress = !!a.progress && (a.reachable || progressAgeSec(a.progress_age) <= 120);
+    if (showProgress) {
       let stepInfo = '';
       if (a.progress_total_steps > 0) {
         stepInfo = ' [' + a.progress_step + '/' + a.progress_total_steps + ']';
@@ -588,11 +873,11 @@ function renderAgents(agents) {
       tasksHTML = '<div class="agent-tasks">Tasks: ' + a.current_tasks.map(id => '#' + id).join(', ') + '</div>';
     }
 
-    return '<div class="agent-pill' + stale + '">' +
-      '<div class="agent-dot ' + dotCls + '"></div>' +
+    return '<div class="agent-pill' + cardClass + '">' +
+      '<div class="agent-dot ' + dotCls + '"' + dotAttr + '></div>' +
       '<div>' +
         '<div class="agent-name">' + esc(a.name) + ' ' + roleBadge + '</div>' +
-        '<div class="agent-meta">' + esc(a.status || 'unknown') +
+        '<div class="agent-meta">' + statusText +
           (a.workspace ? ' · ' + esc(shortPath(a.workspace)) : '') +
           (a.last_heartbeat ? ' · HB: ' + esc(a.last_heartbeat) : '') +
           (meta ? ' · ' + esc(meta) : '') +
@@ -613,11 +898,37 @@ function renderWorkers(workers) {
     return;
   }
   card.style.display = '';
-  el.innerHTML = workers.map(w => {
-    const stale = !w.reachable ? ' stale' : '';
-    const dotCls = statusDotClass(w.status, w.reachable);
+
+  // Group: pool workers (sorted by id) followed by their task-bound children
+  // so the new domain concept ("a claude-code pool plus its task-bound
+  // siblings") is legible. Backend sorts strictly by instance_id; we
+  // re-bucket here without losing within-bucket ordering.
+  const sorted = [...workers].sort((a, b) => {
+    if (a.agent_type !== b.agent_type) return a.agent_type.localeCompare(b.agent_type);
+    if (a.is_task_bound !== b.is_task_bound) return a.is_task_bound ? 1 : -1;
+    return a.instance_id.localeCompare(b.instance_id);
+  });
+
+  el.innerHTML = sorted.map(w => {
+    const dotCls = w.in_delivery_grace ? 'delivery-grace' : statusDotClass(w.status, w.reachable);
+    const classes = [];
+    if (!w.reachable) classes.push('stale');
+    if (w.in_delivery_grace) classes.push('delivery-grace');
+    const cardClass = classes.length ? ' ' + classes.join(' ') : '';
+    const dotTitle = w.in_delivery_grace
+      ? 'Delivery grace — last send ' + (w.last_send_age || 'just now')
+      : (w.reachable ? '' : 'offline');
+    const dotAttr = dotTitle ? ' title="' + escAttr(dotTitle) + '"' : '';
+    const statusBadge = w.reachable
+      ? '<span class="badge ' + w.status + '">' + esc(w.status) + '</span>'
+      : '<span class="badge offline">offline</span>';
+    const taskBoundBadge = w.is_task_bound
+      ? ' <span class="badge task-bound" title="Task-bound worker — lifetime tied to task #' + (w.bound_task_id || '?') + '">task-' + (w.bound_task_id || '?') + '</span>'
+      : '';
+
     let progressHTML = '';
-    if (w.progress) {
+    const showProgress = !!w.progress && (w.reachable || progressAgeSec(w.progress_age) <= 120);
+    if (showProgress) {
       let stepInfo = '';
       if (w.progress_total_steps > 0) {
         stepInfo = ' [step ' + w.progress_step + '/' + w.progress_total_steps + ']';
@@ -625,9 +936,13 @@ function renderWorkers(workers) {
       const age = w.progress_age ? ' (' + w.progress_age + ')' : '';
       progressHTML = '<div class="worker-progress">' + esc(w.progress) + esc(stepInfo) + esc(age) + '</div>';
     }
-    return '<div class="worker-card' + stale + '">' +
-      '<div class="worker-id"><span class="agent-dot ' + dotCls + '" style="display:inline-block;width:8px;height:8px;margin-right:6px;vertical-align:middle"></span>' + esc(w.instance_id) + ' <span class="badge ' + w.status + '">' + esc(w.status) + '</span></div>' +
-      '<div class="worker-meta">Type: ' + esc(w.agent_type) + ' · HB: ' + esc(w.last_heartbeat) + '</div>' +
+    const cancelBtn = '<button class="worker-menu" title="Cancel this agent" onclick="showCancelModal(\'' + escAttr(w.instance_id) + '\')">&times;</button>';
+    return '<div class="worker-card' + cardClass + '">' +
+      cancelBtn +
+      '<div class="worker-id"><span class="agent-dot ' + dotCls + '"' + dotAttr + ' style="display:inline-block;width:8px;height:8px;margin-right:6px;vertical-align:middle"></span>' + esc(w.instance_id) + ' ' + statusBadge + taskBoundBadge + '</div>' +
+      '<div class="worker-meta">Type: ' + esc(w.agent_type) + ' · HB: ' + esc(w.last_heartbeat) +
+        (w.last_send_age ? ' · sent: ' + esc(w.last_send_age) : '') +
+      '</div>' +
       (w.current_tasks && w.current_tasks.length ? '<div class="worker-meta">Tasks: ' + w.current_tasks.map(id => '#' + id).join(', ') + '</div>' : '') +
       progressHTML +
     '</div>';
@@ -693,9 +1008,15 @@ function renderMessages(messages, total) {
     return;
   }
   el.innerHTML = messages.map((m, i) => {
-    const unread = m.read ? '' : ' unread';
-    return '<div class="msg' + unread + '">' +
+    const classes = ['msg'];
+    if (!m.read) classes.push('unread');
+    if (m.recovered) classes.push('recovered');
+    const recoveredPill = m.recovered
+      ? '<span class="badge recovered" title="Auto-recovered output emitted by cancel_agent — worker did not deliver before being cancelled">recovered</span> '
+      : '';
+    return '<div class="' + classes.join(' ') + '">' +
       '<div class="msg-header">' +
+        recoveredPill +
         '<span class="msg-from">' + esc(m.from) + '</span>' +
         '<span class="msg-to">&#8594; ' + esc(m.to) + '</span>' +
         '<span class="msg-time">' + esc(m.timestamp) + ' (' + esc(m.age) + ')</span>' +
@@ -803,11 +1124,17 @@ function escAttr(s) {
   return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// latestState caches the most recent /api/state response so action handlers
+// (cancel, send-message) can resolve the current driver / agent list without
+// a refetch.
+let latestState = null;
+
 async function fetchState() {
   try {
     const resp = await fetch('/api/state');
     if (!resp.ok) return;
     const data = await resp.json();
+    latestState = data;
 
     document.getElementById('updated').textContent = new Date().toLocaleTimeString();
 
@@ -822,14 +1149,357 @@ async function fetchState() {
 
     renderAgents(data.agents);
     renderWorkers(data.workers);
+    renderGCStrip(data.gc);
     renderTasks(data.tasks, data.total_tasks);
     renderMessages(data.messages, data.total_messages);
     renderSide(data);
+    refreshSendForm(data);
   } catch (e) {
     document.getElementById('updated').textContent = 'error';
     document.getElementById('updated').style.color = 'var(--red)';
     setTimeout(() => { document.getElementById('updated').style.color = ''; }, 2000);
   }
+
+  // Pool status is cheap; piggy-back on the same poll.
+  fetchPoolStatus();
+}
+
+function renderGCStrip(gc) {
+  const strip = document.getElementById('gc-strip');
+  if (!gc) {
+    strip.style.display = 'none';
+    return;
+  }
+  strip.style.display = '';
+  const lastRun = gc.last_run || 'never';
+  const retention = (gc.presence_retention_days || 0) + 'd / ' +
+                    (gc.instance_retention_days || 0) + 'd / ' +
+                    (gc.task_bound_instance_retention_hours || 0) + 'h';
+  strip.innerHTML =
+    '<span class="gc-label">GC</span>' +
+    '<span>' + esc(String(gc.presence_pruned_total || 0)) + ' presence + ' +
+              esc(String(gc.instances_pruned_total || 0)) + ' instances pruned</span>' +
+    '<span class="gc-sep">·</span>' +
+    '<span>last run ' + esc(lastRun) + '</span>' +
+    '<span class="gc-sep">·</span>' +
+    '<span>retention ' + esc(retention) + ' (presence/instance/task-bound)</span>';
+}
+
+function driverName() {
+  if (latestState && latestState.agents) {
+    const d = latestState.agents.find(a => a.role === 'driver');
+    if (d) return d.name;
+  }
+  return '';
+}
+
+function refreshSendForm(data) {
+  const fromDisp = document.getElementById('send-from-display');
+  const drv = driverName();
+  fromDisp.textContent = drv ? drv + ' (driver)' : '(no driver)';
+  fromDisp.dataset.from = drv;
+
+  const sel = document.getElementById('send-to');
+  const prev = sel.value;
+  const recipients = (data.agents || [])
+    .map(a => a.name)
+    .filter(n => n && n !== drv)
+    .sort();
+  sel.innerHTML = recipients.map(n => '<option value="' + escAttr(n) + '">' + esc(n) + '</option>').join('');
+  if (prev && recipients.includes(prev)) sel.value = prev;
+}
+
+// ── Pool status panel ────────────────────────────────────────────────────
+
+let poolCollapsed = false;
+
+function togglePoolPanel() {
+  poolCollapsed = !poolCollapsed;
+  const body = document.getElementById('pool-body');
+  const toggle = document.getElementById('pool-toggle');
+  body.style.display = poolCollapsed ? 'none' : '';
+  toggle.textContent = poolCollapsed ? 'expand' : 'collapse';
+}
+
+async function fetchPoolStatus() {
+  try {
+    const resp = await fetch('/api/pool-status');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderPoolStatus(data);
+  } catch (e) {
+    // Pool status is optional — silently ignore.
+  }
+}
+
+function renderBreakdownByType(map) {
+  if (!map) return '';
+  const keys = Object.keys(map).sort();
+  if (!keys.length) return '<span class="breakdown">—</span>';
+  return '<span class="breakdown">' + keys.map(k => esc(k) + ':' + map[k]).join(', ') + '</span>';
+}
+
+function renderPoolStatus(p) {
+  const card = document.getElementById('pool-card');
+  const body = document.getElementById('pool-body');
+  if (!p) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  const oldestActiveDetail = p.oldest_active
+    ? esc(p.oldest_active.instance_id) + ' (' + esc(p.oldest_active.heartbeat_age) + ')'
+    : '—';
+  const oldestOfflineDetail = p.oldest_offline
+    ? esc(p.oldest_offline.instance_id) + ' (' + esc(p.oldest_offline.heartbeat_age) + ')'
+    : '—';
+  const oldestPresenceDetail = p.oldest_presence
+    ? esc(p.oldest_presence.agent) + ' (' + esc(p.oldest_presence.last_seen_age) + ')'
+    : '—';
+
+  let html = '<div class="pool-grid">' +
+    '<div class="pool-stat"><div class="pool-label">Driver</div>' +
+      '<div class="pool-value">' + esc(p.driver || '—') + '</div></div>' +
+    '<div class="pool-stat"><div class="pool-label">Active</div>' +
+      '<div class="pool-value">' + (p.active_instances || 0) + '</div>' +
+      '<div class="pool-detail">' + renderBreakdownByType(p.worker_status_by_type) + '</div></div>' +
+    '<div class="pool-stat"><div class="pool-label">Offline</div>' +
+      '<div class="pool-value">' + (p.offline_instances || 0) + '</div>' +
+      '<div class="pool-detail">' + renderBreakdownByType(p.worker_offline_by_type) + '</div></div>' +
+    '<div class="pool-stat"><div class="pool-label">Task-bound idle</div>' +
+      '<div class="pool-value">' + (p.task_bound_idle_rows || 0) + '</div>' +
+      '<div class="pool-detail">' + renderBreakdownByType(p.worker_task_bound_by_type) + '</div></div>' +
+    '<div class="pool-stat"><div class="pool-label">Stale presence</div>' +
+      '<div class="pool-value">' + (p.stale_presence || 0) + '</div>' +
+      '<div class="pool-detail">cutoff: ' + (p.stale_presence_cutoff_hours || 24) + 'h</div></div>' +
+    '<div class="pool-stat"><div class="pool-label">In-flight tasks</div>' +
+      '<div class="pool-value">' + (p.in_flight_task_count || 0) + '</div></div>' +
+  '</div>';
+
+  html += '<div class="pool-section-header">Oldest rows</div>' +
+    '<div class="pool-detail">Active: ' + oldestActiveDetail + ' · Offline: ' + oldestOfflineDetail +
+    ' · Presence: ' + oldestPresenceDetail + '</div>';
+
+  if (p.in_flight_tasks && p.in_flight_tasks.length) {
+    html += '<div class="pool-section-header">In-flight tasks</div>';
+    html += '<div class="pool-detail">' + p.in_flight_tasks.map(t =>
+      '#' + t.id + ' ' + esc(t.title) + ' &mdash; <em>' + esc(t.owner) + '</em> (' + esc(t.age) + ')'
+    ).join('<br>') + '</div>';
+  }
+
+  body.innerHTML = html;
+}
+
+// ── Cancel agent modal ───────────────────────────────────────────────────
+
+let cancelTargetID = '';
+
+function showCancelModal(instanceID) {
+  cancelTargetID = instanceID;
+  document.getElementById('cancel-target').textContent = instanceID;
+  document.getElementById('cancel-reason').value = '';
+  document.getElementById('cancel-result').style.display = 'none';
+  document.getElementById('cancel-modal').classList.add('open');
+  setTimeout(() => document.getElementById('cancel-reason').focus(), 50);
+}
+
+function hideCancelModal() {
+  document.getElementById('cancel-modal').classList.remove('open');
+}
+
+async function doCancelAgent() {
+  if (!cancelTargetID) return;
+  const drv = driverName();
+  if (!drv) {
+    showToast('error', 'No driver configured', 'Cannot cancel without a driver to attribute the action to.');
+    return;
+  }
+  const reason = document.getElementById('cancel-reason').value.trim();
+  const btn = document.getElementById('cancel-confirm-btn');
+  const result = document.getElementById('cancel-result');
+  btn.textContent = 'Cancelling…';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/cancel-agent', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({agent: cancelTargetID, cancelled_by: drv, reason: reason}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      result.classList.add('error');
+      result.textContent = data.error || ('HTTP ' + resp.status);
+      result.style.display = '';
+      return;
+    }
+    result.classList.remove('error');
+    const lines = ['Cancelled agent: ' + (data.agent || cancelTargetID)];
+    if (data.cancelled_tasks && data.cancelled_tasks.length) {
+      lines.push('Cancelled tasks: ' + data.cancelled_tasks.map(id => '#' + id).join(', '));
+    } else {
+      lines.push('No in-progress tasks to cancel.');
+    }
+    lines.push('Process killed: ' + (data.process_killed ? 'yes' : 'no (no orchestration or not running)'));
+    if (data.recovered_from) {
+      lines.push('Recovered output emitted as message from ' + data.recovered_from + '.');
+    }
+    result.textContent = lines.join('\n');
+    result.style.display = '';
+    showToast('success', 'Agent cancelled', cancelTargetID + (data.cancelled_tasks && data.cancelled_tasks.length ? ' (' + data.cancelled_tasks.length + ' task(s))' : ''));
+    fetchState();
+  } catch (e) {
+    result.classList.add('error');
+    result.textContent = 'Request failed: ' + e.message;
+    result.style.display = '';
+  } finally {
+    btn.textContent = 'Cancel agent';
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('cancel-modal').addEventListener('click', function(e) {
+  if (e.target === this) hideCancelModal();
+});
+
+// ── Prune modal ──────────────────────────────────────────────────────────
+
+function showPruneModal() {
+  document.getElementById('prune-result').style.display = 'none';
+  document.getElementById('prune-result').classList.remove('error');
+  document.getElementById('prune-dry-run').checked = true;
+  document.getElementById('prune-modal').classList.add('open');
+}
+
+function hidePruneModal() {
+  document.getElementById('prune-modal').classList.remove('open');
+}
+
+async function doPrune() {
+  const presence = document.getElementById('prune-presence').checked;
+  const instances = document.getElementById('prune-instances').checked;
+  const olderDays = parseInt(document.getElementById('prune-older-days').value, 10) || 0;
+  const taskBoundHours = parseInt(document.getElementById('prune-task-bound-hours').value, 10) || 0;
+  const dryRun = document.getElementById('prune-dry-run').checked;
+  const btn = document.getElementById('prune-run-btn');
+  const result = document.getElementById('prune-result');
+
+  if (!presence && !instances) {
+    result.classList.add('error');
+    result.textContent = 'Select at least one of presence or instances.';
+    result.style.display = '';
+    return;
+  }
+
+  btn.textContent = dryRun ? 'Previewing…' : 'Pruning…';
+  btn.disabled = true;
+  try {
+    const body = {
+      presence: presence,
+      instances: instances,
+      older_than_days: olderDays,
+      task_bound_older_hours: taskBoundHours,
+      dry_run: dryRun,
+    };
+    const resp = await fetch('/api/prune', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      result.classList.add('error');
+      result.textContent = data.error || ('HTTP ' + resp.status);
+      result.style.display = '';
+      return;
+    }
+    result.classList.remove('error');
+    const verb = data.dry_run ? 'Would prune' : 'Pruned';
+    const lines = [
+      verb + ': ' + (data.presence_pruned || 0) + ' presence, ' + (data.instances_pruned || 0) + ' instances.',
+      'Retention applied: presence=' + data.presence_retention_days + 'd, instances=' + data.instance_retention_days + 'd, task-bound=' + data.task_bound_instance_retention_hours + 'h.',
+    ];
+    if (data.dry_run) lines.push('Dry run — uncheck "Dry run" to commit.');
+    result.textContent = lines.join('\n');
+    result.style.display = '';
+    if (!data.dry_run) {
+      showToast('success', 'Prune complete', (data.presence_pruned || 0) + ' presence + ' + (data.instances_pruned || 0) + ' instances removed');
+      fetchState();
+    }
+  } catch (e) {
+    result.classList.add('error');
+    result.textContent = 'Request failed: ' + e.message;
+    result.style.display = '';
+  } finally {
+    btn.textContent = 'Run';
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('prune-modal').addEventListener('click', function(e) {
+  if (e.target === this) hidePruneModal();
+});
+
+// ── Send message inline form ─────────────────────────────────────────────
+
+function toggleSendForm(force) {
+  const form = document.getElementById('send-form');
+  const open = (typeof force === 'boolean') ? force : !form.classList.contains('open');
+  if (open) {
+    form.classList.add('open');
+    setTimeout(() => document.getElementById('send-content').focus(), 50);
+  } else {
+    form.classList.remove('open');
+    document.getElementById('send-content').value = '';
+  }
+}
+
+async function doSendMessage() {
+  const drv = driverName();
+  if (!drv) {
+    showToast('error', 'No driver configured', 'Cannot send from the dashboard until a driver is registered.');
+    return;
+  }
+  const to = document.getElementById('send-to').value;
+  const content = document.getElementById('send-content').value.trim();
+  if (!to || !content) {
+    showToast('error', 'Missing fields', 'Recipient and message body are required.');
+    return;
+  }
+  const btn = document.getElementById('send-confirm-btn');
+  btn.textContent = 'Sending…';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/send-message', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({from: drv, to: to, content: content}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast('error', 'Send failed', data.error || ('HTTP ' + resp.status));
+      return;
+    }
+    showToast('success', 'Message sent', drv + ' → ' + to);
+    toggleSendForm(false);
+    fetchState();
+  } catch (e) {
+    showToast('error', 'Send failed', e.message);
+  } finally {
+    btn.textContent = 'Send';
+    btn.disabled = false;
+  }
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────
+
+let toastTimer = null;
+
+function showToast(kind, title, detail) {
+  const t = document.getElementById('toast');
+  t.className = 'toast ' + (kind || 'success');
+  t.innerHTML = '<div class="toast-title">' + esc(title || '') + '</div>' +
+                (detail ? '<div class="toast-detail">' + esc(detail) + '</div>' : '');
+  t.classList.add('open');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.classList.remove('open'); }, 4500);
 }
 
 function showSwitchModal() {

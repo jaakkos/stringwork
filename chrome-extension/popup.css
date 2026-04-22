@@ -148,6 +148,17 @@ button.section-header.collapsible[aria-expanded="true"]::before {
   color: var(--text-dim);
   margin-left: 4px;
 }
+.worker-name .task-bound-hint {
+  font-weight: 500;
+  font-size: 9px;
+  color: #bc8cff;
+  background: rgba(188, 140, 255, 0.12);
+  border: 1px solid rgba(188, 140, 255, 0.3);
+  border-radius: 6px;
+  padding: 0 4px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
 .worker-task {
   font-size: 11px;
   color: var(--text-dim);

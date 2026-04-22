@@ -130,9 +130,17 @@ function computeBadge(state) {
   let red = 0,
     orange = 0;
 
+  // Dedupe offline workers by agent_type so a pool worker plus its task-bound
+  // sibling (both visible during the 24h GC window) don't double-count as two
+  // alerts for the same logical type. Falls back to instance_id when type is
+  // missing (legacy snapshots).
+  const offlineTypes = new Set();
   for (const w of state.workers || []) {
-    if (w.status === "offline") red++;
+    if (w.status === "offline" || w.reachable === false) {
+      offlineTypes.add(w.agent_type || w.instance_id);
+    }
   }
+  red += offlineTypes.size;
 
   for (const t of state.tasks || []) {
     if (t.status === "blocked") red++;

@@ -273,6 +273,24 @@ loop; the CLI exists so you don't need it to be running to recover from a bad
 state. Defaults come from `config.yaml` (`presence_retention_days`,
 `instance_retention_days`, `task_bound_instance_retention_hours`).
 
+### Dashboard operations
+
+The same admin actions are available from the web dashboard
+(`http://localhost:<http_port>/`) so you don't have to drop to a shell when a
+worker is misbehaving. Each one POSTs JSON; CORS is permissive so you can also
+hit them directly from `curl`/`fetch`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/cancel-agent` | Cancel a stuck worker. Body: `{agent, cancelled_by, reason}`. Returns the synthetic recovery message if `cancel_agent` emitted one. |
+| `POST` | `/api/prune` | Wraps `admin prune`. Body: `{presence?, instances?, older_than?, task_bound_older_than?, dry_run?}`. Defaults to dry-run; flip `dry_run:false` to commit. |
+| `GET`  | `/api/pool-status` | Same payload as `mcp-stringwork admin pool-status` rendered as JSON. |
+| `POST` | `/api/send-message` | Driver-only escape hatch. Body: `{from, to, content}` — `from` must equal the configured driver to prevent UI-side worker impersonation. |
+
+The dashboard surfaces these as a per-worker `Cancel…` menu, a `Prune…` modal in
+the toolbar, an auto-polling `Pool status` panel, and a `Send Message` form in
+the messages card.
+
 ## Project Structure
 
 ```
@@ -371,7 +389,9 @@ A browser extension that brings Stringwork monitoring to your toolbar -- see wor
 - **Desktop notifications** when workers go offline, tasks get blocked, SLAs are exceeded, or progress stalls
 - **Quick actions** -- restart workers (with confirmation) and jump to the full dashboard
 
-**Architecture:** The extension is built on Manifest V3 with a service worker that polls `/api/state`. All API access is centralized in the service worker; the popup communicates via `chrome.runtime.sendMessage`. State is persisted in `chrome.storage.local` to survive MV3 service worker termination. Background polling uses `chrome.alarms` (1-minute minimum); active polling at 5-second intervals only runs while the popup is open.
+**Architecture:** The extension is built on Manifest V3 with a service worker that polls `/api/state`. All API access is centralized in the service worker; the popup uses `chrome.runtime.connect` for live state pushes (the service worker pushes a fresh snapshot on every poll while the port is open) and falls back to one-shot `chrome.runtime.sendMessage` calls (`getState`, `restartWorkers`, `openDashboard`, `settingsUpdated`) for everything else. State is persisted in `chrome.storage.local` to survive MV3 service worker termination. Background polling uses `chrome.alarms` (1-minute minimum); active polling at 5-second intervals only runs while the popup is open.
+
+> Destructive operations (cancel a worker, prune state, send a message as the driver) live in the **web dashboard**, not the extension — see [Dashboard operations](#dashboard-operations). The extension is intentionally a passive monitor.
 
 **Install (unpacked, developer mode):**
 

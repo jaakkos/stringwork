@@ -2175,7 +2175,9 @@ func SaveOutputToWorkContext(s *domain.CollabState, taskID int, rawOutput, insta
 		}
 		s.WorkContexts[ctxKey] = wc
 	}
-	logger.Printf("WorkerManager: captured %d bytes of previous output for task #%d", len(captured), taskID)
+	if logger != nil {
+		logger.Printf("WorkerManager: captured %d bytes of previous output for task #%d", len(captured), taskID)
+	}
 }
 
 // SpawnForTask spawns a fresh worker process bound to a specific task.

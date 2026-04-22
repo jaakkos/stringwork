@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -86,6 +88,37 @@ type Watchdog struct {
 	// Key: taskID, Value: "warning" or "critical".
 	alertedTasks map[int]string
 	pol          Policy
+
+	// Cumulative GC counters surfaced via GCStats() so dashboards can show
+	// "N rows pruned since startup, last run Xs ago". These are a thin
+	// observability layer on top of the per-tick prunedPresence/prunedInstances
+	// already logged by check().
+	prunedPresenceTotal  atomic.Int64
+	prunedInstancesTotal atomic.Int64
+	gcMu                 sync.Mutex
+	lastGCRun            time.Time
+}
+
+// GCStats is a point-in-time snapshot of cumulative garbage-collection
+// counters exposed via Watchdog.GCStats. Used by the dashboard to render
+// a one-line "GC: N+M pruned, last run Xs ago" strip.
+type GCStats struct {
+	LastRun              time.Time
+	PresencePrunedTotal  int64
+	InstancesPrunedTotal int64
+}
+
+// GCStats returns a snapshot of the watchdog's cumulative GC counters.
+// Safe to call concurrently from HTTP handlers.
+func (w *Watchdog) GCStats() GCStats {
+	w.gcMu.Lock()
+	last := w.lastGCRun
+	w.gcMu.Unlock()
+	return GCStats{
+		LastRun:              last,
+		PresencePrunedTotal:  w.prunedPresenceTotal.Load(),
+		InstancesPrunedTotal: w.prunedInstancesTotal.Load(),
+	}
 }
 
 // WatchdogOption configures the watchdog.
@@ -723,6 +756,20 @@ func (w *Watchdog) check() {
 			if prunedInstances > 0 {
 				w.logger.Printf("Watchdog: GC pruned %d offline agent instance row(s)", prunedInstances)
 			}
+			// Record cumulative GC counters so dashboards can show
+			// "N pruned since startup". lastGCRun ticks every cycle the
+			// GC phase ran, regardless of whether anything was pruned —
+			// the useful signal is "the watchdog is actually checking",
+			// not just "stuff was deleted".
+			if prunedPresence > 0 {
+				w.prunedPresenceTotal.Add(int64(prunedPresence))
+			}
+			if prunedInstances > 0 {
+				w.prunedInstancesTotal.Add(int64(prunedInstances))
+			}
+			w.gcMu.Lock()
+			w.lastGCRun = now
+			w.gcMu.Unlock()
 		}
 
 		return nil
