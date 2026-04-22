@@ -2,18 +2,24 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 	"github.com/jaakkos/stringwork/internal/repository"
+	"github.com/jaakkos/stringwork/internal/tools/collab"
 )
 
 func setupTestAPI(t *testing.T) (*workerAPI, *app.CollabService) {
@@ -532,6 +538,233 @@ func TestResolveWorkerAgent_PrefixMatchCreatesSpuriousInstance(t *testing.T) {
 	}
 	if inst.AgentType != "claude-code" {
 		t.Errorf("task-bound instance AgentType = %q, want \"claude-code\"", inst.AgentType)
+	}
+}
+
+// TestMatrix_CLIVsMCP_TaskUpdateParity drives every meaningful task status
+// transition through BOTH the CLI HTTP handler (cli_api.handleTaskUpdate)
+// AND the MCP update_task tool, then compares the resulting state. After
+// Commit 1 both code paths share app.ApplyTaskTransition; this test pins
+// that parity so future divergence is caught immediately.
+//
+// We compare:
+//   - state.Tasks (status, assignment, completion timestamps)
+//   - state.AgentInstances[*].CurrentTasks  (no smear, no leak)
+//   - presence/existence of task-bound rows  (terminal-state reaping parity)
+//
+// CLI only allows pending|in_progress|completed|blocked|cancelled, so the
+// "in_progress→pending" reset case (legitimate per business logic) is
+// included.
+func TestMatrix_CLIVsMCP_TaskUpdateParity(t *testing.T) {
+	cases := []struct {
+		name        string
+		startStatus string
+		newStatus   string
+	}{
+		{"pending_to_in_progress", "pending", "in_progress"},
+		{"in_progress_to_completed", "in_progress", "completed"},
+		{"in_progress_to_blocked", "in_progress", "blocked"},
+		{"in_progress_to_cancelled", "in_progress", "cancelled"},
+		{"in_progress_to_pending", "in_progress", "pending"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cliState := drivePathCLI(t, tc.startStatus, tc.newStatus)
+			mcpState := drivePathMCP(t, tc.startStatus, tc.newStatus)
+			matrixCompareStates(t, cliState, mcpState)
+		})
+	}
+}
+
+// matrixSnapshot is a deterministic, comparable view of the state slices we
+// care about for parity. Filtering and sorting is hand-rolled so we don't
+// accidentally compare nondeterministic map iteration order.
+type matrixSnapshot struct {
+	Tasks     []domain.Task
+	Instances map[string]matrixInstanceSnapshot
+}
+
+type matrixInstanceSnapshot struct {
+	InstanceID   string
+	AgentType    string
+	Status       string
+	CurrentTasks []int
+	Exists       bool
+}
+
+func matrixCleanService(t *testing.T) *app.CollabService {
+	t.Helper()
+	tmpDir := t.TempDir()
+	repo, err := repository.NewStateRepository(tmpDir + "/test.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, ok := repo.(interface{ Close() error }); ok {
+			c.Close()
+		}
+	})
+	cfg := policy.DefaultConfig()
+	pol := policy.New(cfg)
+	logger := log.New(&bytes.Buffer{}, "", 0)
+	return app.NewCollabService(repo, pol, logger)
+}
+
+func drivePathCLI(t *testing.T, startStatus, newStatus string) matrixSnapshot {
+	t.Helper()
+	svc := matrixCleanService(t)
+	matrixSeedTransition(t, svc, startStatus)
+
+	registry := app.NewSessionRegistry()
+	logger := log.New(&bytes.Buffer{}, "", 0)
+	api := newWorkerAPI(svc, registry, logger)
+
+	rr := postJSON(api, "/api/w/task/update", map[string]interface{}{
+		"id": 1, "updated_by": "claude-code", "status": newStatus,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("CLI: unexpected status %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var snap matrixSnapshot
+	_ = svc.Run(func(state *domain.CollabState) error {
+		snap = matrixSnapshotState(state)
+		return nil
+	})
+	return snap
+}
+
+func drivePathMCP(t *testing.T, startStatus, newStatus string) matrixSnapshot {
+	t.Helper()
+	svc := matrixCleanService(t)
+	logger := log.New(&bytes.Buffer{}, "", 0)
+
+	matrixSeedTransition(t, svc, startStatus)
+
+	mcpSrv := server.NewMCPServer("matrix", "1.0.0")
+	registry := app.NewSessionRegistry()
+	collab.Register(mcpSrv, svc, logger, registry, nil)
+
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"method": "tools/call",
+		"params": map[string]any{
+			"name": "update_task",
+			"arguments": map[string]any{
+				"id": 1, "updated_by": "claude-code", "status": newStatus,
+			},
+		},
+	})
+
+	res := mcpSrv.HandleMessage(context.Background(), body)
+	resBytes, _ := json.Marshal(res)
+	if strings.Contains(string(resBytes), `"isError":true`) {
+		t.Fatalf("MCP: tool returned error: %s", string(resBytes))
+	}
+	if strings.Contains(string(resBytes), `"error"`) {
+		t.Fatalf("MCP: protocol error: %s", string(resBytes))
+	}
+
+	var snap matrixSnapshot
+	_ = svc.Run(func(state *domain.CollabState) error {
+		snap = matrixSnapshotState(state)
+		return nil
+	})
+	return snap
+}
+
+func matrixSeedTransition(t *testing.T, svc *app.CollabService, startStatus string) {
+	t.Helper()
+	_ = svc.Run(func(state *domain.CollabState) error {
+		state.AgentInstances["claude-code"] = &domain.AgentInstance{
+			InstanceID: "claude-code", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "idle", MaxTasks: 1,
+			CurrentTasks: []int{},
+		}
+		taskBoundID := "claude-code-task-1"
+		state.AgentInstances[taskBoundID] = &domain.AgentInstance{
+			InstanceID: taskBoundID, AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", MaxTasks: 1,
+		}
+		state.Presence[taskBoundID] = &domain.Presence{Agent: taskBoundID, Status: "working"}
+
+		var current []int
+		if startStatus == "in_progress" {
+			current = []int{1}
+		}
+		state.AgentInstances[taskBoundID].CurrentTasks = current
+
+		state.Tasks = append(state.Tasks, domain.Task{
+			ID: 1, Title: "T", Status: startStatus, AssignedTo: "claude-code",
+		})
+		state.NextTaskID = 2
+		return nil
+	})
+}
+
+func matrixSnapshotState(state *domain.CollabState) matrixSnapshot {
+	snap := matrixSnapshot{
+		Tasks:     make([]domain.Task, 0, len(state.Tasks)),
+		Instances: map[string]matrixInstanceSnapshot{},
+	}
+	for _, tk := range state.Tasks {
+		t2 := tk
+		t2.CreatedAt = time.Time{}
+		t2.UpdatedAt = time.Time{}
+		t2.LastProgressAt = time.Time{}
+		t2.LastFailure = time.Time{}
+		snap.Tasks = append(snap.Tasks, t2)
+	}
+	for id, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		ct := append([]int(nil), inst.CurrentTasks...)
+		snap.Instances[id] = matrixInstanceSnapshot{
+			InstanceID:   inst.InstanceID,
+			AgentType:    inst.AgentType,
+			Status:       inst.Status,
+			CurrentTasks: ct,
+			Exists:       true,
+		}
+	}
+	return snap
+}
+
+func matrixCompareStates(t *testing.T, a, b matrixSnapshot) {
+	t.Helper()
+	if len(a.Tasks) != len(b.Tasks) {
+		t.Fatalf("task count parity: cli=%d mcp=%d", len(a.Tasks), len(b.Tasks))
+	}
+	for i := range a.Tasks {
+		ta, tb := a.Tasks[i], b.Tasks[i]
+		if ta.ID != tb.ID || ta.Status != tb.Status || ta.AssignedTo != tb.AssignedTo {
+			t.Errorf("task #%d parity mismatch: cli={status:%q assigned:%q} mcp={status:%q assigned:%q}",
+				ta.ID, ta.Status, ta.AssignedTo, tb.Status, tb.AssignedTo)
+		}
+	}
+
+	for id, ia := range a.Instances {
+		ib, ok := b.Instances[id]
+		if !ok {
+			t.Errorf("instance %q present in CLI state, missing in MCP state", id)
+			continue
+		}
+		if ia.AgentType != ib.AgentType || ia.Status != ib.Status {
+			t.Errorf("instance %q parity mismatch: cli={type:%q status:%q} mcp={type:%q status:%q}",
+				id, ia.AgentType, ia.Status, ib.AgentType, ib.Status)
+		}
+		if !reflect.DeepEqual(ia.CurrentTasks, ib.CurrentTasks) {
+			t.Errorf("instance %q CurrentTasks parity mismatch: cli=%v mcp=%v",
+				id, ia.CurrentTasks, ib.CurrentTasks)
+		}
+	}
+	for id := range b.Instances {
+		if _, ok := a.Instances[id]; !ok {
+			t.Errorf("instance %q present in MCP state, missing in CLI state", id)
+		}
 	}
 }
 

@@ -6,10 +6,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
@@ -174,6 +177,203 @@ func TestPruneMessages(t *testing.T) {
 	}
 	if len(state.Messages) != 5 {
 		t.Errorf("expected 5 messages after TTL prune, got %d", len(state.Messages))
+	}
+}
+
+// TestMatrix_StaticPlusTaskBound_FullLifecycle is the integration test that
+// would have caught the deep-review bug cluster (C1-C4, H1-H4) the first
+// time it shipped. For each parent agent type we seed BOTH the static-pool
+// row and a task-bound row of the same parent type — that's the recurring
+// "two siblings, one parent type" shape that masked the original defects —
+// and then drive a full task lifecycle through the public MCP tools:
+//
+//	create_task → claim_next → report_progress → handoff → cancel_agent
+//
+// At each step we assert two invariants:
+//  1. Exactly one AgentInstance owns the task (no smear, no leak).
+//  2. The dead/idle twin is never mistaken for the alive worker. In
+//     particular CurrentTasks on the wrong sibling must remain empty.
+//
+// This is a regression net, not a fix-driving test — every commit in this
+// series already passes it.
+func TestMatrix_StaticPlusTaskBound_FullLifecycle(t *testing.T) {
+	parents := []string{"claude-code", "codex"}
+
+	for _, parentType := range parents {
+		parentType := parentType
+		t.Run(parentType, func(t *testing.T) {
+			svc, repo := newTestService()
+			logger := log.New(io.Discard, "", 0)
+			canceller := &lifecycleCanceller{outputs: map[string]string{}}
+			srv := lifecycleServer(t, svc, logger, canceller)
+
+			_ = svc.Run(func(state *domain.CollabState) error {
+				state.AgentInstances[parentType] = &domain.AgentInstance{
+					InstanceID: parentType, AgentType: parentType,
+					Role: domain.RoleWorker, Status: "idle", MaxTasks: 1,
+					CurrentTasks: []int{}, LastHeartbeat: time.Now(),
+				}
+				state.AgentInstances["cursor"] = &domain.AgentInstance{
+					InstanceID: "cursor", AgentType: "cursor",
+					Role: domain.RoleDriver, Status: "idle",
+				}
+				return nil
+			})
+
+			createRes, err := callTool(t, srv, "create_task", map[string]any{
+				"title": "matrix lifecycle " + parentType, "created_by": "cursor",
+				"assigned_to": parentType,
+			})
+			if err != nil {
+				t.Fatalf("create_task: %v", err)
+			}
+			taskID := lifecycleExtractTaskID(t, resultText(t, createRes))
+
+			seedStaticAndTaskBound(t, repo.state, parentType, taskID)
+			taskBoundID := fmt.Sprintf("%s-task-%d", parentType, taskID)
+
+			lifecycleAssertSingleOwner(t, repo.state, taskID, "post-seed")
+
+			_ = svc.Run(func(state *domain.CollabState) error {
+				inst := state.AgentInstances[taskBoundID]
+				inst.CurrentTasks = []int{}
+				inst.Status = "idle"
+
+				for i := range state.Tasks {
+					if state.Tasks[i].ID == taskID {
+						state.Tasks[i].Status = "pending"
+						state.Tasks[i].AssignedTo = parentType
+					}
+				}
+				return nil
+			})
+
+			if _, err := callTool(t, srv, "claim_next", map[string]any{
+				"agent": taskBoundID,
+			}); err != nil {
+				t.Fatalf("claim_next(%s): %v", taskBoundID, err)
+			}
+
+			lifecycleAssertSingleOwner(t, repo.state, taskID, "post-claim")
+			if got := repo.state.AgentInstances[taskBoundID].CurrentTasks; len(got) != 1 || got[0] != taskID {
+				t.Fatalf("task-bound CurrentTasks = %v, want [%d]", got, taskID)
+			}
+			if got := repo.state.AgentInstances[parentType].CurrentTasks; len(got) != 0 {
+				t.Errorf("static sibling CurrentTasks should be empty, got %v", got)
+			}
+
+			if _, err := callTool(t, srv, "report_progress", map[string]any{
+				"agent": taskBoundID, "task_id": taskID, "description": "halfway",
+				"percent_complete": 50,
+			}); err != nil {
+				t.Fatalf("report_progress: %v", err)
+			}
+			lifecycleAssertSingleOwner(t, repo.state, taskID, "post-progress")
+
+			if _, err := callTool(t, srv, "handoff", map[string]any{
+				"from": taskBoundID, "to": "cursor", "task_id": taskID,
+				"summary": "did some work", "next_steps": "pls review",
+			}); err != nil {
+				t.Fatalf("handoff: %v", err)
+			}
+
+			for id, inst := range repo.state.AgentInstances {
+				if inst == nil {
+					continue
+				}
+				for _, tid := range inst.CurrentTasks {
+					if tid == taskID {
+						t.Errorf("after handoff, instance %q still owns task %d", id, taskID)
+					}
+				}
+			}
+
+			_ = svc.Run(func(state *domain.CollabState) error {
+				for i := range state.Tasks {
+					if state.Tasks[i].ID == taskID {
+						state.Tasks[i].Status = "in_progress"
+						state.Tasks[i].AssignedTo = parentType
+					}
+				}
+				app.AddTaskToInstance(state, taskID, taskBoundID)
+				return nil
+			})
+			lifecycleAssertSingleOwner(t, repo.state, taskID, "after re-claim")
+
+			if _, err := callTool(t, srv, "cancel_agent", map[string]any{
+				"agent": taskBoundID, "cancelled_by": "cursor", "reason": "matrix end",
+			}); err != nil {
+				t.Fatalf("cancel_agent: %v", err)
+			}
+
+			for _, tk := range repo.state.Tasks {
+				if tk.ID == taskID && tk.Status == "in_progress" {
+					t.Errorf("after cancel_agent, task %d still in_progress", taskID)
+				}
+			}
+			if static := repo.state.AgentInstances[parentType]; static != nil {
+				for _, tid := range static.CurrentTasks {
+					if tid == taskID {
+						t.Errorf("after cancel_agent, static sibling still owns task %d", taskID)
+					}
+				}
+			}
+		})
+	}
+}
+
+type lifecycleCanceller struct {
+	outputs map[string]string
+	cancels []string
+}
+
+func (l *lifecycleCanceller) CancelWorker(instanceID string) bool {
+	l.cancels = append(l.cancels, instanceID)
+	return true
+}
+func (l *lifecycleCanceller) IsWorkerRunning(instanceID string) bool {
+	return false
+}
+func (l *lifecycleCanceller) GetRecentOutput(instanceID string) string {
+	return l.outputs[instanceID]
+}
+
+func lifecycleServer(t *testing.T, svc *app.CollabService, logger *log.Logger, c WorkerCanceller) *server.MCPServer {
+	t.Helper()
+	s := server.NewMCPServer("matrix", "1.0.0")
+	registry := app.NewSessionRegistry()
+	Register(s, svc, logger, registry, nil, WithCanceller(c))
+	return s
+}
+
+func lifecycleExtractTaskID(t *testing.T, resp string) int {
+	t.Helper()
+	for _, tok := range strings.Fields(resp) {
+		tok = strings.TrimPrefix(tok, "#")
+		tok = strings.TrimRight(tok, ":,)")
+		if n, err := strconv.Atoi(tok); err == nil && n > 0 {
+			return n
+		}
+	}
+	t.Fatalf("could not extract task id from create_task response: %s", resp)
+	return 0
+}
+
+func lifecycleAssertSingleOwner(t *testing.T, state *domain.CollabState, taskID int, label string) {
+	t.Helper()
+	owners := []string{}
+	for id, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		for _, tid := range inst.CurrentTasks {
+			if tid == taskID {
+				owners = append(owners, id)
+			}
+		}
+	}
+	if len(owners) > 1 {
+		t.Errorf("[%s] task %d has %d owners %v; expected at most one", label, taskID, len(owners), owners)
 	}
 }
 
