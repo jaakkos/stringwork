@@ -446,3 +446,100 @@ func TestAutoHeartbeat_MatchesByAgentType(t *testing.T) {
 		t.Errorf("autoHeartbeat should match by agent type, got %s ago", time.Since(hb))
 	}
 }
+
+// fakeProcessLiveness implements ProcessLivenessProvider for tests.
+//
+// The map distinguishes three cases:
+//   - key present, value true  → registered AND alive
+//   - key present, value false → registered AND dead
+//   - key absent               → not registered (HTTP-only, no spawn row)
+type fakeProcessLiveness struct {
+	alive map[string]bool
+}
+
+func (f *fakeProcessLiveness) IsWorkerRunning(instanceID string) bool {
+	return f.alive[instanceID]
+}
+
+func (f *fakeProcessLiveness) HasWorker(instanceID string) bool {
+	_, ok := f.alive[instanceID]
+	return ok
+}
+
+// TestAutoHeartbeat_DebounceDoesNotMaskDeadWorker (M4) — when a
+// ProcessLivenessProvider is registered, the auto-heartbeat refresh
+// must NOT bump LastHeartbeat for a worker whose underlying process is
+// dead. Otherwise stray tool calls (replays, late-arriving messages)
+// silently extend the agent's effective heartbeat past the watchdog
+// staleness threshold and prevent recovery.
+//
+// Workers without registered process info (HTTP-only) must continue to
+// behave as before: refresh on every (debounced) tool call.
+func TestAutoHeartbeat_DebounceDoesNotMaskDeadWorker(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	oldTime := time.Now().Add(-1 * time.Hour)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code": {
+			InstanceID:    "claude-code",
+			AgentType:     "claude-code",
+			LastHeartbeat: oldTime,
+		},
+		"codex": {
+			InstanceID:    "codex",
+			AgentType:     "codex",
+			LastHeartbeat: oldTime,
+		},
+	}
+
+	// claude-code has a registered process and it is DEAD.
+	// codex has NO registered process (HTTP-only, fall through path).
+	provider := &fakeProcessLiveness{alive: map[string]bool{
+		"claude-code": false,
+	}}
+	hbt := newHeartbeatTrackerWithLiveness(provider)
+
+	hbt.track(svc, "claude-code")
+	hbt.track(svc, "codex")
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		hbDead := s.AgentInstances["claude-code"].LastHeartbeat
+		if !hbDead.Equal(oldTime) {
+			t.Errorf("dead worker's LastHeartbeat must NOT be refreshed by piggyback; was %s", hbDead)
+		}
+		hbHTTP := s.AgentInstances["codex"].LastHeartbeat
+		if time.Since(hbHTTP) > 2*time.Second {
+			t.Errorf("HTTP-only worker (no registered process) should still get refresh; got %s ago", time.Since(hbHTTP))
+		}
+		return nil
+	})
+}
+
+// TestAutoHeartbeat_RefreshesAliveWorker (M4) — sanity check: when a
+// ProcessLivenessProvider says the worker IS alive, piggyback still
+// refreshes LastHeartbeat as normal.
+func TestAutoHeartbeat_RefreshesAliveWorker(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	oldTime := time.Now().Add(-1 * time.Hour)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code": {
+			InstanceID:    "claude-code",
+			AgentType:     "claude-code",
+			LastHeartbeat: oldTime,
+		},
+	}
+
+	provider := &fakeProcessLiveness{alive: map[string]bool{
+		"claude-code": true,
+	}}
+	hbt := newHeartbeatTrackerWithLiveness(provider)
+
+	hbt.track(svc, "claude-code")
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		hb := s.AgentInstances["claude-code"].LastHeartbeat
+		if time.Since(hb) > 2*time.Second {
+			t.Errorf("alive worker's LastHeartbeat should refresh; got %s ago", time.Since(hb))
+		}
+		return nil
+	})
+}

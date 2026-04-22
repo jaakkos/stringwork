@@ -244,13 +244,14 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		}
 	})
 
+	livenessAdapter := &workerLivenessAdapter{}
 	mcpServer := server.NewMCPServer(
 		"mcp-stringwork",
 		Version,
 		server.WithInstructions(collab.InstructionsText()),
 		server.WithToolHandlerMiddleware(func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 			audit := collab.AuditMiddleware(auditWriter, registry, pol.AuditArgsMaxLen())
-			piggy := collab.PiggybackMiddleware(svc, registry)
+			piggy := collab.PiggybackMiddlewareWithLiveness(svc, registry, livenessAdapter)
 			return audit(piggy(next))
 		}),
 		server.WithHooks(hooks),
@@ -346,6 +347,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 			logger.Printf("WorkerManager: %d additional MCP server(s) configured for workers", len(entries))
 		}
 		notifierOpts = append(notifierOpts, app.WithWorkerManager(wm))
+		livenessAdapter.wm = wm
 		if taskOrch != nil {
 			taskOrch.SetBackoffChecker(wm)
 			taskOrch.SetWorktreeForAssignedTask(func(state *domain.CollabState, task *domain.Task, inst *domain.AgentInstance) {
@@ -651,6 +653,31 @@ func (a *processAdapter) GetRecentOutput(instanceID string) string {
 
 func (a *processAdapter) IsWorkerRunning(instanceID string) bool {
 	return a.wm.IsWorkerRunning(instanceID)
+}
+
+// workerLivenessAdapter bridges WorkerManager into the
+// collab.ProcessLivenessProvider used by the piggyback heartbeat gate.
+// It is constructed before the WorkerManager (so the middleware
+// closure can capture it) and has its `wm` field populated once the
+// WorkerManager exists. When `wm` is nil (no orchestration config) the
+// adapter degrades to "unknown worker" and the gate falls through to
+// the legacy refresh-on-every-call behavior.
+type workerLivenessAdapter struct {
+	wm *app.WorkerManager
+}
+
+func (a *workerLivenessAdapter) IsWorkerRunning(instanceID string) bool {
+	if a.wm == nil {
+		return false
+	}
+	return a.wm.IsWorkerRunning(instanceID)
+}
+
+func (a *workerLivenessAdapter) HasWorker(instanceID string) bool {
+	if a.wm == nil {
+		return false
+	}
+	return a.wm.HasWorker(instanceID)
 }
 
 type worktreeAdapter struct {

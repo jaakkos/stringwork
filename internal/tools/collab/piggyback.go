@@ -38,16 +38,38 @@ var suppressNudgeTools = map[string]struct{}{
 	"get_session_context": {},
 }
 
+// ProcessLivenessProvider answers "is the spawned worker process for
+// this instance still alive?" The piggyback auto-heartbeat consults
+// this BEFORE bumping LastHeartbeat so a stray tool call (replay,
+// late-arriving message) cannot extend the effective heartbeat of a
+// dead worker past the watchdog staleness threshold (M4). Workers with
+// no registered process row (HTTP-only, no spawn) bypass the gate and
+// retain the legacy refresh-on-every-call behavior.
+//
+// HasWorker exists so the gate can distinguish "registered AND dead"
+// (skip refresh) from "no row, HTTP-only worker" (refresh as before).
+// IsWorkerRunning alone is ambiguous because a missing row also returns
+// false in any natural implementation.
+type ProcessLivenessProvider interface {
+	IsWorkerRunning(instanceID string) bool
+	HasWorker(instanceID string) bool
+}
+
 // heartbeatTracker debounces auto-heartbeat state writes.
 // Each PiggybackMiddleware instance owns its own tracker, avoiding
 // package-level mutable state and giving tests natural isolation.
 type heartbeatTracker struct {
-	mu   sync.Mutex
-	last map[string]time.Time
+	mu       sync.Mutex
+	last     map[string]time.Time
+	liveness ProcessLivenessProvider
 }
 
 func newHeartbeatTracker() *heartbeatTracker {
 	return &heartbeatTracker{last: make(map[string]time.Time)}
+}
+
+func newHeartbeatTrackerWithLiveness(p ProcessLivenessProvider) *heartbeatTracker {
+	return &heartbeatTracker{last: make(map[string]time.Time), liveness: p}
 }
 
 // track updates the agent's LastHeartbeat in state, debounced at
@@ -63,6 +85,33 @@ func (h *heartbeatTracker) track(svc *app.CollabService, agent string) {
 	}
 	h.last[agent] = now
 	h.mu.Unlock()
+
+	// M4 gate: when a ProcessLivenessProvider is registered AND knows
+	// about this agent, only refresh when the process is alive. If the
+	// provider has no row for this agent (HTTP-only worker), fall
+	// through to the legacy refresh-on-every-call behavior.
+	if h.liveness != nil {
+		// Resolve the parent-type ping to a concrete instance ID.
+		// Tests often pass the parent type as `agent`; the spawn
+		// registry keys on InstanceID.
+		instanceID := agent
+		if !h.liveness.HasWorker(agent) {
+			_ = svc.Query(func(state *domain.CollabState) error {
+				if _, ok := state.AgentInstances[agent]; !ok {
+					for id, inst := range state.AgentInstances {
+						if inst != nil && inst.AgentType == agent && h.liveness.HasWorker(id) {
+							instanceID = id
+							break
+						}
+					}
+				}
+				return nil
+			})
+		}
+		if h.liveness.HasWorker(instanceID) && !h.liveness.IsWorkerRunning(instanceID) {
+			return
+		}
+	}
 
 	_ = svc.Run(func(state *domain.CollabState) error {
 		if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
@@ -91,7 +140,20 @@ var suppressBannerTools = map[string]struct{}{
 // messages or pending tasks. Tools in suppressBannerTools are skipped.
 // It also records session activity for watchdog liveness tracking.
 func PiggybackMiddleware(svc *app.CollabService, registry *app.SessionRegistry) server.ToolHandlerMiddleware {
-	hbt := newHeartbeatTracker()
+	return PiggybackMiddlewareWithLiveness(svc, registry, nil)
+}
+
+// PiggybackMiddlewareWithLiveness is like PiggybackMiddleware but also wires
+// a ProcessLivenessProvider so the auto-heartbeat refresh skips workers
+// whose underlying spawned process has died (M4). Pass nil for the provider
+// to retain the legacy refresh-on-every-call behavior.
+func PiggybackMiddlewareWithLiveness(svc *app.CollabService, registry *app.SessionRegistry, liveness ProcessLivenessProvider) server.ToolHandlerMiddleware {
+	var hbt *heartbeatTracker
+	if liveness != nil {
+		hbt = newHeartbeatTrackerWithLiveness(liveness)
+	} else {
+		hbt = newHeartbeatTracker()
+	}
 	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 		return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Record session activity for watchdog liveness tracking.

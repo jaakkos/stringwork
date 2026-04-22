@@ -87,7 +87,13 @@ type Watchdog struct {
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
 	// Key: taskID, Value: "warning" or "critical".
 	alertedTasks map[int]string
-	pol          Policy
+	// slaAlerted tracks which tasks have already had an SLA-exceeded
+	// alert sent. Kept SEPARATE from alertedTasks so that an SLA flag
+	// does NOT block the progress-critical auto-cancel branch (H8): a
+	// task can simultaneously be SLA-exceeded AND progress-critical,
+	// and both alerts must be allowed to fire.
+	slaAlerted map[int]bool
+	pol        Policy
 
 	// Cumulative GC counters surfaced via GCStats() so dashboards can show
 	// "N rows pruned since startup, last run Xs ago". These are a thin
@@ -198,6 +204,7 @@ func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logg
 		stopCh:                 make(chan struct{}),
 		doneCh:                 make(chan struct{}),
 		alertedTasks:           make(map[int]string),
+		slaAlerted:             make(map[int]bool),
 	}
 	for _, o := range opts {
 		o(w)
@@ -337,6 +344,15 @@ func (w *Watchdog) isProcessAlive(agent string, now time.Time, threshold time.Du
 // from any source: session registry, process output, or a non-zero heartbeat.
 // Used to distinguish "brand-new instance, no signals yet" from "instance that
 // was active and is now dead."
+//
+// H9: A session row alone is NOT sufficient evidence of life. Sessions can
+// outlive the underlying worker process (no explicit disconnect on SIGKILL),
+// so we must require either a recorded activity timestamp OR active process
+// output. Bare HasActiveSession=true with zero recorded activity is treated
+// as "no activity" — the dead-agent recovery path will only kick in once
+// some other signal (process row, prior heartbeat) confirms the instance
+// was real, preventing both spurious recoveries of brand-new instances and
+// silent zombification of long-stale ones.
 func (w *Watchdog) hasAnyActivity(agent string, inst *domain.AgentInstance, now time.Time) bool {
 	if !w.registry.LastActivityForAgent(agent).IsZero() {
 		return true
@@ -345,9 +361,6 @@ func (w *Watchdog) hasAnyActivity(agent string, inst *domain.AgentInstance, now 
 		if !w.registry.LastActivityForAgent(inst.InstanceID).IsZero() {
 			return true
 		}
-	}
-	if w.registry.HasActiveSession(agent) {
-		return true
 	}
 	if w.processActivity != nil {
 		procs := w.processActivity.GetProcessInfo()
@@ -531,6 +544,7 @@ func (w *Watchdog) check() {
 			if t.Status != "in_progress" {
 				// Clear alert tracking for non-in_progress tasks
 				delete(w.alertedTasks, t.ID)
+				delete(w.slaAlerted, t.ID)
 				continue
 			}
 
@@ -542,25 +556,26 @@ func (w *Watchdog) check() {
 			}
 			sinceProgress := now.Sub(lastActivity)
 
-			// SLA check: alert if expected duration is exceeded
+			// SLA check: alert if expected duration is exceeded. Tracked
+			// in its own slaAlerted map so it does NOT poison the
+			// progress-critical guard below — a task can be both SLA-
+			// exceeded and progress-critical simultaneously, and both
+			// alerts must fire (H8).
 			if t.ExpectedDurationSec > 0 {
 				expectedDur := time.Duration(t.ExpectedDurationSec) * time.Second
 				sinceStart := now.Sub(t.UpdatedAt) // UpdatedAt is set when task moves to in_progress
-				if sinceStart > expectedDur {
-					slaLevel := w.alertedTasks[t.ID]
-					if slaLevel != "sla_exceeded" {
-						w.alertedTasks[t.ID] = "sla_exceeded"
-						overBy := sinceStart - expectedDur
-						content := fmt.Sprintf("⏱️ **SLA exceeded**: Task #%d (%s) assigned to %s has been running for %s (expected: %s, over by %s). Consider checking on the worker or cancelling.",
-							t.ID, t.Title, t.AssignedTo,
-							sinceStart.Round(time.Second), expectedDur.Round(time.Second), overBy.Round(time.Second))
-						state.Messages = append(state.Messages, domain.Message{
-							ID: state.NextMsgID, From: "system", To: driver,
-							Content: content, Timestamp: now,
-						})
-						state.NextMsgID++
-						w.logger.Printf("Watchdog: SLA exceeded for task #%d (%s over)", t.ID, overBy.Round(time.Second))
-					}
+				if sinceStart > expectedDur && !w.slaAlerted[t.ID] {
+					w.slaAlerted[t.ID] = true
+					overBy := sinceStart - expectedDur
+					content := fmt.Sprintf("⏱️ **SLA exceeded**: Task #%d (%s) assigned to %s has been running for %s (expected: %s, over by %s). Consider checking on the worker or cancelling.",
+						t.ID, t.Title, t.AssignedTo,
+						sinceStart.Round(time.Second), expectedDur.Round(time.Second), overBy.Round(time.Second))
+					state.Messages = append(state.Messages, domain.Message{
+						ID: state.NextMsgID, From: "system", To: driver,
+						Content: content, Timestamp: now,
+					})
+					state.NextMsgID++
+					w.logger.Printf("Watchdog: SLA exceeded for task #%d (%s over)", t.ID, overBy.Round(time.Second))
 				}
 			}
 
@@ -612,7 +627,7 @@ func (w *Watchdog) check() {
 				}
 			}
 
-			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" && currentLevel != "sla_exceeded" {
+			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" {
 				var content string
 				shouldAutoCancel := false
 				switch {

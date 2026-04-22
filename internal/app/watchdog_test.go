@@ -2084,6 +2084,422 @@ func TestWatchdog_MultipleProcesses_MixedLiveness(t *testing.T) {
 	})
 }
 
+// TestWatchdog_SLAExceededDoesNotBlockAutoCancel (H8) — once a task hits
+// SLA exceeded the watchdog must still be able to escalate to the
+// progress-critical auto-cancel branch. Previously SLA wrote
+// "sla_exceeded" into alertedTasks, and the critical guard at the
+// progress-critical branch read `currentLevel != "sla_exceeded"`,
+// silently swallowing the auto-cancel for any task that had ever been
+// SLA-flagged.
+func TestWatchdog_SLAExceededDoesNotBlockAutoCancel(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1},
+		// Heartbeat fresh so the dead-agent recovery path is NOT what
+		// drives this test — we want the progress-critical auto-cancel
+		// branch to fire on its own.
+		LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+
+	// SLA budget = 1 minute, task started 10 minutes ago, no progress
+	// for 10 minutes. Both SLA AND progress-critical conditions are
+	// simultaneously true.
+	taskStart := now.Add(-10 * time.Minute)
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Slow task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: taskStart,
+		LastProgressAt:      taskStart,
+		ExpectedDurationSec: 60,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(2*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+		WithMaxTaskFailures(3),
+		WithAutoCanceller(&mockAutoCanceller{}),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		var sawSLA, sawAutoCancel bool
+		for _, m := range s.Messages {
+			if strings.Contains(m.Content, "SLA exceeded") {
+				sawSLA = true
+			}
+			if strings.Contains(m.Content, "AUTO-CANCELLING") || strings.Contains(m.Content, "AUTO-RECOVERING") {
+				sawAutoCancel = true
+			}
+		}
+		if !sawSLA {
+			t.Errorf("expected SLA-exceeded alert, none found in %d messages", len(s.Messages))
+		}
+		if !sawAutoCancel {
+			t.Errorf("expected progress-critical auto-cancel alert to ALSO fire (SLA must not block it); messages=%d", len(s.Messages))
+		}
+		// Task should be reset to pending or auto-blocked.
+		if s.Tasks[0].Status == "in_progress" {
+			t.Errorf("task still in_progress; auto-cancel branch was suppressed by SLA flag")
+		}
+		return nil
+	})
+}
+
+// mockAutoCanceller for tests that need autoCanceller wired up.
+type mockAutoCanceller struct {
+	cancelled []string
+}
+
+func (m *mockAutoCanceller) CancelWorker(id string) bool {
+	m.cancelled = append(m.cancelled, id)
+	return true
+}
+func (m *mockAutoCanceller) GetRecentOutput(id string) string { return "" }
+
+// TestWatchdog_DeadAgentRecoveryWithStaleSession (H9) — when an agent
+// has a session in the registry whose lastActivity is older than the
+// progress-warning threshold, the watchdog must NOT treat the session
+// as a sign of life. Sessions can outlive the underlying worker
+// process (the registry doesn't get an explicit disconnect when a
+// process is SIGKILLed); recovery must rely on the recency of activity,
+// not the mere presence of a session.
+func TestWatchdog_DeadAgentRecoveryWithStaleSession(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleHB := now.Add(-30 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1},
+		LastHeartbeat: staleHB,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Orphaned task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleHB,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// Simulate a registry session that has gone stale (e.g. the worker
+	// was SIGKILLed, or the SSE stream dropped without an explicit
+	// disconnect). The session row exists but no recent activity.
+	registry.SetAgent("session-stale", "claude-code")
+	registry.BackdateActivity("session-stale", now.Add(-30*time.Minute))
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(5*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "pending" && s.Tasks[0].Status != "blocked" {
+			t.Errorf("expected stuck task to be recovered (pending/blocked) when session is stale; got %q", s.Tasks[0].Status)
+		}
+		inst := s.AgentInstances["claude-code"]
+		if inst == nil {
+			t.Fatal("agent instance unexpectedly removed")
+		}
+		if inst.Status != "offline" {
+			t.Errorf("expected agent to be marked offline after stale-session recovery; got %q", inst.Status)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_AutoHeartbeatDebounceDoesNotMaskDeadWorker (M4) — the
+// piggyback auto-heartbeat refresh must NOT bump LastHeartbeat for a
+// worker whose underlying process is dead. Otherwise a stray tool call
+// (replay, late-arriving message, etc.) extends the agent's effective
+// heartbeat past the watchdog threshold and prevents recovery.
+//
+// This test exercises the watchdog half of the contract: an agent with
+// stale process activity AND stale heartbeat should still be marked
+// dead even after a recent registry-level signal. The piggyback gate
+// is exercised in piggyback_test.go.
+func TestWatchdog_AutoHeartbeatDebounceDoesNotMaskDeadWorker(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleHB := now.Add(-30 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1},
+		LastHeartbeat: staleHB,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Stuck on dead worker", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleHB,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	// processActivity reports a process row but with output that's far
+	// older than the heartbeat staleness threshold. This is the "dead
+	// worker, still in process registry" condition.
+	mp := &mockProcessActivity{procs: map[string]ProcessInfo{
+		"claude-code": {LastOutputAt: staleHB},
+	}}
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(5*time.Minute),
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProcessActivity(mp),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if s.Tasks[0].Status != "pending" && s.Tasks[0].Status != "blocked" {
+			t.Errorf("expected stuck task to be recovered when process is dead; got %q", s.Tasks[0].Status)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_AlertDeduplicationCoversSnippetVariants — the dedupe
+// gate uses alertedTasks[id] to track which level was already sent, so
+// changing snippet content between ticks must NOT cause a duplicate
+// alert. Locks in the keyed-by-task dedup contract.
+func TestWatchdog_AlertDeduplicationCoversSnippetVariants(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleProgress := now.Add(-6 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Critical task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleProgress,
+		LastProgressAt: staleProgress,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+	mp := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"claude-code": {LastOutputAt: now.Add(-30 * time.Second), OutputBytes: 100},
+		},
+		output: map[string]string{"claude-code": "first snippet"},
+	}
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(30*time.Minute),
+		WithProgressWarningThreshold(2*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+		WithProcessActivity(mp),
+	)
+	wd.CheckOnce()
+
+	var firstCount int
+	_ = svc.Query(func(s *domain.CollabState) error {
+		firstCount = len(s.Messages)
+		return nil
+	})
+
+	// Second tick: snippet changes. Should NOT generate another critical
+	// alert for the same task.
+	mp.output["claude-code"] = "second different snippet"
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		if len(s.Messages) != firstCount {
+			t.Errorf("dedup failed: tick 2 added %d new messages despite same level", len(s.Messages)-firstCount)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_DLQAtExactlyMaxFailuresNotPlusOne — when a task hits
+// FailureCount == maxTaskFailures, it should be auto-blocked exactly
+// at that count, not at maxTaskFailures+1. Locks in the >= boundary.
+func TestWatchdog_DLQAtExactlyMaxFailuresNotPlusOne(t *testing.T) {
+	state := domain.NewCollabState()
+	staleTime := time.Now().Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Boundary task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 1, // After this tick should hit 2.
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(2),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 2 {
+			t.Errorf("FailureCount = %d, want 2 (exact)", task.FailureCount)
+		}
+		if task.Status != "blocked" {
+			t.Errorf("Status = %q, want blocked at exactly maxTaskFailures (not max+1)", task.Status)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_DriverIsNeverPruned — driver instances are exempt from
+// every prune/dead path: dead-agent recovery, instance pruning, session
+// pruning. Locks in the role-based exemption.
+func TestWatchdog_DriverIsNeverPruned(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	veryOld := now.Add(-30 * 24 * time.Hour) // 30 days
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: veryOld,
+	}
+	state.DriverID = "cursor"
+	state.Presence = map[string]*domain.Presence{
+		"cursor": {Agent: "cursor", LastSeen: veryOld},
+	}
+	state.NextTaskID = 1
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithPolicy(testPolicy()),
+		WithHeartbeatThreshold(1*time.Minute),
+		WithSessionStaleThreshold(1*time.Minute),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst, ok := s.AgentInstances["cursor"]
+		if !ok || inst == nil {
+			t.Fatal("driver instance was pruned — drivers must never be removed")
+		}
+		if inst.Status == "offline" {
+			t.Errorf("driver was marked offline; drivers are exempt from liveness checks")
+		}
+		if _, ok := s.Presence["cursor"]; !ok {
+			t.Errorf("driver presence was pruned; drivers are exempt from presence GC")
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_RestartDoesNotMarkAliveAgentDead — after a server
+// restart, RefreshHeartbeatsOnStartup primes LastHeartbeat = now for
+// every instance. The next watchdog tick must NOT flip recently-primed
+// agents back to dead just because they have not yet had a chance to
+// reconnect their session.
+func TestWatchdog_RestartDoesNotMarkAliveAgentDead(t *testing.T) {
+	state := domain.NewCollabState()
+
+	// Pre-restart state: task in_progress, agent had been alive.
+	staleStart := time.Now().Add(-2 * time.Hour)
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: staleStart,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleStart,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "In-flight task", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleStart,
+	})
+	state.NextTaskID = 2
+	state.NextMsgID = 1
+
+	// Simulate restart.
+	RefreshHeartbeatsOnStartup(state)
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(5*time.Minute),
+		WithTaskStuckThreshold(15*time.Minute),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		// Worker is offline post-restart (correct), but the in-progress
+		// task should NOT be reset on the very first tick — give workers
+		// time to reconnect.
+		if s.Tasks[0].Status != "in_progress" {
+			t.Errorf("task status = %q, want in_progress (no reset on first post-restart tick)", s.Tasks[0].Status)
+		}
+		// Driver must still be present and alive.
+		drv := s.AgentInstances["cursor"]
+		if drv == nil {
+			t.Fatal("driver removed post-restart")
+		}
+		if time.Since(drv.LastHeartbeat) > time.Minute {
+			t.Errorf("driver LastHeartbeat not refreshed by RefreshHeartbeatsOnStartup")
+		}
+		return nil
+	})
+}
+
 // mockTriggerable records Trigger calls.
 type mockTriggerable struct {
 	fn func()

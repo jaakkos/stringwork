@@ -895,6 +895,31 @@ func (m *WorkerManager) IsWorkerRunning(instanceID string) bool {
 	return false
 }
 
+// HasWorker reports whether the WorkerManager knows about this instance —
+// either by an exact configured InstanceID, or by the AgentType of any
+// configured worker. Used by the piggyback heartbeat gate so HTTP-only
+// agents (no spawn config) keep the legacy refresh-on-every-call path
+// while spawn-managed agents are subject to liveness checks (M4).
+func (m *WorkerManager) HasWorker(instanceID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.configs {
+		if c.InstanceID == instanceID || c.AgentType == instanceID {
+			return true
+		}
+	}
+	if _, ok := m.processRuntime[instanceID]; ok {
+		return true
+	}
+	prefix := instanceID + "-"
+	for id := range m.processRuntime {
+		if strings.HasPrefix(id, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // isWorkerProcessRunning returns true if a process for the given instance or
 // any task-bound child (e.g. "codex-task-3") is currently tracked in processRuntime.
 func (m *WorkerManager) isWorkerProcessRunning(instanceID string) bool {
