@@ -544,6 +544,219 @@ func TestCancelAgent_NoRecoveryWhenAgentSentRecently(t *testing.T) {
 	}
 }
 
+// TestCancelAgent_RoutesSTOPToTaskBoundInstance (C4) — when the agent
+// being cancelled is a parent type with one or more task-bound child
+// instances, every task-bound child must receive its own STOP message
+// addressed to its specific InstanceID. Sending only one STOP to the
+// parent name leaves the actual worker process listening on the wrong
+// inbox and never noticing it has been cancelled.
+func TestCancelAgent_RoutesSTOPToTaskBoundInstance(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServerWithCanceller(svc, logger, nil)
+
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle"},
+		"claude-code-task-7": {
+			InstanceID: "claude-code-task-7", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{7},
+		},
+		"claude-code-task-9": {
+			InstanceID: "claude-code-task-9", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{9},
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 7, Title: "T7", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+		{ID: 9, Title: "T9", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+	}
+	repo.state.NextTaskID = 10
+
+	_, err := callTool(t, srv, "cancel_agent", map[string]any{
+		"agent":        "claude-code",
+		"cancelled_by": "cursor",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedTargets := map[string]bool{
+		"claude-code":        false,
+		"claude-code-task-7": false,
+		"claude-code-task-9": false,
+	}
+	for _, m := range repo.state.Messages {
+		if m.From != "system" || !strings.Contains(m.Content, "STOP") {
+			continue
+		}
+		if _, ok := expectedTargets[m.To]; ok {
+			expectedTargets[m.To] = true
+		}
+	}
+	for to, gotIt := range expectedTargets {
+		if !gotIt {
+			t.Errorf("expected STOP message to %q after cancel; not found", to)
+		}
+	}
+}
+
+// TestCancelAgent_PerTaskOutputCapture (C4) — output captured per
+// task-bound instance must be persisted on its OWN task's work context,
+// not smeared across every cancelled task. The previous code captured
+// once with GetRecentOutput(parentName), then wrote the same blob to
+// every task in the loop — silently overwriting whatever the actual
+// per-instance output was.
+func TestCancelAgent_PerTaskOutputCapture(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	canceller := newMockCanceller()
+	canceller.output["claude-code-task-7"] = "OUTPUT FROM TASK 7 RUN"
+	canceller.output["claude-code-task-9"] = "OUTPUT FROM TASK 9 RUN"
+	srv := testServerWithCanceller(svc, logger, canceller)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle"},
+		"claude-code-task-7": {
+			InstanceID: "claude-code-task-7", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{7},
+		},
+		"claude-code-task-9": {
+			InstanceID: "claude-code-task-9", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{9},
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 7, Title: "T7", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+		{ID: 9, Title: "T9", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
+	}
+	repo.state.WorkContexts = map[string]*domain.WorkContext{
+		"task-7": {ID: "task-7", TaskID: 7},
+		"task-9": {ID: "task-9", TaskID: 9},
+	}
+	repo.state.NextTaskID = 10
+
+	_, err := callTool(t, srv, "cancel_agent", map[string]any{
+		"agent":        "claude-code",
+		"cancelled_by": "cursor",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wc7 := repo.state.WorkContexts["task-7"]
+	wc9 := repo.state.WorkContexts["task-9"]
+	if wc7 == nil || wc9 == nil {
+		t.Fatalf("expected work contexts to remain after cancel; got wc7=%v wc9=%v", wc7, wc9)
+	}
+
+	if !strings.Contains(wc7.PreviousOutput, "OUTPUT FROM TASK 7 RUN") {
+		t.Errorf("task #7 work context should hold its own captured output; got %q", wc7.PreviousOutput)
+	}
+	if !strings.Contains(wc9.PreviousOutput, "OUTPUT FROM TASK 9 RUN") {
+		t.Errorf("task #9 work context should hold its own captured output; got %q", wc9.PreviousOutput)
+	}
+	if strings.Contains(wc7.PreviousOutput, "OUTPUT FROM TASK 9 RUN") {
+		t.Errorf("task #7 must not contain task #9's output (smeared capture); got %q", wc7.PreviousOutput)
+	}
+	if strings.Contains(wc9.PreviousOutput, "OUTPUT FROM TASK 7 RUN") {
+		t.Errorf("task #9 must not contain task #7's output (smeared capture); got %q", wc9.PreviousOutput)
+	}
+}
+
+// TestCancelAgent_RaceWithWorkerCompletion (C4) — when one task-bound
+// sibling has already completed its task (Status="completed", existing
+// PreviousOutput captured) and the other is still in_progress when
+// cancel_agent fires, the cancel must:
+//   - NOT mark the completed task as "cancelled" or rewrite its
+//     ResultSummary
+//   - NOT smear the cancelled sibling's captured output onto the
+//     completed task's work context
+//   - NOT emit a synthetic auto-recovery message FROM the
+//     already-completed task-bound instance (worker already sent its
+//     deliverable cleanly via update_task)
+//   - Still cancel the active sibling and emit auto-recovery for it
+func TestCancelAgent_RaceWithWorkerCompletion(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	canceller := newMockCanceller()
+	// canceller still has cached output for both task-bound instances
+	// (it doesn't know task-7 has already finished cleanly).
+	canceller.output["claude-code-task-7"] = "STALE TAIL FROM TASK 7 — DO NOT REPLAY"
+	canceller.output["claude-code-task-9"] = "ACTIVE OUTPUT FROM TASK 9"
+	srv := testServerWithCanceller(svc, logger, canceller)
+
+	repo.state.DriverID = "cursor"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"cursor":      {InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver, Status: "idle"},
+		"claude-code": {InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker, Status: "idle"},
+		"claude-code-task-7": {
+			InstanceID: "claude-code-task-7", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "idle",
+		},
+		"claude-code-task-9": {
+			InstanceID: "claude-code-task-9", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "busy", CurrentTasks: []int{9},
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 7, Title: "T7", Status: "completed", AssignedTo: "claude-code",
+			CreatedBy: "cursor", ResultSummary: "Worker finished cleanly"},
+		{ID: 9, Title: "T9", Status: "in_progress", AssignedTo: "claude-code",
+			CreatedBy: "cursor"},
+	}
+	repo.state.WorkContexts = map[string]*domain.WorkContext{
+		"task-7": {ID: "task-7", TaskID: 7, PreviousOutput: "FINAL DELIVERABLE FROM 7"},
+		"task-9": {ID: "task-9", TaskID: 9},
+	}
+	// Task 7's worker already sent a send_message just before completing.
+	repo.state.LastSendByAgent = map[string]time.Time{
+		"claude-code-task-7": time.Now().Add(-15 * time.Second),
+	}
+	repo.state.NextTaskID = 10
+
+	_, err := callTool(t, srv, "cancel_agent", map[string]any{
+		"agent":        "claude-code",
+		"cancelled_by": "cursor",
+		"reason":       "no longer needed",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if repo.state.Tasks[0].Status != "completed" {
+		t.Errorf("task #7 was already completed; cancel must leave it alone, got status %q", repo.state.Tasks[0].Status)
+	}
+	if repo.state.Tasks[0].ResultSummary != "Worker finished cleanly" {
+		t.Errorf("completed task ResultSummary must be preserved, got %q", repo.state.Tasks[0].ResultSummary)
+	}
+	if repo.state.Tasks[1].Status != "cancelled" {
+		t.Errorf("task #9 was active; expected cancelled, got %q", repo.state.Tasks[1].Status)
+	}
+
+	wc7 := repo.state.WorkContexts["task-7"]
+	if wc7 == nil {
+		t.Fatalf("work context for task #7 must remain")
+	}
+	if wc7.PreviousOutput != "FINAL DELIVERABLE FROM 7" {
+		t.Errorf("completed task #7 PreviousOutput must NOT be overwritten by stale capture; got %q", wc7.PreviousOutput)
+	}
+	if strings.Contains(wc7.PreviousOutput, "ACTIVE OUTPUT FROM TASK 9") {
+		t.Errorf("completed task #7 must NOT receive task #9's captured output; got %q", wc7.PreviousOutput)
+	}
+
+	// Auto-recovery: only task-9's instance should produce one. task-7's
+	// instance already sent its deliverable; emitting a recovery msg
+	// from it would duplicate the already-delivered result.
+	for _, m := range repo.state.Messages {
+		if m.From == "claude-code-task-7" && strings.Contains(m.Content, "Auto-recovered") {
+			t.Errorf("must NOT auto-recover for task-7 (worker already sent recently); got: %s", m.Content)
+		}
+	}
+}
+
 // TestUpdateTask_CompletedKeepsStaticPool ensures that a static pool worker
 // finishing its task does NOT get reaped — it's needed for the next task.
 func TestUpdateTask_CompletedKeepsStaticPool(t *testing.T) {
