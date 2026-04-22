@@ -64,6 +64,9 @@ func main() {
 		case "restart":
 			runRestartCommand()
 			return
+		case "admin":
+			runAdminCommand(os.Args[2:])
+			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
 			return

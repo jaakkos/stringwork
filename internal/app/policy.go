@@ -19,4 +19,16 @@ type Policy interface {
 	AuditEnabled() bool
 	AuditArgsMaxLen() int
 	AuditRetentionDays() int
+	// PresenceRetentionDays returns the number of days a non-driver Presence
+	// row is retained after its last_seen before the watchdog GCs it.
+	PresenceRetentionDays() int
+	// InstanceRetentionDays returns the number of days a static-pool
+	// AgentInstance row is retained after going offline before the watchdog
+	// GCs it.
+	InstanceRetentionDays() int
+	// TaskBoundInstanceRetentionHours returns the number of HOURS a
+	// task-bound AgentInstance row is retained after going offline. Shorter
+	// than InstanceRetentionDays because task-bound rows should normally be
+	// reaped on terminal task transition; this is the GC safety net.
+	TaskBoundInstanceRetentionHours() int
 }

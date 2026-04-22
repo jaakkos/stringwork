@@ -75,8 +75,18 @@ func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *l
 					verdict := livenessVerdict(id, inst, now, pip)
 					result += fmt.Sprintf("  - %s [%s] %s%s, heartbeat: %s  %s\n", id, inst.AgentType, inst.Status, tasks, ago, verdict)
 
-					// Show agent-level progress
-					if inst.Progress != "" {
+					// Show agent-level progress, but suppress lines that are
+					// stale on an offline instance — the watchdog has already
+					// concluded the worker is dead, so its last self-reported
+					// progress (often "Sending findings to cursor", days old)
+					// is misleading rather than informative.
+					const progressStaleOnOffline = 2 * time.Minute
+					showProgress := inst.Progress != ""
+					if showProgress && inst.Status == "offline" && !inst.ProgressUpdatedAt.IsZero() &&
+						now.Sub(inst.ProgressUpdatedAt) > progressStaleOnOffline {
+						showProgress = false
+					}
+					if showProgress {
 						progressAge := ""
 						if !inst.ProgressUpdatedAt.IsZero() {
 							progressAge = fmt.Sprintf(" (%s ago)", now.Sub(inst.ProgressUpdatedAt).Round(time.Second))

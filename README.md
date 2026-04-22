@@ -243,6 +243,36 @@ mcp-stringwork --version                # print version
 mcp-stringwork status claude-code       # check unread/pending counts for an agent
 ```
 
+## Operations
+
+When the worker pool gets stuck (zombie workers, stale presence rows, ballooning
+`AgentInstance` count), use the `admin` subcommands instead of editing
+`state.sqlite` by hand. They operate directly on the SQLite store, so they work
+whether or not the daemon is running.
+
+```bash
+# Inspect pool: total/active/offline counts, oldest stale rows, in-flight tasks.
+mcp-stringwork admin pool-status
+
+# Garbage-collect both presence and instance rows using policy defaults.
+mcp-stringwork admin prune
+
+# Preview what `admin prune` would remove without writing.
+mcp-stringwork admin prune --dry-run
+
+# Just presence rows, with an explicit retention window.
+mcp-stringwork admin prune --presence --older-than 3d
+
+# Aggressively clean up task-bound worker rows (e.g. after a server crash
+# left zombies behind) without touching the static pool.
+mcp-stringwork admin prune --instances --task-bound-older-than 1h
+```
+
+The same pruning runs continuously inside the daemon as part of the watchdog
+loop; the CLI exists so you don't need it to be running to recover from a bad
+state. Defaults come from `config.yaml` (`presence_retention_days`,
+`instance_retention_days`, `task_bound_instance_retention_hours`).
+
 ## Project Structure
 
 ```

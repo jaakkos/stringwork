@@ -21,6 +21,19 @@ message_retention_max: 1000
 message_retention_days: 30
 presence_ttl_seconds: 300
 
+# --- Worker Pool GC ---
+# How long the watchdog keeps stale Presence and AgentInstance rows before
+# pruning them. Without GC the rows accumulate forever (every task spawn
+# creates a new task-bound instance row), eventually filling worker_status
+# with hundreds of zombie entries. Defaults shown below.
+#
+# presence_retention_days:           7   # GC non-driver Presence rows after N days unseen (0 = disabled)
+# instance_retention_days:           7   # GC offline static-pool AgentInstance rows after N days (0 = disabled)
+# task_bound_instance_retention_hours: 24 # GC offline TASK-BOUND AgentInstance rows after N hours (0 = disabled)
+#                                          Shorter window: task-bound rows should be reaped on terminal
+#                                          task transition by update_task / cancel_agent — this is the
+#                                          GC safety net for cases where the in-event reap was missed.
+
 # --- Audit Logging ---
 # Records every tool call with agent, tool name, args summary, duration, and errors.
 # Enabled by default. Set `disabled: true` to turn off.
@@ -117,16 +130,28 @@ orchestration:
   #   communication: cli   — workers use shell commands ($STRINGWORK_BIN heartbeat, etc.)
   #                          No MCP registration needed. Default and recommended.
   #   communication: mcp   — workers connect via MCP over HTTP (legacy, less reliable)
+  #
+  # Model override (optional):
+  #   Set `model:` on a worker to pin the LLM it uses. Stringwork injects
+  #   `--model <value>` into the command based on the binary (claude/codex/gemini).
+  #   If your `command` already hard-codes `--model`, that wins and `model:` is ignored.
+  #   Examples:  model: opus  |  model: sonnet  |  model: haiku  (claude-code)
+  #              model: gpt-5-codex                              (codex)
+  #              model: gemini-2.5-pro  |  model: gemini-2.5-flash  (gemini)
   workers:
     - type: claude-code
       instances: 1
       communication: cli   # "cli" (default) or "mcp"
+      # model: opus        # optional — inject --model opus into the claude command
       # use_claude_worktree: true   # optional: run each instance with -w <instance_id> (e.g. .claude/worktrees/claude-code-1)
       command: ["claude", "-p", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS. On first call include --session-id YOUR_SESSION_ID so the server can resume your session on restart.\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED", "--dangerously-skip-permissions"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
-      timeout_seconds: 600
+      # 30 min: review-style tasks routinely run >10min, and the prior 600s
+      # default consistently killed claude-code mid-final-`send` (the
+      # deliverable was lost just before delivery).
+      timeout_seconds: 1800
       env:
         GH_TOKEN: "${GH_TOKEN}"
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
@@ -135,13 +160,16 @@ orchestration:
     - type: codex
       instances: 1
       communication: cli   # "cli" (default) or "mcp"
+      # model: gpt-5-codex  # optional — inject --model gpt-5-codex after `codex exec`
       # Codex sandbox blocks network by default.
       # Use --sandbox danger-full-access for full capabilities.
       command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS. On first call include --session-id YOUR_SESSION_ID so the server can resume your session on restart.\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
-      timeout_seconds: 600
+      # 30 min: matches claude-code; codex review tasks have the same
+      # mid-deliverable-cancel failure mode at 600s.
+      timeout_seconds: 1800
       env:
         GH_TOKEN: "${GH_TOKEN}"
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
@@ -149,13 +177,16 @@ orchestration:
     - type: gemini
       instances: 1
       communication: cli   # "cli" (default) or "mcp"
+      # model: gemini-2.5-pro  # optional — inject --model gemini-2.5-pro into the gemini command
       # Gemini CLI: --yolo auto-approves tools, --prompt runs headless.
       # Requires GOOGLE_API_KEY. Install: npm install -g @google/gemini-cli
       command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nCOMMUNICATION: Use shell commands (not MCP tools) for coordination.\nThe env vars STRINGWORK_AGENT, STRINGWORK_WORKSPACE, STRINGWORK_SOCKET, and STRINGWORK_BIN are set.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Run: $STRINGWORK_BIN heartbeat --agent {agent} --progress '<status>' EVERY 60-90 SECONDS. On first call include --session-id YOUR_SESSION_ID so the server can resume your session on restart.\n- Run: $STRINGWORK_BIN progress --agent {agent} --task X --description '<status>' --percent N EVERY 2-3 MINUTES\n- Run: $STRINGWORK_BIN send --from {agent} --to {driver} --content '<findings>' BEFORE finishing\n- If output contains STOP: stop immediately, run $STRINGWORK_BIN read --for {agent}, then exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
-      timeout_seconds: 600
+      # 20 min: gemini cycles faster than claude/codex but the prior 600s
+      # was still tight for review-style work; doubled with some headroom.
+      timeout_seconds: 1200
       env:
         GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
         GH_TOKEN: "${GH_TOKEN}"

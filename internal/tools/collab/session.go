@@ -79,15 +79,21 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 						sessionFresh = true
 					}
 
+					isOffline := presenceStale && !heartbeatFresh && !sessionFresh
 					statusStr := p.Status
-					if presenceStale && !heartbeatFresh && !sessionFresh {
-						statusStr += " (offline)"
+					if isOffline {
+						// Once watchdog/TTL classifies the agent as offline,
+						// the last self-reported status (often "working") is
+						// stale and misleading. Render plain "offline" and
+						// drop task / workspace fields too — the same task
+						// or workspace context likely no longer applies.
+						statusStr = "offline"
 					}
 					fmt.Fprintf(&buf, "  %s: %s", p.Agent, statusStr)
-					if p.CurrentTaskID > 0 {
+					if !isOffline && p.CurrentTaskID > 0 {
 						fmt.Fprintf(&buf, " (Task #%d)", p.CurrentTaskID)
 					}
-					if p.Workspace != "" {
+					if !isOffline && p.Workspace != "" {
 						fmt.Fprintf(&buf, " [%s]", p.Workspace)
 					}
 					buf.WriteByte('\n')

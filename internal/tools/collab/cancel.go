@@ -98,16 +98,35 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 					removeTaskFromInstance(state, t.ID, t.AssignedTo)
 				}
 
-				// Mark agent instance as idle
+				// Reap task-bound instance rows; idle out static pool rows.
+				// Task-bound instances (e.g. "claude-code-task-7") have no
+				// reason to outlive their task, so we delete both the
+				// AgentInstance and Presence rows. Static pool workers
+				// (e.g. "claude-code") get marked idle so they can be
+				// re-used for the next task.
+				var toReap []string
 				if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
-					inst.CurrentTasks = nil
-					inst.Status = "idle"
-				}
-				for _, inst := range state.AgentInstances {
-					if inst != nil && inst.AgentType == agent {
+					if app.IsTaskBoundInstance(state, agent) {
+						toReap = append(toReap, agent)
+					} else {
 						inst.CurrentTasks = nil
 						inst.Status = "idle"
 					}
+				}
+				for id, inst := range state.AgentInstances {
+					if inst == nil || inst.AgentType != agent || id == agent {
+						continue
+					}
+					if app.IsTaskBoundInstance(state, id) {
+						toReap = append(toReap, id)
+					} else {
+						inst.CurrentTasks = nil
+						inst.Status = "idle"
+					}
+				}
+				for _, id := range toReap {
+					delete(state.AgentInstances, id)
+					delete(state.Presence, id)
 				}
 
 				// Send STOP message to the agent
@@ -132,6 +151,67 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 					Timestamp: now,
 				})
 				state.NextMsgID++
+
+				// Synthetic deliverable recovery (Bug D safety net):
+				// If the worker captured output but never managed to call
+				// send_message (typical when the LLM was killed mid-final
+				// `send`), surface a truncated tail to the driver so the
+				// work isn't silently lost.
+				if capturedOutput != "" {
+					recentlySent := false
+					if state.LastSendByAgent != nil {
+						if lastSend, ok := state.LastSendByAgent[agent]; ok && !lastSend.IsZero() {
+							if now.Sub(lastSend) < time.Hour {
+								recentlySent = true
+							}
+						}
+					}
+					// Fallback for when LastSendByAgent isn't populated yet
+					// (e.g. server restart between the worker's send and
+					// this cancel): scan recent messages for any send from
+					// the agent in the last hour.
+					if !recentlySent {
+						cutoff := now.Add(-time.Hour)
+						for i := len(state.Messages) - 1; i >= 0; i-- {
+							m := state.Messages[i]
+							if m.Timestamp.Before(cutoff) {
+								break
+							}
+							if m.From == agent {
+								recentlySent = true
+								break
+							}
+						}
+					}
+					if !recentlySent {
+						driver := app.ConfiguredDriver(state)
+						if driver == "" {
+							driver = cancelledBy
+						}
+						const maxRecoveryBytes = 4096
+						tail := capturedOutput
+						truncated := false
+						if len(tail) > maxRecoveryBytes {
+							tail = tail[len(tail)-maxRecoveryBytes:]
+							truncated = true
+						}
+						body := "⚠️ Auto-recovered output (worker did not send before cancel):\n\n```\n"
+						if truncated {
+							body += "...(truncated)...\n"
+						}
+						body += tail
+						body += "\n```"
+
+						state.Messages = append(state.Messages, domain.Message{
+							ID:        state.NextMsgID,
+							From:      agent,
+							To:        driver,
+							Content:   body,
+							Timestamp: now,
+						})
+						state.NextMsgID++
+					}
+				}
 
 				return nil
 			}); err != nil {

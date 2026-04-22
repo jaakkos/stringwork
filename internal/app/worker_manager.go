@@ -49,6 +49,7 @@ type WorkerSpawnConfig struct {
 	UseClaudeWorktree  bool              // if true, inject -w for Claude native worktree
 	ClaudeWorktreeName string            // optional: worktree name from orchestrator scope; overrides InstanceID for -w
 	Communication      string            // "cli" (default) or "mcp"
+	Model              string            // optional: inject --model <value> based on binary (claude/codex/gemini)
 }
 
 // MCPServerEntry is a single MCP server configuration for worker CLI registration.
@@ -170,6 +171,7 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 					InheritEnv:        w.InheritEnv,
 					UseClaudeWorktree: w.UseClaudeWorktree,
 					Communication:     comm,
+					Model:             w.Model,
 				})
 			}
 		}
@@ -1470,6 +1472,81 @@ func injectGeminiResume(args []string, sessionID string) []string {
 	return out
 }
 
+// hasModelFlag reports whether args already contain a user-supplied --model flag.
+// If true, the user is explicitly overriding the config-level Model and we must
+// not inject a duplicate.
+func hasModelFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--model" || strings.HasPrefix(a, "--model=") {
+			return true
+		}
+	}
+	return false
+}
+
+// injectModelFlag inserts --model <model> into args based on the binary at args[0].
+// Claude Code: claude --model <x> [other flags] -p "prompt"
+// Codex:       codex exec --model <x> [other flags] "prompt"
+// Gemini:      gemini --model <x> [other flags] --prompt "prompt"
+// Returns args unchanged when model is empty, args are empty, the binary is not
+// recognized, or --model is already present (user override).
+func injectModelFlag(args []string, model string) []string {
+	if model == "" || len(args) == 0 {
+		return args
+	}
+	if hasModelFlag(args) {
+		return args
+	}
+	exe := args[0]
+	switch {
+	case isClaudeCommand(exe):
+		return injectClaudeModel(args, model)
+	case isCodexCommand(exe):
+		return injectCodexModel(args, model)
+	case isGeminiCommand(exe):
+		return injectGeminiModel(args, model)
+	default:
+		return args
+	}
+}
+
+// injectClaudeModel inserts --model <model> after the executable.
+// Claude supports: claude --model <x> -p "prompt"
+func injectClaudeModel(args []string, model string) []string {
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--model", model)
+	out = append(out, args[1:]...)
+	return out
+}
+
+// injectCodexModel inserts --model <model> after the "exec" subcommand.
+// Codex supports: codex exec --model <x> "prompt"
+// Falls back to inserting after the executable if "exec" is absent.
+func injectCodexModel(args []string, model string) []string {
+	out := make([]string, 0, len(args)+2)
+	for i, arg := range args {
+		out = append(out, arg)
+		if arg == "exec" {
+			out = append(out, "--model", model)
+			out = append(out, args[i+1:]...)
+			return out
+		}
+	}
+	out = make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--model", model)
+	out = append(out, args[1:]...)
+	return out
+}
+
+// injectGeminiModel inserts --model <model> after the executable.
+// Gemini supports: gemini --model <x> --prompt "prompt"
+func injectGeminiModel(args []string, model string) []string {
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[0], "--model", model)
+	out = append(out, args[1:]...)
+	return out
+}
+
 // mcpBaseURL extracts the scheme+host+port from a URL (e.g. "http://localhost:8943/mcp" -> "http://localhost:8943").
 func mcpBaseURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
@@ -1830,6 +1907,9 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir, m.driver())
 	if len(args) == 0 {
 		return runResult{Err: fmt.Errorf("empty command")}
+	}
+	if c.Model != "" {
+		args = injectModelFlag(args, c.Model)
 	}
 	if c.UseClaudeWorktree && isClaudeCommand(args[0]) {
 		worktreeName := c.ClaudeWorktreeName

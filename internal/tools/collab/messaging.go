@@ -42,17 +42,27 @@ func registerSendMessage(s *server.MCPServer, svc *app.CollabService, logger *lo
 					return err
 				}
 
+				now := time.Now()
 				msg := domain.Message{
 					ID:        state.NextMsgID,
 					From:      from,
 					To:        to,
 					Content:   content,
-					Timestamp: time.Now(),
+					Timestamp: now,
 					Read:      false,
 				}
 				state.Messages = append(state.Messages, msg)
 				msgID = state.NextMsgID
 				state.NextMsgID++
+
+				// Track the most recent send_message per agent so the
+				// watchdog's auto-cancel logic can grant a "recent send"
+				// grace window — we don't want to kill a worker that's
+				// mid-deliverable just because heartbeats lapsed.
+				if state.LastSendByAgent == nil {
+					state.LastSendByAgent = make(map[string]time.Time)
+				}
+				state.LastSendByAgent[from] = now
 
 				pruned := app.PruneMessages(state, svc.Policy().MessageRetentionMax(), svc.Policy().MessageRetentionDays())
 				if pruned > 0 {

@@ -49,18 +49,21 @@ func newMockPolicy() *mockPolicy {
 	return &mockPolicy{workspaceRoot: dir}
 }
 
-func (m *mockPolicy) MessageRetentionMax() int       { return 1000 }
-func (m *mockPolicy) MessageRetentionDays() int      { return 30 }
-func (m *mockPolicy) PresenceTTLSeconds() int        { return 300 }
-func (m *mockPolicy) StateFile() string              { return "" }
-func (m *mockPolicy) SignalFilePath() string         { return "" }
-func (m *mockPolicy) WorkspaceRoot() string          { return m.workspaceRoot }
-func (m *mockPolicy) SetWorkspaceRoot(root string)   { m.workspaceRoot = root }
-func (m *mockPolicy) IsToolEnabled(name string) bool { return true }
-func (m *mockPolicy) MaxTaskFailures() int           { return 3 }
-func (m *mockPolicy) AuditEnabled() bool             { return true }
-func (m *mockPolicy) AuditArgsMaxLen() int           { return 1000 }
-func (m *mockPolicy) AuditRetentionDays() int        { return 7 }
+func (m *mockPolicy) MessageRetentionMax() int             { return 1000 }
+func (m *mockPolicy) MessageRetentionDays() int            { return 30 }
+func (m *mockPolicy) PresenceTTLSeconds() int              { return 300 }
+func (m *mockPolicy) StateFile() string                    { return "" }
+func (m *mockPolicy) SignalFilePath() string               { return "" }
+func (m *mockPolicy) WorkspaceRoot() string                { return m.workspaceRoot }
+func (m *mockPolicy) SetWorkspaceRoot(root string)         { m.workspaceRoot = root }
+func (m *mockPolicy) IsToolEnabled(name string) bool       { return true }
+func (m *mockPolicy) MaxTaskFailures() int                 { return 3 }
+func (m *mockPolicy) AuditEnabled() bool                   { return true }
+func (m *mockPolicy) AuditArgsMaxLen() int                 { return 1000 }
+func (m *mockPolicy) AuditRetentionDays() int              { return 7 }
+func (m *mockPolicy) PresenceRetentionDays() int           { return 7 }
+func (m *mockPolicy) InstanceRetentionDays() int           { return 7 }
+func (m *mockPolicy) TaskBoundInstanceRetentionHours() int { return 24 }
 func (m *mockPolicy) Orchestration() *policy.OrchestrationConfig {
 	return &policy.OrchestrationConfig{
 		Driver: "cursor",

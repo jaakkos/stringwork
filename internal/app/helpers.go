@@ -73,6 +73,50 @@ func RegisteredAgentNames(state *domain.CollabState) []string {
 	return names
 }
 
+// IsTaskBoundInstance reports whether the named agent is a task-bound worker
+// instance (lifetime tied to a single task) rather than a static pool worker.
+//
+// Convention used throughout the codebase: a task-bound instance has its
+// InstanceID set to "<type>-task-<taskID>" while its AgentType remains the
+// pool type. Static pool workers have InstanceID == AgentType (single
+// instance) or "<type>-N" (multi-instance pool, but still re-used).
+//
+// Use this to decide whether an instance row should be deleted on terminal
+// task transitions / cancel_agent (true → reap) or just marked idle (false).
+func IsTaskBoundInstance(state *domain.CollabState, agent string) bool {
+	if state == nil || agent == "" {
+		return false
+	}
+	inst, ok := state.AgentInstances[agent]
+	if !ok || inst == nil {
+		return false
+	}
+	if inst.Role != domain.RoleWorker {
+		return false
+	}
+	// "claude-code-task-7" vs AgentType "claude-code".
+	return strings.Contains(inst.InstanceID, "-task-")
+}
+
+// ReapTaskBoundInstance removes a task-bound worker's AgentInstance and
+// matching Presence row from state. Returns true if the agent was task-bound
+// and was reaped; false otherwise (static pool workers, drivers, or unknown
+// names — all left untouched).
+//
+// Safe to call on any name: it's a no-op for non-task-bound rows. Intended to
+// be invoked when the owning task reaches a terminal state (completed /
+// cancelled / blocked) or when cancel_agent is invoked on the worker — at
+// that point the task-bound instance has no further purpose and otherwise
+// piles up as a zombie row.
+func ReapTaskBoundInstance(state *domain.CollabState, agent string) bool {
+	if !IsTaskBoundInstance(state, agent) {
+		return false
+	}
+	delete(state.AgentInstances, agent)
+	delete(state.Presence, agent)
+	return true
+}
+
 // IsBuiltinAgent returns true if agent is a known instance or agent type in state.AgentInstances.
 func IsBuiltinAgent(agent string, state *domain.CollabState) bool {
 	if state == nil {

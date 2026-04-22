@@ -63,6 +63,14 @@ type WorkerConfig struct {
 	//   "mcp"           — workers connect via MCP over HTTP (legacy). Requires mcp add
 	//                     registration during spawn.
 	Communication string `yaml:"communication"`
+	// Model optionally overrides the LLM model used by the worker CLI. When set,
+	// the spawner injects the appropriate `--model <value>` flag based on the
+	// binary (claude, codex, gemini). If the user has already hard-coded
+	// `--model` in `command`, the hard-coded value wins and this field is ignored.
+	// Example values: "opus", "sonnet", "haiku" (claude); "gpt-5-codex" (codex);
+	// "gemini-2.5-pro", "gemini-2.5-flash" (gemini). Any string accepted by the
+	// underlying CLI works — Stringwork does not validate the model name.
+	Model string `yaml:"model"`
 }
 
 // OrchestrationConfig holds driver/worker orchestration settings.
@@ -117,6 +125,22 @@ type Config struct {
 	MessageRetentionDays int `yaml:"message_retention_days"`
 	PresenceTTLSeconds   int `yaml:"presence_ttl_seconds"`
 
+	// PresenceRetentionDays controls how long stale Presence rows for
+	// non-driver agents are kept before the watchdog GC removes them.
+	// Default: 7 days. Set to 0 to disable presence GC.
+	PresenceRetentionDays int `yaml:"presence_retention_days"`
+	// InstanceRetentionDays controls how long offline static-pool
+	// AgentInstance rows are kept before the watchdog GC removes them.
+	// Default: 7 days. Set to 0 to disable static instance GC.
+	InstanceRetentionDays int `yaml:"instance_retention_days"`
+	// TaskBoundInstanceRetentionHours controls how long offline TASK-BOUND
+	// AgentInstance rows (lifetime tied to a single task, e.g.
+	// "claude-code-task-7") are kept. Shorter than InstanceRetentionDays
+	// because task-bound rows are normally reaped on terminal task
+	// transition — this knob is the safety net. Default: 24 hours. Set to 0
+	// to disable task-bound GC.
+	TaskBoundInstanceRetentionHours int `yaml:"task_bound_instance_retention_hours"`
+
 	HTTPPort      int                        `yaml:"http_port"`
 	Orchestration *OrchestrationConfig       `yaml:"orchestration"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
@@ -135,13 +159,16 @@ type AuditConfig struct {
 // DefaultConfig returns sensible defaults. Orchestration is always set (driver cursor, no workers).
 func DefaultConfig() *Config {
 	return &Config{
-		WorkspaceRoot:        "",
-		EnabledTools:         []string{"*"},
-		MessageRetentionMax:  1000,
-		MessageRetentionDays: 30,
-		PresenceTTLSeconds:   300,
-		StateFile:            "",
-		Orchestration:        DefaultOrchestration(),
+		WorkspaceRoot:                   "",
+		EnabledTools:                    []string{"*"},
+		MessageRetentionMax:             1000,
+		MessageRetentionDays:            30,
+		PresenceTTLSeconds:              300,
+		PresenceRetentionDays:           7,
+		InstanceRetentionDays:           7,
+		TaskBoundInstanceRetentionHours: 24,
+		StateFile:                       "",
+		Orchestration:                   DefaultOrchestration(),
 	}
 }
 
@@ -295,6 +322,33 @@ func (p *Policy) MessageRetentionDays() int {
 // PresenceTTLSeconds returns the presence TTL in seconds
 func (p *Policy) PresenceTTLSeconds() int {
 	return p.config.PresenceTTLSeconds
+}
+
+// PresenceRetentionDays returns the GC retention window for stale Presence
+// rows. Default 7 if unset.
+func (p *Policy) PresenceRetentionDays() int {
+	if p.config.PresenceRetentionDays > 0 {
+		return p.config.PresenceRetentionDays
+	}
+	return 7
+}
+
+// InstanceRetentionDays returns the GC retention window for offline static
+// pool AgentInstance rows. Default 7 if unset.
+func (p *Policy) InstanceRetentionDays() int {
+	if p.config.InstanceRetentionDays > 0 {
+		return p.config.InstanceRetentionDays
+	}
+	return 7
+}
+
+// TaskBoundInstanceRetentionHours returns the GC retention window for
+// offline task-bound AgentInstance rows. Default 24 if unset.
+func (p *Policy) TaskBoundInstanceRetentionHours() int {
+	if p.config.TaskBoundInstanceRetentionHours > 0 {
+		return p.config.TaskBoundInstanceRetentionHours
+	}
+	return 24
 }
 
 // Orchestration returns the orchestration config (driver/workers). Never nil (default applied in LoadConfig).

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jaakkos/stringwork/internal/domain"
+	"github.com/jaakkos/stringwork/internal/policy"
 )
 
 func testLogger(t *testing.T) *log.Logger {
@@ -1784,5 +1785,202 @@ func TestRestartWorkers_PreservesSessionID(t *testing.T) {
 
 	if got := wm.lastSessionID["claude-code"]; got != "my-session-123" {
 		t.Errorf("RestartWorkers should preserve lastSessionID; got %q, want %q", got, "my-session-123")
+	}
+}
+
+// --- Model flag injection tests ---
+
+func TestInjectModelFlag_Claude(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		model string
+		want  []string
+	}{
+		{
+			name:  "inserts --model after exe, before -p",
+			args:  []string{"claude", "-p", "You are a worker"},
+			model: "opus",
+			want:  []string{"claude", "--model", "opus", "-p", "You are a worker"},
+		},
+		{
+			name:  "works with full path",
+			args:  []string{"/opt/homebrew/bin/claude", "--dangerously-skip-permissions", "-p", "prompt"},
+			model: "sonnet",
+			want:  []string{"/opt/homebrew/bin/claude", "--model", "sonnet", "--dangerously-skip-permissions", "-p", "prompt"},
+		},
+		{
+			name:  "accepts full model IDs",
+			args:  []string{"claude", "-p", "prompt"},
+			model: "claude-opus-4-5-20250929",
+			want:  []string{"claude", "--model", "claude-opus-4-5-20250929", "-p", "prompt"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectModelFlag(tc.args, tc.model)
+			assertArgs(t, "injectModelFlag(claude)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectModelFlag_Codex(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		model string
+		want  []string
+	}{
+		{
+			name:  "inserts --model after exec",
+			args:  []string{"codex", "exec", "--sandbox", "danger-full-access", "prompt"},
+			model: "gpt-5-codex",
+			want:  []string{"codex", "exec", "--model", "gpt-5-codex", "--sandbox", "danger-full-access", "prompt"},
+		},
+		{
+			name:  "fallback when no exec subcommand",
+			args:  []string{"codex", "--some-flag", "prompt"},
+			model: "gpt-5-codex",
+			want:  []string{"codex", "--model", "gpt-5-codex", "--some-flag", "prompt"},
+		},
+		{
+			name:  "with full path",
+			args:  []string{"/usr/local/bin/codex", "exec", "do something"},
+			model: "o4-mini",
+			want:  []string{"/usr/local/bin/codex", "exec", "--model", "o4-mini", "do something"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectModelFlag(tc.args, tc.model)
+			assertArgs(t, "injectModelFlag(codex)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectModelFlag_Gemini(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		model string
+		want  []string
+	}{
+		{
+			name:  "inserts --model before --prompt",
+			args:  []string{"gemini", "--yolo", "--prompt", "You are a worker"},
+			model: "gemini-2.5-pro",
+			want:  []string{"gemini", "--model", "gemini-2.5-pro", "--yolo", "--prompt", "You are a worker"},
+		},
+		{
+			name:  "with full path",
+			args:  []string{"/usr/local/bin/gemini", "--prompt", "do work"},
+			model: "gemini-2.5-flash",
+			want:  []string{"/usr/local/bin/gemini", "--model", "gemini-2.5-flash", "--prompt", "do work"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectModelFlag(tc.args, tc.model)
+			assertArgs(t, "injectModelFlag(gemini)", got, tc.want)
+		})
+	}
+}
+
+func TestInjectModelFlag_Empty(t *testing.T) {
+	args := []string{"claude", "-p", "prompt"}
+
+	got := injectModelFlag(args, "")
+	assertArgs(t, "empty model", got, args)
+
+	got2 := injectModelFlag(nil, "opus")
+	if len(got2) != 0 {
+		t.Errorf("expected nil/empty args unchanged, got %v", got2)
+	}
+}
+
+func TestInjectModelFlag_UnknownCLI(t *testing.T) {
+	args := []string{"python3", "script.py", "--arg"}
+	got := injectModelFlag(args, "opus")
+	assertArgs(t, "unknown CLI", got, args)
+}
+
+func TestInjectModelFlag_UserOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "claude with hard-coded --model",
+			args: []string{"claude", "--model", "haiku", "-p", "prompt"},
+		},
+		{
+			name: "codex with hard-coded --model=value",
+			args: []string{"codex", "exec", "--model=gpt-5-codex", "prompt"},
+		},
+		{
+			name: "gemini with hard-coded --model",
+			args: []string{"gemini", "--model", "gemini-2.5-flash", "--prompt", "work"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectModelFlag(tc.args, "opus")
+			assertArgs(t, "user override wins", got, tc.args)
+		})
+	}
+}
+
+func TestHasModelFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no flags", []string{"claude", "-p", "prompt"}, false},
+		{"explicit --model", []string{"claude", "--model", "opus", "-p", "prompt"}, true},
+		{"equals form --model=opus", []string{"claude", "--model=opus", "-p", "prompt"}, true},
+		{"similar but not exact", []string{"claude", "--models", "x", "-p", "prompt"}, false},
+		{"empty args", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasModelFlag(tc.args); got != tc.want {
+				t.Errorf("hasModelFlag(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewWorkerManager_PropagatesModel verifies the Model field flows from
+// policy.WorkerConfig (YAML) into WorkerSpawnConfig used at spawn time.
+func TestNewWorkerManager_PropagatesModel(t *testing.T) {
+	orch := &policy.OrchestrationConfig{
+		Driver: "cursor",
+		Workers: []policy.WorkerConfig{
+			{Type: "claude-code", Instances: 1, Command: []string{"claude", "-p", "x"}, Model: "opus"},
+			{Type: "codex", Instances: 2, Command: []string{"codex", "exec", "x"}, Model: "gpt-5-codex"},
+			{Type: "gemini", Instances: 1, Command: []string{"gemini", "--prompt", "x"}},
+		},
+	}
+	wm := NewWorkerManager(orch, func() string { return "cursor" }, nil, nil, "/tmp", testLogger(t))
+
+	got := map[string]string{}
+	for _, c := range wm.configs {
+		got[c.InstanceID] = c.Model
+	}
+
+	want := map[string]string{
+		"claude-code": "opus",
+		"codex-1":     "gpt-5-codex",
+		"codex-2":     "gpt-5-codex",
+		"gemini":      "",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d configs, want %d\n  got:  %v\n  want: %v", len(got), len(want), got, want)
+	}
+	for id, model := range want {
+		if g := got[id]; g != model {
+			t.Errorf("instance %q: Model = %q, want %q", id, g, model)
+		}
 	}
 }

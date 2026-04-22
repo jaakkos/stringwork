@@ -37,6 +37,33 @@ func TestSendMessage_ValidMessage(t *testing.T) {
 	}
 }
 
+func TestSendMessage_RecordsLastSendByAgent(t *testing.T) {
+	// Bug D: send_message must populate state.LastSendByAgent so the
+	// watchdog grace window and cancel-time recovery logic can tell
+	// whether the worker just delivered something.
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	before := time.Now().Add(-time.Second)
+	_, err := callTool(t, srv, "send_message", map[string]any{
+		"from": "cursor", "to": "claude-code", "content": "track me",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.state.LastSendByAgent == nil {
+		t.Fatal("LastSendByAgent map should be initialized after send_message")
+	}
+	got, ok := repo.state.LastSendByAgent["cursor"]
+	if !ok {
+		t.Fatalf("LastSendByAgent['cursor'] missing; map=%v", repo.state.LastSendByAgent)
+	}
+	if got.Before(before) {
+		t.Errorf("LastSendByAgent['cursor'] = %v, want >= %v", got, before)
+	}
+}
+
 func TestSendMessage_InvalidSender(t *testing.T) {
 	svc, _ := newTestService()
 	logger := log.New(io.Discard, "", 0)

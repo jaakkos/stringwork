@@ -336,6 +336,8 @@ func (w *Watchdog) check() {
 	var recoveredTasks int
 	var recoveredAgents int
 	var prunedSessions int
+	var prunedPresence int
+	var prunedInstances int
 
 	// Phase 1: Prune stale sessions from the registry.
 	// This must happen outside the CollabService mutex to avoid ordering issues.
@@ -533,6 +535,21 @@ func (w *Watchdog) check() {
 				}
 			}
 
+			// "Recent send" grace window: if the worker has just sent a
+			// send_message we should not auto-cancel it — the deliverable
+			// is in flight. Workers that died mid-`send` are exactly the
+			// failure mode we are trying to avoid (Bug D), so this gate
+			// runs ahead of any auto-cancel branch below.
+			recentlySent := false
+			const recentSendGrace = 90 * time.Second
+			if state.LastSendByAgent != nil {
+				if lastSend, ok := state.LastSendByAgent[t.AssignedTo]; ok && !lastSend.IsZero() {
+					if now.Sub(lastSend) < recentSendGrace {
+						recentlySent = true
+					}
+				}
+			}
+
 			if sinceProgress > w.progressCriticalThresh && currentLevel != "critical" && currentLevel != "sla_exceeded" {
 				var content string
 				shouldAutoCancel := false
@@ -553,20 +570,35 @@ func (w *Watchdog) check() {
 					}
 				case activity.status == workerSilent:
 					w.alertedTasks[t.ID] = "critical"
-					shouldAutoCancel = true
-					content = fmt.Sprintf("🔴 **AUTO-CANCELLING**: Worker %s on task #%d (%s) — no progress for %s, "+
-						"process silent for %s. Terminating worker and preserving output for replacement.",
-						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
-						activity.sinceOutput.Round(time.Second))
-					if activity.snippet != "" {
-						content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
+					if recentlySent {
+						content = fmt.Sprintf("🟠 **DELIVERY GRACE**: Worker %s on task #%d (%s) "+
+							"is silent (%s since last output) but sent a message within the last %s — "+
+							"deferring auto-cancel for one cycle to let the deliverable land.",
+							t.AssignedTo, t.ID, t.Title,
+							activity.sinceOutput.Round(time.Second), recentSendGrace)
+					} else {
+						shouldAutoCancel = true
+						content = fmt.Sprintf("🔴 **AUTO-CANCELLING**: Worker %s on task #%d (%s) — no progress for %s, "+
+							"process silent for %s. Terminating worker and preserving output for replacement.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second),
+							activity.sinceOutput.Round(time.Second))
+						if activity.snippet != "" {
+							content += fmt.Sprintf("\n\nLast output:\n```\n%s\n```", activity.snippet)
+						}
 					}
 				default: // workerNoProcess, no session activity
 					w.alertedTasks[t.ID] = "critical"
-					shouldAutoCancel = true
-					content = fmt.Sprintf("💀 **AUTO-RECOVERING**: Worker %s on task #%d (%s) — no progress for %s, "+
-						"no running process found. Capturing output and resetting task for reassignment.",
-						t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
+					if recentlySent {
+						content = fmt.Sprintf("🟠 **DELIVERY GRACE**: Worker %s on task #%d (%s) "+
+							"has no running process but sent a message within the last %s — "+
+							"deferring auto-recover to confirm the deliverable was the final action.",
+							t.AssignedTo, t.ID, t.Title, recentSendGrace)
+					} else {
+						shouldAutoCancel = true
+						content = fmt.Sprintf("💀 **AUTO-RECOVERING**: Worker %s on task #%d (%s) — no progress for %s, "+
+							"no running process found. Capturing output and resetting task for reassignment.",
+							t.AssignedTo, t.ID, t.Title, sinceProgress.Round(time.Second))
+					}
 				}
 
 				if shouldAutoCancel && w.autoCanceller != nil {
@@ -676,6 +708,23 @@ func (w *Watchdog) check() {
 			state.NextMsgID++
 		}
 
+		// Phase 4: Garbage-collect stale Presence and AgentInstance rows so
+		// the worker pool doesn't grow monotonically forever. This is the
+		// safety net for cases where reap-on-event (cancel_agent /
+		// update_task) was missed (server crash, race, older code path).
+		if w.pol != nil {
+			prunedPresence = PrunePresence(state, w.pol.PresenceRetentionDays())
+			prunedInstances = PruneInstances(state,
+				w.pol.InstanceRetentionDays(),
+				w.pol.TaskBoundInstanceRetentionHours())
+			if prunedPresence > 0 {
+				w.logger.Printf("Watchdog: GC pruned %d stale presence row(s)", prunedPresence)
+			}
+			if prunedInstances > 0 {
+				w.logger.Printf("Watchdog: GC pruned %d offline agent instance row(s)", prunedInstances)
+			}
+		}
+
 		return nil
 	})
 
@@ -689,9 +738,9 @@ func (w *Watchdog) check() {
 		w.notifier.Trigger()
 	}
 
-	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 {
-		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s)",
-			recoveredTasks, recoveredAgents, prunedSessions)
+	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 || prunedPresence > 0 || prunedInstances > 0 {
+		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s), %d presence row(s), %d instance row(s)",
+			recoveredTasks, recoveredAgents, prunedSessions, prunedPresence, prunedInstances)
 	}
 }
 

@@ -873,6 +873,156 @@ func TestWatchdog_SilentWorkerCriticalIncludesSnippet(t *testing.T) {
 	})
 }
 
+func TestWatchdog_SilentWorkerWithRecentSendDefersAutoCancel(t *testing.T) {
+	// Worker has been silent past the critical threshold AND has no
+	// running heartbeat — but it sent a `send_message` within the last
+	// 90 seconds. The watchdog must defer auto-cancel for one cycle so
+	// the deliverable can land instead of being thrown away (Bug D).
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex-task-9"] = &domain.AgentInstance{
+		InstanceID: "codex-task-9", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{9}, LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 9, Title: "Worker mid-deliverable", Status: "in_progress",
+		AssignedTo: "codex-task-9",
+		UpdatedAt:  now.Add(-6 * time.Minute),
+	})
+	state.NextTaskID = 10
+	state.NextMsgID = 1
+	state.LastSendByAgent = map[string]time.Time{
+		"codex-task-9": now.Add(-15 * time.Second), // very recent send
+	}
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-9": {
+				InstanceID:   "codex-task-9",
+				StartedAt:    now.Add(-7 * time.Minute),
+				LastOutputAt: now.Add(-5 * time.Minute), // silent
+				OutputBytes:  2000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	canceller := &recordingAutoCanceller{}
+	wd := NewWatchdog(svc, registry, logger,
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+		WithProcessActivity(mock),
+		WithAutoCanceller(canceller),
+	)
+	wd.CheckOnce()
+
+	if canceller.cancelled {
+		t.Fatalf("expected auto-cancel to be deferred for worker mid-send; got cancelled=true")
+	}
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		var graceMsg, autoCancelMsg bool
+		for _, msg := range s.Messages {
+			if msg.From != "system" {
+				continue
+			}
+			if contains(msg.Content, "DELIVERY GRACE") {
+				graceMsg = true
+			}
+			if contains(msg.Content, "AUTO-CANCELLING") {
+				autoCancelMsg = true
+			}
+		}
+		if !graceMsg {
+			t.Error("expected a DELIVERY GRACE notification; none found")
+		}
+		if autoCancelMsg {
+			t.Error("did not expect an AUTO-CANCELLING message during grace window")
+		}
+		return nil
+	})
+}
+
+func TestWatchdog_SilentWorkerWithoutRecentSendStillCancels(t *testing.T) {
+	// Same shape as above, but no recent send → original auto-cancel
+	// behaviour must still fire so we don't regress Bug C.
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor",
+		Role: domain.RoleDriver, Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["codex-task-10"] = &domain.AgentInstance{
+		InstanceID: "codex-task-10", AgentType: "codex",
+		Role: domain.RoleWorker, Status: "busy",
+		CurrentTasks: []int{10}, LastHeartbeat: now,
+	}
+	state.DriverID = "cursor"
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 10, Title: "Stuck task no send", Status: "in_progress",
+		AssignedTo: "codex-task-10",
+		UpdatedAt:  now.Add(-6 * time.Minute),
+	})
+	state.NextTaskID = 11
+	state.NextMsgID = 1
+
+	mock := &mockProcessActivity{
+		procs: map[string]ProcessInfo{
+			"codex-task-10": {
+				InstanceID:   "codex-task-10",
+				StartedAt:    now.Add(-7 * time.Minute),
+				LastOutputAt: now.Add(-5 * time.Minute),
+				OutputBytes:  2000,
+			},
+		},
+	}
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	canceller := &recordingAutoCanceller{}
+	wd := NewWatchdog(svc, registry, logger,
+		WithProgressWarningThreshold(3*time.Minute),
+		WithProgressCriticalThreshold(5*time.Minute),
+		WithProcessActivity(mock),
+		WithAutoCanceller(canceller),
+	)
+	wd.CheckOnce()
+
+	if !canceller.cancelled {
+		t.Fatalf("expected auto-cancel to fire when no recent send; got cancelled=false")
+	}
+}
+
+// recordingAutoCanceller is a minimal WorkerAutoCanceller that records whether
+// CancelWorker was invoked. Used by Bug D grace-window tests.
+type recordingAutoCanceller struct {
+	cancelled bool
+	target    string
+}
+
+func (r *recordingAutoCanceller) CancelWorker(instanceID string) bool {
+	r.cancelled = true
+	r.target = instanceID
+	return true
+}
+
+func (r *recordingAutoCanceller) GetRecentOutput(instanceID string) string {
+	return ""
+}
+
 // contains checks if s contains substr (for test assertions).
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))

@@ -51,6 +51,9 @@ func (p *mockPolicy) MaxTaskFailures() int                       { return 3 }
 func (p *mockPolicy) AuditEnabled() bool                         { return true }
 func (p *mockPolicy) AuditArgsMaxLen() int                       { return 1000 }
 func (p *mockPolicy) AuditRetentionDays() int                    { return 7 }
+func (p *mockPolicy) PresenceRetentionDays() int                 { return 7 }
+func (p *mockPolicy) InstanceRetentionDays() int                 { return 7 }
+func (p *mockPolicy) TaskBoundInstanceRetentionHours() int       { return 24 }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}

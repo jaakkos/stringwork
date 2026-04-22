@@ -205,6 +205,12 @@ type CollabState struct {
 	AgentInstances   map[string]*AgentInstance   `json:"agent_instances"`
 	WorkContexts     map[string]*WorkContext     `json:"work_contexts"`
 	DriverID         string                      `json:"driver_id"`
+
+	// LastSendByAgent tracks the most recent send_message timestamp per
+	// agent. Used by the watchdog to grant a "recent send" grace window so
+	// workers actively delivering output aren't auto-cancelled mid-message.
+	// Ephemeral — not persisted to SQLite; rebuilt as send_message fires.
+	LastSendByAgent map[string]time.Time `json:"-"`
 }
 
 // NewCollabState returns an empty CollabState with maps and IDs initialized.
@@ -220,6 +226,7 @@ func NewCollabState() *CollabState {
 		RegisteredAgents: make(map[string]*RegisteredAgent),
 		AgentInstances:   make(map[string]*AgentInstance),
 		WorkContexts:     make(map[string]*WorkContext),
+		LastSendByAgent:  make(map[string]time.Time),
 		NextMsgID:        1,
 		NextTaskID:       1,
 		NextNoteID:       1,

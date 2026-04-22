@@ -396,6 +396,22 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					if enteringInProgress && task.AssignedTo != "" && task.AssignedTo != "any" {
 						addTaskToInstance(state, taskID, task.AssignedTo)
 					}
+					// Reap task-bound instances on terminal transitions. A
+					// task-bound worker's whole reason for existing is the
+					// owning task; once the task is completed/cancelled/
+					// blocked we delete the AgentInstance + Presence rows so
+					// they don't accumulate as zombies in worker_status.
+					// Static pool workers are left untouched (helper is a
+					// no-op on them).
+					isTerminal := task.Status == "completed" || task.Status == "cancelled" || task.Status == "blocked"
+					if isTerminal {
+						if oldAssignee != "" {
+							app.ReapTaskBoundInstance(state, oldAssignee)
+						}
+						if task.AssignedTo != "" && task.AssignedTo != "any" && task.AssignedTo != oldAssignee {
+							app.ReapTaskBoundInstance(state, task.AssignedTo)
+						}
+					}
 					if v, ok := args["priority"].(float64); ok {
 						p := int(v)
 						if p < 1 {
