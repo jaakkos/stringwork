@@ -320,7 +320,7 @@ func TestCancelAgent_ReapsTaskBoundKeepsStaticPool(t *testing.T) {
 		"claude-code-task-7": {Agent: "claude-code-task-7", Status: "working", LastSeen: time.Now()},
 	}
 	repo.state.Tasks = []domain.Task{
-		{ID: 7, Title: "T7", Status: "in_progress", AssignedTo: "claude-code-task-7", CreatedBy: "cursor"},
+		{ID: 7, Title: "T7", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
 	}
 	repo.state.NextTaskID = 8
 
@@ -379,7 +379,7 @@ func TestCancelAgent_ReapsByInstanceID(t *testing.T) {
 		"codex-task-12": {Agent: "codex-task-12", Status: "working", LastSeen: time.Now()},
 	}
 	repo.state.Tasks = []domain.Task{
-		{ID: 12, Title: "T12", Status: "in_progress", AssignedTo: "codex-task-12", CreatedBy: "cursor"},
+		{ID: 12, Title: "T12", Status: "in_progress", AssignedTo: "codex", CreatedBy: "cursor"},
 	}
 	repo.state.NextTaskID = 13
 
@@ -432,7 +432,7 @@ func TestUpdateTask_TerminalReapsTaskBound(t *testing.T) {
 				"claude-code-task-3": {Agent: "claude-code-task-3", Status: "working", LastSeen: time.Now()},
 			}
 			repo.state.Tasks = []domain.Task{
-				{ID: 3, Title: "Test", Status: "in_progress", AssignedTo: "claude-code-task-3", CreatedBy: "cursor"},
+				{ID: 3, Title: "Test", Status: "in_progress", AssignedTo: "claude-code", CreatedBy: "cursor"},
 			}
 			repo.state.NextTaskID = 4
 

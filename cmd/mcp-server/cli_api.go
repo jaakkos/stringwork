@@ -562,8 +562,9 @@ func (w *workerAPI) handleContext(rw http.ResponseWriter, r *http.Request) {
 
 		pendingCount := 0
 		inProgressCount := 0
+		agentType := app.ResolveParentAgentType(state, agent)
 		for _, task := range state.Tasks {
-			if task.AssignedTo == agent || task.AssignedTo == "any" {
+			if task.AssignedTo == agent || task.AssignedTo == agentType || task.AssignedTo == "any" {
 				switch task.Status {
 				case "pending":
 					pendingCount++
@@ -700,6 +701,13 @@ func findInstance(state *domain.CollabState, agent string) *domain.AgentInstance
 // resolveWorkerAgent maps a dynamic worker instance ID (e.g. "codex-task-6")
 // to a registered agent type and ensures an AgentInstance exists for it. This
 // allows workers spawned with ephemeral instance IDs to use all REST endpoints.
+//
+// Task-bound IDs (matching "<base>-task-<digits>") never short-circuit on an
+// exact RegisteredAgents hit — that hit would indicate leftover corrupt state
+// and would cause AgentType to be set to the full task-bound ID. Instead we
+// always route through app.ResolveParentAgentType to derive the correct
+// parent AgentType and only add the concrete AgentInstance, never pollute
+// RegisteredAgents.
 func resolveWorkerAgent(state *domain.CollabState, agent string) string {
 	if _, ok := state.AgentInstances[agent]; ok {
 		return agent
@@ -709,20 +717,22 @@ func resolveWorkerAgent(state *domain.CollabState, agent string) string {
 			return agent
 		}
 	}
-	if _, ok := state.RegisteredAgents[agent]; ok {
-		return agent
-	}
-	for name := range state.RegisteredAgents {
-		if strings.HasPrefix(agent, name+"-") {
-			state.AgentInstances[agent] = &domain.AgentInstance{
-				InstanceID:   agent,
-				AgentType:    name,
-				Role:         domain.RoleWorker,
-				Status:       "idle",
-				CurrentTasks: []int{},
-			}
+	_, isTaskBound := app.StripTaskBoundSuffix(agent)
+	if !isTaskBound {
+		if _, ok := state.RegisteredAgents[agent]; ok {
 			return agent
 		}
+	}
+	parentType := app.ResolveParentAgentType(state, agent)
+	if parentType != "" && parentType != agent {
+		state.AgentInstances[agent] = &domain.AgentInstance{
+			InstanceID:   agent,
+			AgentType:    parentType,
+			Role:         domain.RoleWorker,
+			Status:       "idle",
+			CurrentTasks: []int{},
+		}
+		return agent
 	}
 	return agent
 }

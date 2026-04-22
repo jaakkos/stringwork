@@ -39,6 +39,13 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 			case "all", "any", "system":
 				return nil, fmt.Errorf("agent name %q is reserved", name)
 			}
+			// Task-bound IDs like "claude-code-task-2" are ephemeral worker
+			// instance identifiers, not top-level agent types. Allowing them
+			// into RegisteredAgents short-circuits type resolution and causes
+			// the watchdog to lose track of task liveness. Reject them here.
+			if _, isTaskBound := app.StripTaskBoundSuffix(name); isTaskBound {
+				return nil, fmt.Errorf("agent name %q is a task-bound instance ID; task-bound workers must not be registered as top-level agents", name)
+			}
 
 			var capabilities []string
 			if caps, ok := args["capabilities"].([]any); ok {

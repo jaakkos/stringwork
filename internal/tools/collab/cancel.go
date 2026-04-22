@@ -64,22 +64,14 @@ func registerCancelAgent(s *server.MCPServer, svc *app.CollabService, logger *lo
 
 				now := time.Now()
 
+				agentType := app.ResolveParentAgentType(state, agent)
 				for i := range state.Tasks {
 					t := &state.Tasks[i]
 					if t.Status != "in_progress" {
 						continue
 					}
-					if t.AssignedTo != agent {
-						matchesType := false
-						for _, inst := range state.AgentInstances {
-							if inst != nil && inst.InstanceID == t.AssignedTo && inst.AgentType == agent {
-								matchesType = true
-								break
-							}
-						}
-						if !matchesType {
-							continue
-						}
+					if t.AssignedTo != agent && t.AssignedTo != agentType {
+						continue
 					}
 
 					t.Status = "cancelled"

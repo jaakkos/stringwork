@@ -115,6 +115,39 @@ func TestRegisterAgent_MissingName(t *testing.T) {
 	}
 }
 
+// TestRegisterAgent_RejectsTaskBoundNames verifies that names matching the
+// task-bound instance convention ("<base>-task-<N>") are rejected. Allowing
+// these to become top-level RegisteredAgents historically broke the watchdog
+// because heartbeat auto-create paths picked them up as their own AgentType.
+func TestRegisterAgent_RejectsTaskBoundNames(t *testing.T) {
+	cases := []string{
+		"claude-code-task-2",
+		"codex-task-17",
+		"my-custom-task-99",
+	}
+	for _, name := range cases {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			svc, repo := newTestService()
+			logger := log.New(io.Discard, "", 0)
+			srv := testServer(svc, logger)
+
+			_, err := callTool(t, srv, "register_agent", map[string]any{
+				"name": name,
+			})
+			if err == nil {
+				t.Fatalf("expected error for task-bound name %q", name)
+			}
+			if !strings.Contains(err.Error(), "task-bound") {
+				t.Errorf("error should mention task-bound semantics, got %q", err.Error())
+			}
+			if _, exists := repo.state.RegisteredAgents[name]; exists {
+				t.Errorf("agent %q should not have been registered", name)
+			}
+		})
+	}
+}
+
 func TestRegisterAgent_MinimalRegistration(t *testing.T) {
 	svc, repo := newTestService()
 	logger := log.New(io.Discard, "", 0)

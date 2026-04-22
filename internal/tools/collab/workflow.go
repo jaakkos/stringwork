@@ -48,8 +48,9 @@ func registerHandoff(s *server.MCPServer, svc *app.CollabService, logger *log.Lo
 				if id, ok := args["task_id"].(float64); ok {
 					taskID = int(id)
 				} else {
+					fromType := app.ResolveParentAgentType(state, from)
 					for _, task := range state.Tasks {
-						if task.Status == "in_progress" && task.AssignedTo == from {
+						if task.Status == "in_progress" && (task.AssignedTo == from || task.AssignedTo == fromType) {
 							taskID = task.ID
 							break
 						}
@@ -163,8 +164,9 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 					}
 				}
 
+				agentType := app.ResolveParentAgentType(state, agent)
 				for _, task := range state.Tasks {
-					if task.Status == "in_progress" && task.AssignedTo == agent {
+					if task.Status == "in_progress" && (task.AssignedTo == agent || task.AssignedTo == agentType) {
 						result = mcp.NewToolResultText(fmt.Sprintf(`{"action":"continue_task","priority":"medium","task_id":%d,"title":"%s"}`,
 							task.ID, escapeJSON(task.Title)))
 						return nil
@@ -175,7 +177,7 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 				var bestIdx int
 				for i := range state.Tasks {
 					task := &state.Tasks[i]
-					if task.Status == "pending" && (task.AssignedTo == agent || task.AssignedTo == "any") {
+					if task.Status == "pending" && (task.AssignedTo == agent || task.AssignedTo == agentType || task.AssignedTo == "any") {
 						incomplete := checkDependenciesCompleteState(state, task.ID)
 						if len(incomplete) > 0 {
 							continue
@@ -194,11 +196,13 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 							priorityNames[bestTask.Priority], bestTask.ID, escapeJSON(bestTask.Title)))
 						return nil
 					}
-					// Check if task was previously assigned to someone else (e.g. "any")
-					// BEFORE updating AssignedTo, to avoid always-false comparison.
-					wasAssignedElsewhere := state.Tasks[bestIdx].AssignedTo != agent
+					// Store the parent agent type so the task owner is tracked by
+					// type (not by ephemeral instance ID). Check if task was
+					// previously assigned elsewhere BEFORE the update so the
+					// CurrentTasks bookkeeping below runs only on first claim.
+					wasAssignedElsewhere := state.Tasks[bestIdx].AssignedTo != agentType && state.Tasks[bestIdx].AssignedTo != agent
 					state.Tasks[bestIdx].Status = "in_progress"
-					state.Tasks[bestIdx].AssignedTo = agent
+					state.Tasks[bestIdx].AssignedTo = agentType
 					state.Tasks[bestIdx].UpdatedAt = time.Now()
 					// Track task on the worker instance (orchestrator may have already added when driver assigned)
 					if wasAssignedElsewhere {

@@ -241,9 +241,10 @@ func (n *Notifier) checkAndPush() {
 			unread++
 		}
 	}
+	agentType := ResolveParentAgentType(state, agent)
 	pending := 0
 	for _, t := range state.Tasks {
-		if (t.AssignedTo == agent || t.AssignedTo == "any") && t.Status == "pending" {
+		if (t.AssignedTo == agent || t.AssignedTo == agentType || t.AssignedTo == "any") && t.Status == "pending" {
 			pending++
 		}
 	}

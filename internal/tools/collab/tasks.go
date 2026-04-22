@@ -366,7 +366,8 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 						}
 					}
 					if v, ok := args["review_status"].(string); ok {
-						if v == "approved" && task.AssignedTo == updatedBy {
+						updatedByType := app.ResolveParentAgentType(state, updatedBy)
+						if v == "approved" && (task.AssignedTo == updatedBy || task.AssignedTo == updatedByType) {
 							return fmt.Errorf("assignee cannot approve their own task")
 						}
 						task.ReviewStatus = v
@@ -401,15 +402,17 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					// owning task; once the task is completed/cancelled/
 					// blocked we delete the AgentInstance + Presence rows so
 					// they don't accumulate as zombies in worker_status.
-					// Static pool workers are left untouched (helper is a
-					// no-op on them).
+					// task.AssignedTo stores the parent agent type, so we
+					// reconstruct the conventional "<type>-task-<id>" name
+					// via ReapTaskBoundInstanceForTask. Static pool workers
+					// are left untouched.
 					isTerminal := task.Status == "completed" || task.Status == "cancelled" || task.Status == "blocked"
 					if isTerminal {
 						if oldAssignee != "" {
-							app.ReapTaskBoundInstance(state, oldAssignee)
+							app.ReapTaskBoundInstanceForTask(state, oldAssignee, taskID)
 						}
 						if task.AssignedTo != "" && task.AssignedTo != "any" && task.AssignedTo != oldAssignee {
-							app.ReapTaskBoundInstance(state, task.AssignedTo)
+							app.ReapTaskBoundInstanceForTask(state, task.AssignedTo, taskID)
 						}
 					}
 					if v, ok := args["priority"].(float64); ok {

@@ -98,6 +98,104 @@ func IsTaskBoundInstance(state *domain.CollabState, agent string) bool {
 	return strings.Contains(inst.InstanceID, "-task-")
 }
 
+// StripTaskBoundSuffix returns (baseType, true) if agent matches the
+// "<base>-task-<digits>" convention. Returns ("", false) otherwise. The
+// base is never empty on a true return.
+func StripTaskBoundSuffix(agent string) (string, bool) {
+	idx := strings.LastIndex(agent, "-task-")
+	if idx <= 0 {
+		return "", false
+	}
+	suffix := agent[idx+len("-task-"):]
+	if suffix == "" {
+		return "", false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return agent[:idx], true
+}
+
+// ResolveParentAgentType returns the canonical parent agent type for any
+// agent identifier — a static-pool instance ID ("claude-code-1"), a
+// task-bound instance ID ("claude-code-task-7"), the parent type itself
+// ("claude-code"), or a registered custom agent name.
+//
+// Resolution precedence:
+//  1. existing AgentInstance.AgentType (when not corrupted with "-task-")
+//  2. exact match in RegisteredAgents (for names that are not themselves
+//     "-task-N" patterns)
+//  3. task-bound ID → stripped base, if the base is a known type
+//  4. longest-prefix match against RegisteredAgents + other instances'
+//     parent AgentTypes
+//  5. stripped "-task-N" suffix as a last resort
+//  6. the input unchanged
+//
+// This is the single source of truth for agent-type resolution across the
+// write paths (heartbeat auto-create, resolveWorkerAgent) and the watchdog.
+func ResolveParentAgentType(state *domain.CollabState, agent string) string {
+	if agent == "" {
+		return agent
+	}
+	base, isTaskBound := StripTaskBoundSuffix(agent)
+	if state == nil {
+		if isTaskBound {
+			return base
+		}
+		return agent
+	}
+
+	if inst, ok := state.AgentInstances[agent]; ok && inst != nil && inst.AgentType != "" && !strings.Contains(inst.AgentType, "-task-") {
+		return inst.AgentType
+	}
+
+	if !isTaskBound {
+		if _, ok := state.RegisteredAgents[agent]; ok {
+			return agent
+		}
+	}
+
+	if isTaskBound {
+		if _, ok := state.RegisteredAgents[base]; ok {
+			return base
+		}
+		for _, inst := range state.AgentInstances {
+			if inst != nil && inst.AgentType == base {
+				return base
+			}
+		}
+	}
+
+	candidate := ""
+	for name := range state.RegisteredAgents {
+		if strings.HasPrefix(agent, name+"-") && len(name) > len(candidate) {
+			candidate = name
+		}
+	}
+	for _, inst := range state.AgentInstances {
+		if inst == nil || inst.AgentType == "" {
+			continue
+		}
+		if strings.Contains(inst.AgentType, "-task-") {
+			continue
+		}
+		t := inst.AgentType
+		if strings.HasPrefix(agent, t+"-") && len(t) > len(candidate) {
+			candidate = t
+		}
+	}
+	if candidate != "" {
+		return candidate
+	}
+
+	if isTaskBound {
+		return base
+	}
+	return agent
+}
+
 // ReapTaskBoundInstance removes a task-bound worker's AgentInstance and
 // matching Presence row from state. Returns true if the agent was task-bound
 // and was reaped; false otherwise (static pool workers, drivers, or unknown
@@ -115,6 +213,27 @@ func ReapTaskBoundInstance(state *domain.CollabState, agent string) bool {
 	delete(state.AgentInstances, agent)
 	delete(state.Presence, agent)
 	return true
+}
+
+// ReapTaskBoundInstanceForTask deletes the task-bound AgentInstance row
+// that was spawned for the given task, if any. The convention is
+// "<agentType>-task-<taskID>". Returns the deleted instance ID, or "" if
+// nothing was reaped.
+//
+// Call when a task reaches a terminal state (task.AssignedTo now holds the
+// parent agent type, so ReapTaskBoundInstance cannot be used directly).
+func ReapTaskBoundInstanceForTask(state *domain.CollabState, agentType string, taskID int) string {
+	if state == nil || agentType == "" || taskID <= 0 {
+		return ""
+	}
+	instanceID := fmt.Sprintf("%s-task-%d", agentType, taskID)
+	inst, ok := state.AgentInstances[instanceID]
+	if !ok || inst == nil {
+		return ""
+	}
+	delete(state.AgentInstances, instanceID)
+	delete(state.Presence, instanceID)
+	return instanceID
 }
 
 // IsBuiltinAgent returns true if agent is a known instance or agent type in state.AgentInstances.
@@ -248,6 +367,87 @@ func RefreshHeartbeatsOnStartup(state *domain.CollabState) {
 			inst.CurrentTasks = nil
 		}
 	}
+}
+
+// TaskBoundCorruptionReport summarises the mutations made by
+// MigrateTaskBoundCorruption during a single run.
+type TaskBoundCorruptionReport struct {
+	TasksReassigned      int
+	InstancesRetyped     int
+	RegisteredAgentsGone int
+	Mutations            []string
+}
+
+// Total returns the total number of rows mutated.
+func (r TaskBoundCorruptionReport) Total() int {
+	return r.TasksReassigned + r.InstancesRetyped + r.RegisteredAgentsGone
+}
+
+// MigrateTaskBoundCorruption repairs the state invariants relied upon by the
+// watchdog and the type-aware write paths:
+//
+//  1. tasks.AssignedTo must hold the parent agent type (e.g. "claude-code"),
+//     never a concrete instance ID ("claude-code-1") or task-bound ID
+//     ("claude-code-task-5").
+//  2. AgentInstance.AgentType must be a parent type, never contain the
+//     "-task-N" fragment. (Task-bound IDs go in InstanceID.)
+//  3. RegisteredAgents must not contain any "-task-N" entries — those are
+//     ephemeral worker instances, not top-level agent types.
+//
+// Historical bugs in heartbeat auto-create and register_agent let these
+// invariants drift; this pass repairs existing rows on startup. Idempotent.
+func MigrateTaskBoundCorruption(state *domain.CollabState) TaskBoundCorruptionReport {
+	var report TaskBoundCorruptionReport
+	if state == nil {
+		return report
+	}
+
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		if t.AssignedTo == "" || t.AssignedTo == "any" {
+			continue
+		}
+		canonical := ResolveParentAgentType(state, t.AssignedTo)
+		if canonical != "" && canonical != t.AssignedTo {
+			report.Mutations = append(report.Mutations,
+				fmt.Sprintf("task #%d: AssignedTo %q -> %q", t.ID, t.AssignedTo, canonical))
+			t.AssignedTo = canonical
+			report.TasksReassigned++
+		}
+	}
+
+	for id, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		if !strings.Contains(inst.AgentType, "-task-") {
+			continue
+		}
+		canonical := ResolveParentAgentType(state, id)
+		if canonical == "" || canonical == inst.AgentType {
+			if base, ok := StripTaskBoundSuffix(inst.AgentType); ok {
+				canonical = base
+			} else {
+				continue
+			}
+		}
+		report.Mutations = append(report.Mutations,
+			fmt.Sprintf("instance %q: AgentType %q -> %q", id, inst.AgentType, canonical))
+		inst.AgentType = canonical
+		report.InstancesRetyped++
+	}
+
+	for name := range state.RegisteredAgents {
+		if _, ok := StripTaskBoundSuffix(name); !ok {
+			continue
+		}
+		report.Mutations = append(report.Mutations,
+			fmt.Sprintf("registered_agent %q: removed (task-bound IDs are not top-level agents)", name))
+		delete(state.RegisteredAgents, name)
+		report.RegisteredAgentsGone++
+	}
+
+	return report
 }
 
 // JoinStrings joins strs with sep. Prefer strings.Join for simple cases;

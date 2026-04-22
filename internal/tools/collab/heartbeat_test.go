@@ -135,6 +135,49 @@ func TestHeartbeat_RegisteredAgent(t *testing.T) {
 	}
 }
 
+// TestHeartbeat_AutoCreate_ResolvesParentType verifies that when a task-bound
+// worker (e.g. "my-bot-task-4") heartbeats and no AgentInstance exists yet,
+// the auto-created entry's AgentType resolves to the parent type "my-bot"
+// rather than the raw task-bound ID. This prevents the write-path pollution
+// that historically broke the watchdog's type-grouping logic.
+func TestHeartbeat_AutoCreate_ResolvesParentType(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	// Register the parent type so the heartbeat auto-create path fires.
+	repo.state.RegisteredAgents["my-bot"] = &domain.RegisteredAgent{
+		Name:        "my-bot",
+		DisplayName: "My Bot",
+	}
+
+	srv := testServer(svc, logger)
+
+	_, err := callTool(t, srv, "heartbeat", map[string]any{"agent": "my-bot-task-4"})
+	if err != nil {
+		t.Fatalf("heartbeat for task-bound worker should succeed: %v", err)
+	}
+
+	inst, ok := repo.state.AgentInstances["my-bot-task-4"]
+	if !ok {
+		t.Fatal("expected AgentInstance to be auto-created for task-bound worker")
+	}
+	if inst.AgentType != "my-bot" {
+		t.Errorf("AgentType should resolve to parent 'my-bot', got %q", inst.AgentType)
+	}
+	if inst.InstanceID != "my-bot-task-4" {
+		t.Errorf("InstanceID should preserve the task-bound ID, got %q", inst.InstanceID)
+	}
+	if inst.Role != domain.RoleWorker {
+		t.Errorf("expected worker role, got %q", inst.Role)
+	}
+
+	// Ensure the task-bound name was not mistakenly registered as a
+	// top-level agent.
+	if _, exists := repo.state.RegisteredAgents["my-bot-task-4"]; exists {
+		t.Error("task-bound heartbeat must not register the child as a top-level agent")
+	}
+}
+
 func TestHeartbeat_ByAgentType(t *testing.T) {
 	svc, repo := newTestService()
 	logger := log.New(io.Discard, "", 0)

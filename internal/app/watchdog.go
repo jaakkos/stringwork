@@ -430,11 +430,28 @@ func (w *Watchdog) check() {
 				continue
 			}
 
+			// Prefer the specific instance that currently owns the task via
+			// CurrentTasks — under the new semantics task.AssignedTo is a
+			// parent type, so findInstanceForAgent may return an arbitrary
+			// sibling instance. The CurrentTasks owner is authoritative.
+			// Driver-owned tasks are exempt: drivers don't heartbeat via tools.
+			ownerInst := findOwnerInstanceForTask(state, t)
+			isDriverOwned := ownerInst != nil && ownerInst.Role == domain.RoleDriver
+			ownerAlive := ownerInst != nil && w.isAgentAlive(ownerInst.InstanceID, ownerInst, now, w.heartbeatStaleThresh)
+			if ownerInst != nil && ownerAlive {
+				continue
+			}
+
 			agentDead := deadAgents[t.AssignedTo]
 			if tbExists {
 				// A task-bound worker was created for this task and is dead.
 				// This overrides type-level liveness — the dedicated worker is
 				// the authoritative signal for this specific task.
+				agentDead = true
+			}
+			if ownerInst != nil && !ownerAlive && !isDriverOwned {
+				// The specific owner instance is dead — recover regardless of
+				// other sibling instances' liveness. Drivers are exempt.
 				agentDead = true
 			}
 			taskStuck := now.Sub(t.UpdatedAt) > w.taskStuckThresh
@@ -444,7 +461,10 @@ func (w *Watchdog) check() {
 			}
 
 			if !agentDead && taskStuck {
-				assigneeInst := findInstanceForAgent(state, t.AssignedTo)
+				assigneeInst := ownerInst
+				if assigneeInst == nil {
+					assigneeInst = findInstanceForAgent(state, t.AssignedTo)
+				}
 				if w.isAgentAlive(t.AssignedTo, assigneeInst, now, w.heartbeatStaleThresh) {
 					continue
 				}
@@ -573,12 +593,21 @@ func (w *Watchdog) check() {
 			// is in flight. Workers that died mid-`send` are exactly the
 			// failure mode we are trying to avoid (Bug D), so this gate
 			// runs ahead of any auto-cancel branch below.
+			//
+			// t.AssignedTo is the parent agent type (e.g. "codex"), but
+			// workers usually send as their instance ID ("codex-task-9").
+			// Check both the parent type and the conventional task-bound
+			// ID so either sender wins the grace.
 			recentlySent := false
 			const recentSendGrace = 90 * time.Second
 			if state.LastSendByAgent != nil {
-				if lastSend, ok := state.LastSendByAgent[t.AssignedTo]; ok && !lastSend.IsZero() {
-					if now.Sub(lastSend) < recentSendGrace {
-						recentlySent = true
+				candidates := []string{t.AssignedTo, fmt.Sprintf("%s-task-%d", t.AssignedTo, t.ID)}
+				for _, c := range candidates {
+					if lastSend, ok := state.LastSendByAgent[c]; ok && !lastSend.IsZero() {
+						if now.Sub(lastSend) < recentSendGrace {
+							recentlySent = true
+							break
+						}
 					}
 				}
 			}
@@ -795,6 +824,10 @@ func (w *Watchdog) check() {
 // "claude-code-task-3") exists for the given task, and if so, whether it is
 // alive. Returns (exists, alive). When exists=true the task-bound worker is
 // the authoritative liveness signal — type-level checks should be overridden.
+//
+// task.AssignedTo stores the parent agent type (e.g. "claude-code"), so the
+// match reduces to comparing the candidate instance's AgentType against
+// task.AssignedTo.
 func (w *Watchdog) checkTaskBoundWorker(state *domain.CollabState, t *domain.Task, now time.Time) (exists bool, alive bool) {
 	taskSuffix := fmt.Sprintf("-task-%d", t.ID)
 	for id, inst := range state.AgentInstances {
@@ -804,12 +837,8 @@ func (w *Watchdog) checkTaskBoundWorker(state *domain.CollabState, t *domain.Tas
 		if !strings.HasSuffix(id, taskSuffix) {
 			continue
 		}
-		// Verify it's the right agent type (e.g. "claude-code-task-3" for agent "claude-code")
-		if inst.AgentType != t.AssignedTo && id != t.AssignedTo {
-			prefix := strings.TrimSuffix(id, taskSuffix)
-			if prefix != t.AssignedTo {
-				continue
-			}
+		if inst.AgentType != t.AssignedTo {
+			continue
 		}
 		exists = true
 		if w.isAgentAlive(id, inst, now, w.heartbeatStaleThresh) {
@@ -844,6 +873,45 @@ func findInstanceForAgent(state *domain.CollabState, agent string) *domain.Agent
 		}
 	}
 	return nil
+}
+
+// findOwnerInstanceForTask returns the AgentInstance that lists the given
+// task in its CurrentTasks. Since task.AssignedTo now stores the parent
+// type (e.g. "claude-code"), CurrentTasks is the only reliable way to
+// identify the concrete owning instance among sibling pool instances.
+//
+// When multiple instances claim the task (e.g. a static pool instance that
+// received the assignment plus a task-bound child that actually runs it),
+// the task-bound child is preferred — it's the authoritative owner because
+// its liveness cannot be confused with sibling task-bound workers.
+// Returns nil when no instance currently claims the task.
+func findOwnerInstanceForTask(state *domain.CollabState, t *domain.Task) *domain.AgentInstance {
+	if state == nil || t == nil {
+		return nil
+	}
+	var taskBound, other *domain.AgentInstance
+	for _, inst := range state.AgentInstances {
+		if inst == nil {
+			continue
+		}
+		for _, tid := range inst.CurrentTasks {
+			if tid != t.ID {
+				continue
+			}
+			if _, isTB := StripTaskBoundSuffix(inst.InstanceID); isTB {
+				if taskBound == nil {
+					taskBound = inst
+				}
+			} else if other == nil {
+				other = inst
+			}
+			break
+		}
+	}
+	if taskBound != nil {
+		return taskBound
+	}
+	return other
 }
 
 // pruneStaleSessions removes sessions from the registry whose agents show no

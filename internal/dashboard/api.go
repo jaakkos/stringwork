@@ -855,22 +855,14 @@ func (h *Handler) handleAPICancelAgent(w http.ResponseWriter, r *http.Request) {
 
 		now := time.Now()
 
+		agentType := app.ResolveParentAgentType(state, req.Agent)
 		for i := range state.Tasks {
 			t := &state.Tasks[i]
 			if t.Status != "in_progress" {
 				continue
 			}
-			if t.AssignedTo != req.Agent {
-				matchesType := false
-				for _, inst := range state.AgentInstances {
-					if inst != nil && inst.InstanceID == t.AssignedTo && inst.AgentType == req.Agent {
-						matchesType = true
-						break
-					}
-				}
-				if !matchesType {
-					continue
-				}
+			if t.AssignedTo != req.Agent && t.AssignedTo != agentType {
+				continue
 			}
 			t.Status = "cancelled"
 			t.UpdatedAt = now

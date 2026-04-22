@@ -120,8 +120,9 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 				pendingCount := 0
 				inProgressCount := 0
 				var taskBuf strings.Builder
+				agentType := app.ResolveParentAgentType(state, agent)
 				for _, task := range state.Tasks {
-					if task.AssignedTo == agent || task.AssignedTo == "any" {
+					if task.AssignedTo == agent || task.AssignedTo == agentType || task.AssignedTo == "any" {
 						switch task.Status {
 						case "pending":
 							pendingCount++

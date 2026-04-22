@@ -528,7 +528,7 @@ func TestWatchdog_WarningNoProcess(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 5, Title: "Review code", Status: "in_progress",
-		AssignedTo: "codex-task-5",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-4 * time.Minute),
 	})
 	state.NextTaskID = 6
@@ -578,7 +578,7 @@ func TestWatchdog_CriticalNoProcess(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 7, Title: "Long task", Status: "in_progress",
-		AssignedTo: "codex-task-7",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-6 * time.Minute),
 	})
 	state.NextTaskID = 8
@@ -644,7 +644,7 @@ func TestWatchdog_ActiveWorkerSuppressesWarning(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 3, Title: "Active task", Status: "in_progress",
-		AssignedTo: "codex-task-3",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-4 * time.Minute),
 	})
 	state.NextTaskID = 4
@@ -700,7 +700,7 @@ func TestWatchdog_ActiveWorkerSoftCritical(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 4, Title: "Long active task", Status: "in_progress",
-		AssignedTo: "codex-task-4",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-6 * time.Minute),
 	})
 	state.NextTaskID = 5
@@ -761,7 +761,7 @@ func TestWatchdog_SilentWorkerWarningIncludesSnippet(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 6, Title: "Silent task", Status: "in_progress",
-		AssignedTo: "codex-task-6",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-4 * time.Minute),
 	})
 	state.NextTaskID = 7
@@ -825,7 +825,7 @@ func TestWatchdog_SilentWorkerCriticalIncludesSnippet(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 8, Title: "Stuck task", Status: "in_progress",
-		AssignedTo: "codex-task-8",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-6 * time.Minute),
 	})
 	state.NextTaskID = 9
@@ -893,7 +893,7 @@ func TestWatchdog_SilentWorkerWithRecentSendDefersAutoCancel(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 9, Title: "Worker mid-deliverable", Status: "in_progress",
-		AssignedTo: "codex-task-9",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-6 * time.Minute),
 	})
 	state.NextTaskID = 10
@@ -971,7 +971,7 @@ func TestWatchdog_SilentWorkerWithoutRecentSendStillCancels(t *testing.T) {
 	state.DriverID = "cursor"
 	state.Tasks = append(state.Tasks, domain.Task{
 		ID: 10, Title: "Stuck task no send", Status: "in_progress",
-		AssignedTo: "codex-task-10",
+		AssignedTo: "codex",
 		UpdatedAt:  now.Add(-6 * time.Minute),
 	})
 	state.NextTaskID = 11

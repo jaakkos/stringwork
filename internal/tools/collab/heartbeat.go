@@ -66,10 +66,13 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 					}
 				}
 				if inst == nil {
-					if _, registered := state.RegisteredAgents[agent]; registered {
+					parentType := app.ResolveParentAgentType(state, agent)
+					_, hasRegistered := state.RegisteredAgents[parentType]
+					_, hasExactRegistered := state.RegisteredAgents[agent]
+					if hasRegistered || hasExactRegistered {
 						inst = &domain.AgentInstance{
 							InstanceID:   agent,
-							AgentType:    agent,
+							AgentType:    parentType,
 							Role:         domain.RoleWorker,
 							Status:       "idle",
 							CurrentTasks: []int{},

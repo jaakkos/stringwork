@@ -1399,11 +1399,11 @@ func TestWatchdog_AgentTypeNotDeadWhenAnyInstanceAlive(t *testing.T) {
 	state.Tasks = append(state.Tasks,
 		domain.Task{
 			ID: 1, Title: "Task on dead instance", Status: "in_progress",
-			AssignedTo: "claude-code-1", UpdatedAt: staleTime,
+			AssignedTo: "claude-code", UpdatedAt: staleTime,
 		},
 		domain.Task{
 			ID: 2, Title: "Task on alive instance", Status: "in_progress",
-			AssignedTo: "claude-code-2", UpdatedAt: now,
+			AssignedTo: "claude-code", UpdatedAt: now,
 		},
 	)
 	state.NextTaskID = 3
@@ -1430,6 +1430,77 @@ func TestWatchdog_AgentTypeNotDeadWhenAnyInstanceAlive(t *testing.T) {
 				if task.Status != "in_progress" {
 					t.Errorf("task #2 (alive instance) should remain in_progress, got %q", task.Status)
 				}
+			}
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_TaskBoundWorker_StaticPoolAssignee_PreventsRecovery verifies
+// the primary scenario described in fix-watchdog-task-correlation: a task is
+// assigned to the parent type "claude-code" (because the orchestrator picked
+// a static pool instance "claude-code-1"), and a task-bound child
+// "claude-code-task-5" is actively doing the work. Even if the static pool
+// instance itself has a stale heartbeat, the live task-bound worker's
+// liveness must prevent the task from being reset.
+func TestWatchdog_TaskBoundWorker_StaticPoolAssignee_PreventsRecovery(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "idle",
+		LastHeartbeat: now,
+	}
+	// Static pool instance (the one the orchestrator "assigned" the task to).
+	// It is itself stale — mirrors real-world conditions where the idle pool
+	// instance doesn't heartbeat because it has handed work off to a child.
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{5},
+		LastHeartbeat: staleTime,
+	}
+	// Task-bound child actually running the work. Alive.
+	state.AgentInstances["claude-code-task-5"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-task-5",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		Status:        "busy",
+		CurrentTasks:  []int{5},
+		LastHeartbeat: now.Add(-30 * time.Second),
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 5, Title: "Owned by task-bound child", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: now.Add(-1 * time.Minute),
+	})
+	state.NextTaskID = 6
+	state.NextMsgID = 1
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(2*time.Minute),
+	)
+
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		for _, task := range s.Tasks {
+			if task.ID != 5 {
+				continue
+			}
+			if task.Status != "in_progress" {
+				t.Errorf("task #5 should stay in_progress because task-bound child is alive, got %q", task.Status)
 			}
 		}
 		return nil

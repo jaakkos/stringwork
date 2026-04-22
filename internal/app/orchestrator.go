@@ -158,7 +158,14 @@ func NewTaskOrchestrator(svc *CollabService, strategyName string) *TaskOrchestra
 // AssignTask assigns a task to the best available worker and updates state (AssignedTo).
 // Call from within a state-mutating fn; the given task and state are the live references.
 // Rate-limited/backed-off agent types are automatically excluded from assignment.
-// Returns the instance ID assigned, or "" if none.
+//
+// task.AssignedTo is set to the selected worker's parent AgentType (e.g.
+// "claude-code"), not its concrete InstanceID ("claude-code-1"). The chosen
+// instance still owns the task via its CurrentTasks list; storing the type
+// lets the watchdog and liveness checks correlate cleanly with task-bound
+// child workers like "claude-code-task-7".
+//
+// Returns the assigned parent agent type, or "" if no worker was available.
 func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabState) string {
 	if state.DriverID == "" {
 		return ""
@@ -177,19 +184,19 @@ func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabSta
 	if inst == nil {
 		return ""
 	}
-	task.AssignedTo = inst.InstanceID
+	task.AssignedTo = inst.AgentType
 	inst.CurrentTasks = append(inst.CurrentTasks, task.ID)
 	inst.Status = "busy"
 	inst.LastHeartbeat = time.Now()
 	if o.setWorktree != nil {
 		o.setWorktree(state, task, inst)
 	}
-	return inst.InstanceID
+	return inst.AgentType
 }
 
 // ReassignTask finds a different worker for a task, excluding the given agent types.
 // Used when a worker marks a task as blocked — the task should move to another worker type.
-// Returns the new instance ID, or "" if no alternative worker is available.
+// Returns the new parent agent type, or "" if no alternative worker is available.
 func (o *TaskOrchestrator) ReassignTask(task *domain.Task, state *domain.CollabState, excludeTypes []string) string {
 	if state.DriverID == "" {
 		return ""
@@ -198,14 +205,14 @@ func (o *TaskOrchestrator) ReassignTask(task *domain.Task, state *domain.CollabS
 	if inst == nil {
 		return ""
 	}
-	task.AssignedTo = inst.InstanceID
+	task.AssignedTo = inst.AgentType
 	inst.CurrentTasks = append(inst.CurrentTasks, task.ID)
 	inst.Status = "busy"
 	inst.LastHeartbeat = time.Now()
 	if o.setWorktree != nil {
 		o.setWorktree(state, task, inst)
 	}
-	return inst.InstanceID
+	return inst.AgentType
 }
 
 // EnsureWorkContextWorktree ensures the task has a work context and sets its

@@ -162,8 +162,9 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 		now := time.Now()
 		var stalestSince time.Duration
 		var stalestTaskID int
+		agentType := app.ResolveParentAgentType(state, agent)
 		for _, task := range state.Tasks {
-			if task.AssignedTo != agent && task.AssignedTo != "any" {
+			if task.AssignedTo != agent && task.AssignedTo != agentType && task.AssignedTo != "any" {
 				continue
 			}
 			switch task.Status {
@@ -173,7 +174,7 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 				cancelled++
 			case "in_progress":
 				// Only check tasks directly assigned to this agent (not "any").
-				if task.AssignedTo != agent {
+				if task.AssignedTo != agent && task.AssignedTo != agentType {
 					continue
 				}
 				lastProgress := task.UpdatedAt

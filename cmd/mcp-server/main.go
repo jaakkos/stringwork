@@ -164,6 +164,14 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 
 	if err := svc.Run(func(state *domain.CollabState) error {
 		app.RefreshHeartbeatsOnStartup(state)
+		report := app.MigrateTaskBoundCorruption(state)
+		if report.Total() > 0 {
+			logger.Printf("Startup migration repaired %d task-bound row(s): %d task assignees, %d instance types, %d registered agents",
+				report.Total(), report.TasksReassigned, report.InstancesRetyped, report.RegisteredAgentsGone)
+			for _, m := range report.Mutations {
+				logger.Printf("  migrated: %s", m)
+			}
+		}
 		return nil
 	}); err != nil {
 		logger.Printf("Warning: failed to refresh heartbeats on startup: %v", err)
@@ -694,9 +702,10 @@ func runStatusCommand() {
 		}
 	}
 
+	agentType := app.ResolveParentAgentType(state, agent)
 	pending := 0
 	for _, task := range state.Tasks {
-		if (task.AssignedTo == agent || task.AssignedTo == "any") && task.Status == "pending" {
+		if (task.AssignedTo == agent || task.AssignedTo == agentType || task.AssignedTo == "any") && task.Status == "pending" {
 			pending++
 		}
 	}
