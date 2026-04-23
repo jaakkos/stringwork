@@ -155,6 +155,7 @@ type Config struct {
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
 	Daemon        *DaemonConfig              `yaml:"daemon"`
 	Audit         *AuditConfig               `yaml:"audit"`
+	Backup        *BackupConfig              `yaml:"backup"`
 }
 
 // AuditConfig controls audit logging behavior.
@@ -163,6 +164,14 @@ type AuditConfig struct {
 	Disabled      bool `yaml:"disabled"`
 	ArgsMaxLen    int  `yaml:"args_max_len"`
 	RetentionDays int  `yaml:"retention_days"`
+}
+
+// BackupConfig controls the rotating SQLite backup taken on every server start.
+// Uses `disabled: true` in config to turn off; omitting the section or field keeps backups ON.
+// Files are written next to state.sqlite as state.sqlite.bak.<unix-seconds>.
+type BackupConfig struct {
+	Disabled bool `yaml:"disabled"`
+	KeepN    int  `yaml:"keep_n"`
 }
 
 // DefaultConfig returns sensible defaults. Orchestration is always set (driver cursor, no workers).
@@ -178,6 +187,7 @@ func DefaultConfig() *Config {
 		TaskBoundInstanceRetentionHours: 24,
 		StateFile:                       "",
 		Orchestration:                   DefaultOrchestration(),
+		Backup:                          &BackupConfig{Disabled: false, KeepN: 5},
 	}
 }
 
@@ -441,4 +451,35 @@ func (p *Policy) AuditRetentionDays() int {
 		return p.config.Audit.RetentionDays
 	}
 	return 7
+}
+
+// BackupEnabled reports whether a rotating backup of state.sqlite should be
+// taken on every server start. Default is true; the user can opt out by
+// setting `backup.disabled: true` in config.
+func (p *Policy) BackupEnabled() bool {
+	if p.config.Backup == nil {
+		return true
+	}
+	return !p.config.Backup.Disabled
+}
+
+// BackupKeepN returns how many auto-generated backups to retain after the
+// rotation step. Defaults to 5. Values are clamped to [1, 50] so a typo can't
+// silently disable retention or fill the user's disk.
+func (p *Policy) BackupKeepN() int {
+	const (
+		def    = 5
+		minKey = 1
+		maxKey = 50
+	)
+	if p.config.Backup == nil || p.config.Backup.KeepN <= 0 {
+		return def
+	}
+	if p.config.Backup.KeepN < minKey {
+		return minKey
+	}
+	if p.config.Backup.KeepN > maxKey {
+		return maxKey
+	}
+	return p.config.Backup.KeepN
 }

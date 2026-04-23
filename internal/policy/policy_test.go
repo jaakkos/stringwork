@@ -525,6 +525,136 @@ orchestration:
 	}
 }
 
+// ========== Backup config tests ==========
+
+func TestBackupEnabled_DefaultTrue(t *testing.T) {
+	pol := New(&Config{})
+	if !pol.BackupEnabled() {
+		t.Error("BackupEnabled() should default to true when Backup section is nil")
+	}
+}
+
+func TestBackupEnabled_ExplicitlyDisabled(t *testing.T) {
+	pol := New(&Config{
+		Backup: &BackupConfig{Disabled: true},
+	})
+	if pol.BackupEnabled() {
+		t.Error("BackupEnabled() should be false when Disabled=true")
+	}
+}
+
+func TestBackupEnabled_SectionPresentNotDisabled(t *testing.T) {
+	pol := New(&Config{
+		Backup: &BackupConfig{},
+	})
+	if !pol.BackupEnabled() {
+		t.Error("BackupEnabled() should be true when Backup section exists but Disabled is zero-value (false)")
+	}
+}
+
+func TestBackupKeepN_Default(t *testing.T) {
+	pol := New(&Config{})
+	if pol.BackupKeepN() != 5 {
+		t.Errorf("BackupKeepN() = %d, want 5", pol.BackupKeepN())
+	}
+}
+
+func TestBackupKeepN_Custom(t *testing.T) {
+	pol := New(&Config{
+		Backup: &BackupConfig{KeepN: 12},
+	})
+	if pol.BackupKeepN() != 12 {
+		t.Errorf("BackupKeepN() = %d, want 12", pol.BackupKeepN())
+	}
+}
+
+func TestBackupKeepN_ClampsTooLarge(t *testing.T) {
+	pol := New(&Config{
+		Backup: &BackupConfig{KeepN: 9999},
+	})
+	if pol.BackupKeepN() != 50 {
+		t.Errorf("BackupKeepN() = %d, want clamped 50", pol.BackupKeepN())
+	}
+}
+
+func TestBackupKeepN_NegativeFallsBackToDefault(t *testing.T) {
+	pol := New(&Config{
+		Backup: &BackupConfig{KeepN: -3},
+	})
+	if pol.BackupKeepN() != 5 {
+		t.Errorf("BackupKeepN() = %d, want default 5 for non-positive value", pol.BackupKeepN())
+	}
+}
+
+func TestBackupConfig_FromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name      string
+		yaml      string
+		wantOn    bool
+		wantKeepN int
+	}{
+		{
+			name:      "no backup section",
+			yaml:      "workspace_root: /test\n",
+			wantOn:    true,
+			wantKeepN: 5,
+		},
+		{
+			name:      "empty backup section",
+			yaml:      "workspace_root: /test\nbackup: {}\n",
+			wantOn:    true,
+			wantKeepN: 5,
+		},
+		{
+			name:      "disabled true with keep_n override",
+			yaml:      "workspace_root: /test\nbackup:\n  disabled: true\n  keep_n: 10\n",
+			wantOn:    false,
+			wantKeepN: 10,
+		},
+		{
+			name:      "disabled false explicit",
+			yaml:      "workspace_root: /test\nbackup:\n  disabled: false\n  keep_n: 3\n",
+			wantOn:    true,
+			wantKeepN: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(tmpDir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			pol := New(cfg)
+			if pol.BackupEnabled() != tt.wantOn {
+				t.Errorf("BackupEnabled() = %v, want %v", pol.BackupEnabled(), tt.wantOn)
+			}
+			if pol.BackupKeepN() != tt.wantKeepN {
+				t.Errorf("BackupKeepN() = %d, want %d", pol.BackupKeepN(), tt.wantKeepN)
+			}
+		})
+	}
+}
+
+func TestDefaultConfig_BackupInitialized(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Backup == nil {
+		t.Fatal("DefaultConfig() should initialize Backup so the section is discoverable")
+	}
+	if cfg.Backup.Disabled {
+		t.Error("DefaultConfig().Backup.Disabled = true, want false (backups on by default)")
+	}
+	if cfg.Backup.KeepN != 5 {
+		t.Errorf("DefaultConfig().Backup.KeepN = %d, want 5", cfg.Backup.KeepN)
+	}
+}
+
 func TestMCPServers_EmptyMap(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

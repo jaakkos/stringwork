@@ -42,6 +42,18 @@ presence_ttl_seconds: 300
 #   args_max_len: 1000        # max characters for arg summaries (default: 1000)
 #   retention_days: 7         # auto-prune entries older than this (default: 7)
 
+# --- Rotating SQLite backups ---
+# On every server start the prior state.sqlite is copied to
+# state.sqlite.bak.<unix-seconds> next to the live DB, then auto-generated
+# backups beyond keep_n are pruned (newest kept, oldest deleted). User-named
+# backups (state.sqlite.bak.before-migration, etc.) are never touched.
+#
+# Enabled by default. Set `disabled: true` to skip the backup-on-start step.
+# Restore by stopping the server and `cp <chosen-backup> state.sqlite`.
+# backup:
+#   disabled: false           # set to true to skip backup-on-start
+#   keep_n: 5                 # how many auto backups to retain (clamped 1..50)
+
 # --- Daemon mode (multi-driver support) ---
 # When enabled, multiple Cursor windows share a single server process.
 # The first invocation starts a background daemon; subsequent ones connect

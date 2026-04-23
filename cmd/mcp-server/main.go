@@ -25,6 +25,7 @@ import (
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 	"github.com/jaakkos/stringwork/internal/repository"
+	"github.com/jaakkos/stringwork/internal/repository/sqlite"
 	"github.com/jaakkos/stringwork/internal/tools/collab"
 	"github.com/jaakkos/stringwork/internal/worktree"
 )
@@ -153,10 +154,36 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	logger.Printf("Log file: %s", pol.LogFile())
 	logger.Printf("Workspace root: %s", cfg.WorkspaceRoot)
 
-	repo, err := repository.NewStateRepository(pol.StateFile())
+	// Pre-open inspection MUST happen before NewStateRepository: sql.Open
+	// creates the file on first connection, so the "did this exist?" signal
+	// is permanently lost the moment we open. Backups are taken between
+	// inspection and open so the file we copy is the unmodified prior DB.
+	statePath := pol.StateFile()
+	initState := sqlite.InspectState(statePath)
+	sqlite.RotateBackups(statePath, sqlite.BackupOptions{
+		Enabled: pol.BackupEnabled(),
+		KeepN:   pol.BackupKeepN(),
+	}, logger)
+
+	repo, err := repository.NewStateRepository(statePath)
 	if err != nil {
 		logger.Fatalf("State repository: %v", err)
 	}
+
+	if initState.Fresh {
+		logger.Printf("WARNING: no existing state.sqlite at %s — initializing a fresh database", initState.Path)
+		logger.Printf("  All prior tasks, messages, agents, plans, and notes are gone.")
+		if len(initState.Backups) > 0 {
+			logger.Printf("  Found %d nearby backup(s) you can restore from:", len(initState.Backups))
+			for _, b := range initState.Backups {
+				logger.Printf("    %s  (%d bytes, %s)", b.Path, b.Size, b.ModTime.Format(time.RFC3339))
+			}
+			logger.Printf("  To restore: stop the server, `cp <chosen-backup> %s`, then restart.", initState.Path)
+		} else {
+			logger.Printf("  No backup files found in %s — this is normal for a first install.", filepath.Dir(initState.Path))
+		}
+	}
+
 	svc := app.NewCollabService(repo, pol, logger)
 
 	var auditWriter app.AuditWriter
