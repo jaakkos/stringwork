@@ -53,7 +53,16 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 			// or shadow it creates a phantom RegisteredAgent row that
 			// confuses ValidateAgent and lets workers self-publish
 			// capabilities the pool didn't grant.
+			//
+			// Exception: if this name already exists in RegisteredAgents,
+			// the AgentInstance row was materialized below by a previous
+			// register_agent call — re-registering is an update, not a
+			// collision. Skipping the check here lets repeated handshakes
+			// from the same agent succeed.
 			if collisionErr := svc.Query(func(state *domain.CollabState) error {
+				if _, alreadyRegistered := state.RegisteredAgents[name]; alreadyRegistered {
+					return nil
+				}
 				if app.IsBuiltinAgent(name, state) {
 					return fmt.Errorf("agent name %q collides with a built-in / pool-managed agent; built-in agent slots are not user-registerable", name)
 				}
@@ -102,6 +111,29 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 						LastSeen:     now,
 					}
 					isNew = true
+				}
+
+				// Materialize a worker AgentInstance for the registered agent.
+				// Without this, claim_next succeeds but AddTaskToInstance
+				// silently no-ops (the "phantom assignment" bug): the task
+				// flips to in_progress with no owning instance, so the
+				// watchdog has no liveness target, report_progress cannot
+				// refresh a heartbeat, and cancel_agent cannot reach a
+				// process. We only create the instance once — subsequent
+				// register_agent calls just refresh LastSeen / capabilities
+				// above and leave the existing instance untouched so we
+				// don't clobber CurrentTasks / Status.
+				if _, hasInstance := state.AgentInstances[name]; !hasInstance {
+					state.AgentInstances[name] = &domain.AgentInstance{
+						InstanceID:    name,
+						AgentType:     name,
+						Role:          domain.RoleWorker,
+						Capabilities:  capabilities,
+						MaxTasks:      1,
+						Status:        "idle",
+						CurrentTasks:  []int{},
+						LastHeartbeat: now,
+					}
 				}
 				return nil
 			}); err != nil {
