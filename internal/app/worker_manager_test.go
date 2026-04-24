@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1677,8 +1678,18 @@ func TestCheckOnlySpawnsForMessages(t *testing.T) {
 // captureCheckAcks builds a stateMutator that records the InstanceIDs that
 // Check() decides to spawn (by parsing the "⚡ **<id>** is coming online" ack
 // message that sendAck writes synchronously before launching the spawn goroutine).
+//
+// Production Check() can fan out and call this closure from multiple goroutines
+// concurrently (one per pool instance — see Check.gowrap1 / spawn / sendFailureAck
+// at worker_manager.go:935 onward). Without serialisation the appends to
+// state.Messages and *ackTargets race under -race. The closure-local mutex
+// makes the helper safe for the multi-config tests (e.g.
+// TestCheck_TaskBoundChildDoesNotBlockPool) without changing call sites.
 func captureCheckAcks(state *domain.CollabState, ackTargets *[]string) func(func(*domain.CollabState) error) error {
+	var mu sync.Mutex
 	return func(fn func(*domain.CollabState) error) error {
+		mu.Lock()
+		defer mu.Unlock()
 		before := len(state.Messages)
 		if err := fn(state); err != nil {
 			return err
