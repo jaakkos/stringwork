@@ -403,6 +403,12 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		livenessAdapter.wm = wm
 		if taskOrch != nil {
 			taskOrch.SetBackoffChecker(wm)
+			// Fix A: hand the orchestrator the configured worker types so it
+			// can fall back when no live AgentInstance row matches a new task
+			// (typical: empty live pool right after server start, before any
+			// worker has heartbeat). Without this, AssignTask returns "" and
+			// create_task silently skips SpawnForTask — tasks orphan.
+			taskOrch.SetKnownTypesProvider(wm)
 			taskOrch.SetWorktreeForAssignedTask(func(state *domain.CollabState, task *domain.Task, inst *domain.AgentInstance) {
 				for _, w := range orchCfg.Workers {
 					if w.Type == inst.AgentType && w.UseClaudeWorktree {
@@ -449,6 +455,13 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	if wm != nil {
 		watchdogOpts = append(watchdogOpts, app.WithProcessActivity(wm))
 		watchdogOpts = append(watchdogOpts, app.WithAutoCanceller(wm))
+		// Fix D.2: let the watchdog re-drive worker spawns for pending tasks
+		// the immediate create_task → SpawnForTask path missed (server crash
+		// between persist and spawn, empty pool at create-time before Fix A,
+		// transient backoff with no follow-up event). Gated by spawnSweepGrace
+		// from policy so it only fires for tasks the immediate path has had
+		// a chance to handle.
+		watchdogOpts = append(watchdogOpts, app.WithSpawnDriver(wm))
 	}
 	watchdog := app.NewWatchdog(svc, registry, logger, watchdogOpts...)
 	go watchdog.Start(ctx)

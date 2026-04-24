@@ -134,6 +134,18 @@ type BackoffChecker interface {
 	BackedOffAgentTypes() []string
 }
 
+// KnownTypesProvider exposes the worker types known to orchestration config,
+// in declaration order. The orchestrator falls back to these when no live
+// AgentInstance row matches — the worker pool may simply be empty (no
+// previous heartbeats yet) at the moment a task is created. Without this
+// fallback, AssignTask returns "" → create_task never invokes SpawnForTask
+// → the task is silently orphaned (Bug A).
+//
+// Implementations: WorkerManager.KnownAgentTypes().
+type KnownTypesProvider interface {
+	KnownAgentTypes() []string
+}
+
 // SetWorktreeForAssignedTask is called after a task is assigned to set the worktree
 // in the task's work context when the assigned worker uses Claude native worktrees.
 // It receives the live state, the assigned task, and the chosen instance.
@@ -144,6 +156,7 @@ type TaskOrchestrator struct {
 	svc            *CollabService
 	strategy       func(*domain.Task, *domain.CollabState) *domain.AgentInstance
 	backoffChecker BackoffChecker
+	knownTypes     KnownTypesProvider
 	// setWorktree is called after assignment to set WorktreeName on the task's work context when needed.
 	setWorktree SetWorktreeForAssignedTask
 }
@@ -152,6 +165,13 @@ type TaskOrchestrator struct {
 // agent types during task assignment.
 func (o *TaskOrchestrator) SetBackoffChecker(c BackoffChecker) {
 	o.backoffChecker = c
+}
+
+// SetKnownTypesProvider wires the configured-types fallback. When the strategy
+// returns no live worker, AssignTask consults this provider to pick a
+// configured worker type so create_task → SpawnForTask still fires (Fix A).
+func (o *TaskOrchestrator) SetKnownTypesProvider(p KnownTypesProvider) {
+	o.knownTypes = p
 }
 
 // SetWorktreeForAssignedTask sets the callback that updates the task's work context
@@ -185,13 +205,24 @@ func NewTaskOrchestrator(svc *CollabService, strategyName string) *TaskOrchestra
 // child workers like "claude-code-task-7".
 //
 // Returns the assigned parent agent type, or "" if no worker was available.
+//
+// Fix A — empty-live-pool fallback:
+// When no live AgentInstance matches (the typical reason: the worker pool
+// only contains "offline" rows because no worker has heartbeat yet), the
+// strategy returns nil. Without a fallback, AssignTask would return "" and
+// the caller (create_task) would skip SpawnForTask, silently orphaning the
+// task. Instead we consult KnownTypesProvider for a configured worker type,
+// set task.AssignedTo to that type, and let SpawnForTask handle bringing the
+// pool to life. AgentInstance bookkeeping (CurrentTasks/Status) happens when
+// the worker actually comes online and the task is re-evaluated.
 func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabState) string {
 	if state.DriverID == "" {
 		return ""
 	}
 	var inst *domain.AgentInstance
+	var excludeTypes []string
 	if o.backoffChecker != nil {
-		excludeTypes := o.backoffChecker.BackedOffAgentTypes()
+		excludeTypes = o.backoffChecker.BackedOffAgentTypes()
 		if len(excludeTypes) > 0 {
 			inst = selectWithExclusions(task, state, excludeTypes)
 		} else {
@@ -201,6 +232,10 @@ func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabSta
 		inst = o.strategy(task, state)
 	}
 	if inst == nil {
+		if t := o.fallbackToConfiguredType(task, excludeTypes); t != "" {
+			task.AssignedTo = t
+			return t
+		}
 		return ""
 	}
 	task.AssignedTo = inst.AgentType
@@ -211,6 +246,32 @@ func (o *TaskOrchestrator) AssignTask(task *domain.Task, state *domain.CollabSta
 		o.setWorktree(state, task, inst)
 	}
 	return inst.AgentType
+}
+
+// fallbackToConfiguredType chooses a configured worker type when no live
+// instance matches the task. Honors task.WorkerType if specified; otherwise
+// returns the first configured type in declaration order, skipping any
+// types in excludeTypes (so backed-off pools aren't picked).
+//
+// Returns "" when no provider is wired or no acceptable type is found.
+func (o *TaskOrchestrator) fallbackToConfiguredType(task *domain.Task, excludeTypes []string) string {
+	if o.knownTypes == nil {
+		return ""
+	}
+	excluded := make(map[string]bool, len(excludeTypes))
+	for _, t := range excludeTypes {
+		excluded[t] = true
+	}
+	for _, t := range o.knownTypes.KnownAgentTypes() {
+		if excluded[t] {
+			continue
+		}
+		if task.WorkerType != "" && t != task.WorkerType {
+			continue
+		}
+		return t
+	}
+	return ""
 }
 
 // ReassignTask finds a different worker for a task, excluding the given agent types.

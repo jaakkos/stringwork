@@ -24,15 +24,21 @@ const (
 
 // AgentInstance represents a single agent instance (driver or worker), including multi-instance workers.
 type AgentInstance struct {
-	InstanceID         string    `json:"instance_id"`
-	AgentType          string    `json:"agent_type"`
-	Role               AgentRole `json:"role"`
-	Capabilities       []string  `json:"capabilities,omitempty"`
-	MaxTasks           int       `json:"max_tasks"`
-	Status             string    `json:"status"` // idle, busy, offline
-	CurrentTasks       []int     `json:"current_tasks,omitempty"`
-	Workspace          string    `json:"workspace,omitempty"`
-	LastHeartbeat      time.Time `json:"last_heartbeat"`
+	InstanceID    string    `json:"instance_id"`
+	AgentType     string    `json:"agent_type"`
+	Role          AgentRole `json:"role"`
+	Capabilities  []string  `json:"capabilities,omitempty"`
+	MaxTasks      int       `json:"max_tasks"`
+	Status        string    `json:"status"` // idle, busy, offline
+	CurrentTasks  []int     `json:"current_tasks,omitempty"`
+	Workspace     string    `json:"workspace,omitempty"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	// LastSpawnedAt records the moment WorkerManager last initiated a spawn for
+	// this instance. It is set BEFORE the worker process starts (and before its
+	// first heartbeat arrives) so callers can distinguish "freshly spawned, give
+	// it grace" from "actually unresponsive". Watchdog consults this alongside
+	// LastHeartbeat before flipping a worker to offline.
+	LastSpawnedAt      time.Time `json:"last_spawned_at,omitempty"`
 	Progress           string    `json:"progress,omitempty"`             // free-text progress description from last heartbeat
 	ProgressStep       int       `json:"progress_step,omitempty"`        // current step number (e.g. 3 of 5)
 	ProgressTotalSteps int       `json:"progress_total_steps,omitempty"` // total steps

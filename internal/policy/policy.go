@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -91,6 +92,18 @@ type OrchestrationConfig struct {
 	WorkerTimeoutSeconds     int             `yaml:"worker_timeout_seconds"`
 	MaxTaskFailures          int             `yaml:"max_task_failures"` // DLQ: auto-block task after N watchdog failures
 	Worktrees                *WorktreeConfig `yaml:"worktrees"`         // optional git worktree isolation
+	// RespawnGraceSeconds is how long after a worker spawn the watchdog
+	// leaves the AgentInstance row alone (no offline-marking, no recovery).
+	// Lets a freshly-spawned worker bootstrap and emit its first heartbeat
+	// before liveness checks engage. Default: 60 seconds.
+	RespawnGraceSeconds int `yaml:"respawn_grace_seconds"`
+	// SpawnSweepGraceSeconds is how old a pending task must be before the
+	// watchdog re-drives an assignment for it. The normal create_task →
+	// SpawnForTask path handles the happy case; the sweep is the safety net
+	// for tasks that were created when no live worker was available (e.g.
+	// after a crash, or when the orchestrator's pool was empty). Default:
+	// 30 seconds. Set to 0 to disable the sweep.
+	SpawnSweepGraceSeconds int `yaml:"spawn_sweep_grace_seconds"`
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with
@@ -381,6 +394,34 @@ func (p *Policy) MaxTaskFailures() int {
 		return p.config.Orchestration.MaxTaskFailures
 	}
 	return 3
+}
+
+// RespawnGrace returns how long after a worker spawn the watchdog leaves the
+// AgentInstance row alone. Defaults to 60 seconds when not configured.
+// Set to a negative value (or 0 with explicit intent in code) to disable
+// — but the default avoids tight respawn ↔ watchdog flap loops, so consumers
+// of the negative path should know what they're giving up.
+func (p *Policy) RespawnGrace() time.Duration {
+	if p.config.Orchestration != nil && p.config.Orchestration.RespawnGraceSeconds > 0 {
+		return time.Duration(p.config.Orchestration.RespawnGraceSeconds) * time.Second
+	}
+	return 60 * time.Second
+}
+
+// SpawnSweepGrace returns how old a pending task must be before the watchdog
+// re-drives an assignment for it. Defaults to 30 seconds when not configured.
+// Returning 0 explicitly via config disables the sweep.
+func (p *Policy) SpawnSweepGrace() time.Duration {
+	if p.config.Orchestration == nil {
+		return 30 * time.Second
+	}
+	if p.config.Orchestration.SpawnSweepGraceSeconds < 0 {
+		return 0
+	}
+	if p.config.Orchestration.SpawnSweepGraceSeconds > 0 {
+		return time.Duration(p.config.Orchestration.SpawnSweepGraceSeconds) * time.Second
+	}
+	return 30 * time.Second
 }
 
 // MCPServers returns the configured MCP servers that should be auto-registered

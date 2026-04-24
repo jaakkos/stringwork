@@ -40,6 +40,17 @@ const (
 	// defaultMaxTaskFailures is the number of watchdog-detected failures
 	// before a task is auto-blocked (DLQ behavior).
 	defaultMaxTaskFailures = 3
+
+	// defaultRespawnGrace is how long after WorkerManager records a spawn
+	// (AgentInstance.LastSpawnedAt) the watchdog leaves the row alone, so a
+	// brand-new worker isn't flipped back to "offline" before its first
+	// real heartbeat lands. Tuned to be > typical CLI startup time.
+	defaultRespawnGrace = 60 * time.Second
+
+	// defaultSpawnSweepGrace is how old a pending task must be before the
+	// watchdog re-drives an assignment for it. Lets the normal create_task
+	// → SpawnForTask path complete first; the sweep is the safety net.
+	defaultSpawnSweepGrace = 30 * time.Second
 )
 
 // ProcessActivityProvider gives the watchdog access to live process metadata
@@ -54,6 +65,30 @@ type ProcessActivityProvider interface {
 type WorkerAutoCanceller interface {
 	CancelWorker(instanceID string) bool
 	GetRecentOutput(instanceID string) string
+}
+
+// SpawnDriver lets the watchdog re-drive worker spawns for pending tasks the
+// normal create_task → SpawnForTask path missed (Bug D.2). The "missed"
+// scenarios we care about:
+//
+//   - Server crashed AFTER persisting the task but BEFORE SpawnForTask fired.
+//   - Task was created when no live worker existed and the orchestrator's
+//     fallback was not yet wired (legacy databases).
+//   - SpawnForTask returned because of a transient backoff that has since
+//     cleared, but no event re-fires the spawn (drainQueue is event-driven).
+//
+// Implementations: *WorkerManager. The watchdog calls IsSpawnQueued first to
+// skip tasks the immediate path is already handling, so this sweep is a true
+// safety net — it never races with the happy path.
+type SpawnDriver interface {
+	// SpawnForTask kicks off a worker spawn for taskID, targeting the
+	// configured worker type assignedTo. Best-effort: backoff, capacity,
+	// and missing-config conditions are handled internally.
+	SpawnForTask(taskID int, assignedTo string)
+	// IsSpawnQueued reports whether a spawn for taskID is already pending
+	// (queued behind capacity/backoff) or running (task-bound child process
+	// alive). When true, the watchdog must not call SpawnForTask again.
+	IsSpawnQueued(taskID int) bool
 }
 
 // Watchdog monitors agent liveness and recovers from stuck states.
@@ -79,11 +114,23 @@ type Watchdog struct {
 	//   processSilentThresh < progressWarningThresh < progressCriticalThresh
 	processSilentThresh time.Duration
 	maxTaskFailures     int
-	notifier            Triggerable
-	processActivity     ProcessActivityProvider
-	autoCanceller       WorkerAutoCanceller
-	stopCh              chan struct{}
-	doneCh              chan struct{}
+	// respawnGrace defers offline-marking for instances that were spawned in
+	// the last respawnGrace window. See AgentInstance.LastSpawnedAt and Fix C
+	// in worker_manager.MarkInstanceSpawning.
+	respawnGrace time.Duration
+	// spawnSweepGrace controls how old a pending task must be before the
+	// watchdog's spawn-driving sweep tries to assign+spawn for it. See
+	// driveSpawns().
+	spawnSweepGrace time.Duration
+	notifier        Triggerable
+	processActivity ProcessActivityProvider
+	autoCanceller   WorkerAutoCanceller
+	// spawnDriver lets driveSpawns() ask the worker manager to (re)spawn
+	// workers for pending tasks the normal event-driven path missed.
+	// Optional — when nil, driveSpawns is a no-op (Fix D.2).
+	spawnDriver SpawnDriver
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 	// alertedTasks tracks which tasks have been alerted at which level to avoid spam.
 	// Key: taskID, Value: "warning" or "critical".
 	alertedTasks map[int]string
@@ -170,6 +217,19 @@ func WithMaxTaskFailures(n int) WatchdogOption {
 	return func(w *Watchdog) { w.maxTaskFailures = n }
 }
 
+// WithRespawnGrace sets how long after a WorkerManager-recorded spawn the
+// watchdog leaves an AgentInstance alone (no offline-marking, no recovery).
+// Defaults to 60s. See AgentInstance.LastSpawnedAt.
+func WithRespawnGrace(d time.Duration) WatchdogOption {
+	return func(w *Watchdog) { w.respawnGrace = d }
+}
+
+// WithSpawnSweepGrace sets how old a pending task must be before the watchdog
+// re-drives an assignment for it during driveSpawns(). Defaults to 30s.
+func WithSpawnSweepGrace(d time.Duration) WatchdogOption {
+	return func(w *Watchdog) { w.spawnSweepGrace = d }
+}
+
 // WithWatchdogNotifier sets the notifier to trigger after recovery actions.
 func WithWatchdogNotifier(n Triggerable) WatchdogOption {
 	return func(w *Watchdog) { w.notifier = n }
@@ -188,6 +248,14 @@ func WithAutoCanceller(c WorkerAutoCanceller) WatchdogOption {
 	return func(w *Watchdog) { w.autoCanceller = c }
 }
 
+// WithSpawnDriver wires a SpawnDriver so the watchdog can re-drive spawns for
+// pending tasks the normal create_task → SpawnForTask path missed (Fix D.2).
+// When unset, driveSpawns() is a no-op and the watchdog does not interfere
+// with spawn lifecycle — preserves test isolation.
+func WithSpawnDriver(d SpawnDriver) WatchdogOption {
+	return func(w *Watchdog) { w.spawnDriver = d }
+}
+
 // NewWatchdog creates a new Watchdog.
 func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logger, opts ...WatchdogOption) *Watchdog {
 	w := &Watchdog{
@@ -201,6 +269,8 @@ func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logg
 		progressWarningThresh:  defaultProgressWarningThreshold,
 		progressCriticalThresh: defaultProgressCriticalThreshold,
 		maxTaskFailures:        defaultMaxTaskFailures,
+		respawnGrace:           defaultRespawnGrace,
+		spawnSweepGrace:        defaultSpawnSweepGrace,
 		stopCh:                 make(chan struct{}),
 		doneCh:                 make(chan struct{}),
 		alertedTasks:           make(map[int]string),
@@ -223,6 +293,16 @@ func NewWatchdog(svc *CollabService, registry *SessionRegistry, logger *log.Logg
 		}
 		if mf := w.pol.MaxTaskFailures(); mf > 0 {
 			w.maxTaskFailures = mf
+		}
+		// Respawn grace and spawn sweep grace come from policy when set.
+		// Mirrors the existing pattern (HeartbeatIntervalSeconds above) where
+		// policy values win — production wires policy via WithPolicy and
+		// explicit options are reserved for tests.
+		if rg := w.pol.RespawnGrace(); rg > 0 {
+			w.respawnGrace = rg
+		}
+		if sg := w.pol.SpawnSweepGrace(); sg > 0 {
+			w.spawnSweepGrace = sg
 		}
 	}
 	// Derive processSilentThresh from progressWarningThresh to maintain
@@ -273,6 +353,16 @@ func (w *Watchdog) CheckOnce() {
 // tool call via PiggybackMiddleware.TouchSession), AND process output activity
 // (stdout/stderr writes from spawned worker processes).
 func (w *Watchdog) isAgentAlive(agent string, inst *domain.AgentInstance, now time.Time, threshold time.Duration) bool {
+	// Check 0 (Fix C-grace): Respawn grace window. WorkerManager.MarkInstanceSpawning
+	// stamps LastSpawnedAt at the instant a spawn is initiated — before the worker
+	// process exists, much less heartbeats. During the configured grace window we
+	// treat the instance as alive so the watchdog won't immediately re-mark it
+	// offline (which would in turn re-trigger task recovery in a tight loop).
+	if inst != nil && !inst.LastSpawnedAt.IsZero() && w.respawnGrace > 0 &&
+		now.Sub(inst.LastSpawnedAt) <= w.respawnGrace {
+		return true
+	}
+
 	// Check 1: Session registry activity (most reliable — updated on every tool call)
 	lastActivity := w.registry.LastActivityForAgent(agent)
 	if !lastActivity.IsZero() && now.Sub(lastActivity) <= threshold {
@@ -829,10 +919,89 @@ func (w *Watchdog) check() {
 		w.notifier.Trigger()
 	}
 
-	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 || prunedPresence > 0 || prunedInstances > 0 {
-		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s), %d presence row(s), %d instance row(s)",
-			recoveredTasks, recoveredAgents, prunedSessions, prunedPresence, prunedInstances)
+	// Phase 5 (Fix D.2): re-drive spawns for pending tasks. Runs after
+	// recovery so any tasks just reset to "pending" by Phase 2 are picked
+	// up immediately instead of waiting another full cycle. Safe to run
+	// even when nothing was recovered — driveSpawns is a pure safety net,
+	// gated by spawnSweepGrace and IsSpawnQueued.
+	driven := w.driveSpawns()
+
+	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 || prunedPresence > 0 || prunedInstances > 0 || driven > 0 {
+		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s), %d presence row(s), %d instance row(s), drove %d spawn(s)",
+			recoveredTasks, recoveredAgents, prunedSessions, prunedPresence, prunedInstances, driven)
 	}
+}
+
+// driveSpawns walks pending tasks and asks the SpawnDriver to (re)spawn a
+// worker for any that the immediate create_task → SpawnForTask path appears
+// to have missed. This is the safety net that turns "task accidentally
+// orphaned" into "task picked up within at most one watchdog interval +
+// spawnSweepGrace".
+//
+// Skips a task when ANY of these hold (each one means the happy path is
+// already handling it, or there's nothing the watchdog can usefully do):
+//
+//   - spawnDriver is unset or spawnSweepGrace is non-positive (feature
+//     disabled by config).
+//   - task.Status != "pending" (only pending tasks need a spawn).
+//   - task.AssignedTo is empty or "any" (no concrete type to spawn for; the
+//     orchestrator's fallback should have set this — see Fix A).
+//   - task is younger than spawnSweepGrace (the immediate path may still be
+//     in flight; we don't want to race it).
+//   - the task already has a live owning AgentInstance (assigned to a real
+//     pool worker that is currently online).
+//   - SpawnDriver.IsSpawnQueued reports a pending spawn or running task-bound
+//     child for this task.
+//
+// Returns the number of spawns initiated this cycle. The state is queried
+// outside the recovery mutation; spawns are async (SpawnForTask returns
+// immediately), so we don't need to hold the state lock while driving.
+func (w *Watchdog) driveSpawns() int {
+	if w.spawnDriver == nil || w.spawnSweepGrace <= 0 {
+		return 0
+	}
+
+	type pendingCandidate struct {
+		taskID     int
+		assignedTo string
+	}
+	var candidates []pendingCandidate
+	now := time.Now()
+
+	_ = w.svc.Query(func(state *domain.CollabState) error {
+		for i := range state.Tasks {
+			t := &state.Tasks[i]
+			if t.Status != "pending" {
+				continue
+			}
+			if t.AssignedTo == "" || t.AssignedTo == "any" {
+				continue
+			}
+			if now.Sub(t.UpdatedAt) < w.spawnSweepGrace {
+				continue
+			}
+			// Live owner already exists — the assigned worker holds the
+			// task in CurrentTasks and is online. No spawn needed.
+			if owner := findOwnerInstanceForTask(state, t); owner != nil {
+				if w.isAgentAlive(owner.InstanceID, owner, now, w.heartbeatStaleThresh) {
+					continue
+				}
+			}
+			candidates = append(candidates, pendingCandidate{taskID: t.ID, assignedTo: t.AssignedTo})
+		}
+		return nil
+	})
+
+	driven := 0
+	for _, c := range candidates {
+		if w.spawnDriver.IsSpawnQueued(c.taskID) {
+			continue
+		}
+		w.logger.Printf("Watchdog: driving spawn for orphan pending task #%d (assigned_to=%s)", c.taskID, c.assignedTo)
+		w.spawnDriver.SpawnForTask(c.taskID, c.assignedTo)
+		driven++
+	}
+	return driven
 }
 
 // checkTaskBoundWorker checks whether a task-bound worker instance (e.g.

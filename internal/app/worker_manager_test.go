@@ -1151,6 +1151,310 @@ func TestEnqueueSpawn_FIFOOrder(t *testing.T) {
 	}
 }
 
+// TestIsSpawnQueued_DetectsPendingQueue confirms the watchdog-side double-spawn
+// guard sees tasks already enqueued via enqueueSpawn (capacity / backoff path).
+func TestIsSpawnQueued_DetectsPendingQueue(t *testing.T) {
+	wm := &WorkerManager{
+		pendingSpawns:  make(map[string][]pendingSpawn),
+		processRuntime: make(map[string]*workerRuntime),
+	}
+	wm.enqueueSpawn("claude-code", 7)
+
+	if !wm.IsSpawnQueued(7) {
+		t.Error("IsSpawnQueued(7) should be true after enqueueSpawn")
+	}
+	if wm.IsSpawnQueued(8) {
+		t.Error("IsSpawnQueued(8) should be false (not enqueued)")
+	}
+}
+
+// TestIsSpawnQueued_DetectsRunningTaskBoundChild — the spawnTaskWorker path
+// registers the worker as "<type>-task-<id>" in processRuntime. The sweep
+// must treat that as already-spawned so it doesn't double up.
+func TestIsSpawnQueued_DetectsRunningTaskBoundChild(t *testing.T) {
+	wm := &WorkerManager{
+		pendingSpawns:  make(map[string][]pendingSpawn),
+		processRuntime: make(map[string]*workerRuntime),
+	}
+	wm.processRuntime["claude-code-task-42"] = &workerRuntime{}
+
+	if !wm.IsSpawnQueued(42) {
+		t.Error("IsSpawnQueued(42) should be true when claude-code-task-42 is running")
+	}
+}
+
+// TestIsSpawnQueued_IgnoresUnrelatedRuntime — a running pool worker without
+// the "-task-<id>" suffix is NOT a spawn signal for any specific task.
+// Otherwise IsSpawnQueued would suppress legitimate sweeps just because
+// some other worker happens to be alive.
+func TestIsSpawnQueued_IgnoresUnrelatedRuntime(t *testing.T) {
+	wm := &WorkerManager{
+		pendingSpawns:  make(map[string][]pendingSpawn),
+		processRuntime: make(map[string]*workerRuntime),
+	}
+	wm.processRuntime["claude-code-1"] = &workerRuntime{}       // pool worker, no task suffix
+	wm.processRuntime["claude-code-task-99"] = &workerRuntime{} // task-bound for #99
+	wm.processRuntime["codex-task-100"] = &workerRuntime{}      // unrelated type+id
+
+	if wm.IsSpawnQueued(42) {
+		t.Error("IsSpawnQueued(42) should be false — no -task-42 suffix in runtime or queue")
+	}
+	if !wm.IsSpawnQueued(99) {
+		t.Error("IsSpawnQueued(99) should be true (claude-code-task-99 running)")
+	}
+	if !wm.IsSpawnQueued(100) {
+		t.Error("IsSpawnQueued(100) should be true (codex-task-100 running)")
+	}
+}
+
+// TestIsSpawnQueued_NonPositiveTaskID is a safety guard so callers passing
+// an unset / sentinel ID can't accidentally claim "queued".
+func TestIsSpawnQueued_NonPositiveTaskID(t *testing.T) {
+	wm := &WorkerManager{
+		pendingSpawns:  make(map[string][]pendingSpawn),
+		processRuntime: make(map[string]*workerRuntime),
+	}
+	if wm.IsSpawnQueued(0) {
+		t.Error("IsSpawnQueued(0) must be false")
+	}
+	if wm.IsSpawnQueued(-1) {
+		t.Error("IsSpawnQueued(-1) must be false")
+	}
+}
+
+// newRecoveryTestWorkerManager builds a WorkerManager scaffolded for
+// recoverPendingSpawnsOnStartup tests. State has no Presence, so
+// SpawnForTask → spawnTaskWorker bails on "no workspace" — we never
+// actually exec anything, but the eligibility logic still runs end to end.
+func newRecoveryTestWorkerManager(t *testing.T, state *domain.CollabState, configs []WorkerSpawnConfig) *WorkerManager {
+	t.Helper()
+	return &WorkerManager{
+		configs:             configs,
+		getAgent:            func() string { return "cursor" },
+		stateLoader:         func() (*domain.CollabState, error) { return state, nil },
+		stateMutator:        func(fn func(*domain.CollabState) error) error { return fn(state) },
+		logger:              testLogger(t),
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		mcpRegistered:       make(map[string]bool),
+		processRuntime:      make(map[string]*workerRuntime),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+		pendingSpawns:       make(map[string][]pendingSpawn),
+	}
+}
+
+// TestRecoverPendingSpawnsOnStartup_DrivesOrphanTask covers the happy path
+// for Fix D.1: a pending task with a concrete AssignedTo and no live
+// owner should result in one spawn being driven.
+func TestRecoverPendingSpawnsOnStartup_DrivesOrphanTask(t *testing.T) {
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 5, Title: "Orphan", Status: "pending", AssignedTo: "claude-code", UpdatedAt: time.Now().Add(-1 * time.Hour)},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 1 {
+		t.Errorf("expected 1 driven spawn, got %d", got)
+	}
+}
+
+// TestRecoverPendingSpawnsOnStartup_SkipsLiveOwner — when an existing
+// AgentInstance owns the task via CurrentTasks AND has a non-zero
+// LastHeartbeat AND is not offline, the task is "covered" and should
+// not trigger a duplicate spawn.
+func TestRecoverPendingSpawnsOnStartup_SkipsLiveOwner(t *testing.T) {
+	now := time.Now()
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 5, Title: "Owned", Status: "pending", AssignedTo: "claude-code", UpdatedAt: now.Add(-1 * time.Hour)},
+		},
+		AgentInstances: map[string]*domain.AgentInstance{
+			"claude-code-1": {
+				InstanceID: "claude-code-1", AgentType: "claude-code",
+				Role: domain.RoleWorker, Status: "busy",
+				LastHeartbeat: now,
+				CurrentTasks:  []int{5},
+			},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 0 {
+		t.Errorf("expected no spawn when live owner already holds task, got %d", got)
+	}
+}
+
+// TestRecoverPendingSpawnsOnStartup_OfflineOwnerStillTriggers — owner exists
+// but is marked offline. The task IS effectively orphaned and we should
+// drive a spawn.
+func TestRecoverPendingSpawnsOnStartup_OfflineOwnerStillTriggers(t *testing.T) {
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 5, Title: "Offline owner", Status: "pending", AssignedTo: "claude-code", UpdatedAt: time.Now().Add(-1 * time.Hour)},
+		},
+		AgentInstances: map[string]*domain.AgentInstance{
+			"claude-code-1": {
+				InstanceID: "claude-code-1", AgentType: "claude-code",
+				Role: domain.RoleWorker, Status: "offline",
+				LastHeartbeat: time.Now().Add(-30 * time.Minute),
+				CurrentTasks:  []int{5},
+			},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 1 {
+		t.Errorf("offline owner should not block recovery, expected 1 driven, got %d", got)
+	}
+}
+
+// TestRecoverPendingSpawnsOnStartup_SkipsAnyAndUnassigned — without a
+// concrete AssignedTo, recovery has no type to spawn for. The orchestrator
+// fallback (Fix A) is responsible for setting a concrete type at create
+// time; recovery never invents one.
+func TestRecoverPendingSpawnsOnStartup_SkipsAnyAndUnassigned(t *testing.T) {
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 1, Title: "Empty", Status: "pending", AssignedTo: "", UpdatedAt: time.Now()},
+			{ID: 2, Title: "Any", Status: "pending", AssignedTo: "any", UpdatedAt: time.Now()},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 0 {
+		t.Errorf("expected 0 driven for empty/any AssignedTo, got %d", got)
+	}
+}
+
+// TestRecoverPendingSpawnsOnStartup_SkipsAlreadyQueued — IsSpawnQueued
+// should suppress the recovery (e.g. Check() ran first and queued the
+// task, or a task-bound child is mid-spawn).
+func TestRecoverPendingSpawnsOnStartup_SkipsAlreadyQueued(t *testing.T) {
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 7, Title: "Queued", Status: "pending", AssignedTo: "claude-code", UpdatedAt: time.Now()},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+	wm.enqueueSpawn("claude-code", 7) // pre-queued, recovery should defer to drainQueue
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 0 {
+		t.Errorf("expected 0 driven when already queued, got %d", got)
+	}
+}
+
+// TestLogSpawnSkip_RateLimitedPerReason confirms that the spawn-skip log
+// fires once per (instanceID, reason) pair within spawnSkipLogWindow, and
+// that distinct reasons or distinct instances are NOT collapsed.
+func TestLogSpawnSkip_RateLimitedPerReason(t *testing.T) {
+	var buf strings.Builder
+	wm := &WorkerManager{
+		logger:          log.New(&buf, "", 0),
+		spawnSkipLogged: make(map[string]time.Time),
+	}
+
+	wm.logSpawnSkip("claude-code-1", "already-running")
+	wm.logSpawnSkip("claude-code-1", "already-running") // suppressed (same key, fresh)
+	wm.logSpawnSkip("claude-code-1", "in-cooldown")     // distinct reason → emits
+	wm.logSpawnSkip("claude-code-2", "already-running") // distinct instance → emits
+
+	out := buf.String()
+	count := strings.Count(out, "skipping spawn")
+	if count != 3 {
+		t.Errorf("expected 3 distinct skip lines (rate-limit collapses dup), got %d:\n%s", count, out)
+	}
+	if !strings.Contains(out, "claude-code-1 — already-running") {
+		t.Error("missing initial 'already-running' line for claude-code-1")
+	}
+	if !strings.Contains(out, "claude-code-1 — in-cooldown") {
+		t.Error("missing 'in-cooldown' line for claude-code-1 (different reason)")
+	}
+	if !strings.Contains(out, "claude-code-2 — already-running") {
+		t.Error("missing 'already-running' line for claude-code-2 (different instance)")
+	}
+}
+
+// TestLogSpawnSkip_ReemitsAfterWindow simulates the window expiring by
+// rewinding the recorded last-logged time and verifies the next call logs
+// again. We can't easily wait a full minute in a test, so we mutate the map
+// directly — the mechanism under test is the time comparison.
+func TestLogSpawnSkip_ReemitsAfterWindow(t *testing.T) {
+	var buf strings.Builder
+	wm := &WorkerManager{
+		logger:          log.New(&buf, "", 0),
+		spawnSkipLogged: make(map[string]time.Time),
+	}
+
+	wm.logSpawnSkip("claude-code-1", "in-backoff")
+	wm.mu.Lock()
+	wm.spawnSkipLogged["claude-code-1|in-backoff"] = time.Now().Add(-2 * spawnSkipLogWindow)
+	wm.mu.Unlock()
+	wm.logSpawnSkip("claude-code-1", "in-backoff") // window elapsed → re-emit
+
+	if c := strings.Count(buf.String(), "in-backoff"); c != 2 {
+		t.Errorf("expected re-emit after window expired, got %d 'in-backoff' lines:\n%s", c, buf.String())
+	}
+}
+
+// TestLogSpawnSkip_NilLoggerSafe — defensive check that the helper doesn't
+// panic when no logger has been wired. This matters for the zero-value
+// WorkerManager used in some scaffolding paths.
+func TestLogSpawnSkip_NilLoggerSafe(t *testing.T) {
+	wm := &WorkerManager{}
+	wm.logSpawnSkip("anything", "reason")
+}
+
+// TestRecoverPendingSpawnsOnStartup_OnlyPending — non-pending statuses
+// (in_progress, completed, blocked) must be ignored. Recovery is exclusively
+// for resurrecting work that hasn't started yet.
+func TestRecoverPendingSpawnsOnStartup_OnlyPending(t *testing.T) {
+	state := &domain.CollabState{
+		DriverID: "cursor",
+		Tasks: []domain.Task{
+			{ID: 1, Title: "In progress", Status: "in_progress", AssignedTo: "claude-code", UpdatedAt: time.Now()},
+			{ID: 2, Title: "Completed", Status: "completed", AssignedTo: "claude-code", UpdatedAt: time.Now()},
+			{ID: 3, Title: "Blocked", Status: "blocked", AssignedTo: "claude-code", UpdatedAt: time.Now()},
+		},
+	}
+	EnsureStateMaps(state)
+
+	wm := newRecoveryTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	})
+
+	if got := wm.recoverPendingSpawnsOnStartup(); got != 0 {
+		t.Errorf("expected 0 driven for non-pending tasks, got %d", got)
+	}
+}
+
 func TestRecordTerminalFailure_SetsAgentTypeBackoff(t *testing.T) {
 	wm := &WorkerManager{
 		configs: []WorkerSpawnConfig{
@@ -1367,6 +1671,348 @@ func TestCheckOnlySpawnsForMessages(t *testing.T) {
 
 	if spawned {
 		t.Error("Check() should not spawn workers for pending tasks — use SpawnForTask instead")
+	}
+}
+
+// captureCheckAcks builds a stateMutator that records the InstanceIDs that
+// Check() decides to spawn (by parsing the "⚡ **<id>** is coming online" ack
+// message that sendAck writes synchronously before launching the spawn goroutine).
+func captureCheckAcks(state *domain.CollabState, ackTargets *[]string) func(func(*domain.CollabState) error) error {
+	return func(fn func(*domain.CollabState) error) error {
+		before := len(state.Messages)
+		if err := fn(state); err != nil {
+			return err
+		}
+		for _, msg := range state.Messages[before:] {
+			if msg.From != "system" || !strings.Contains(msg.Content, "is coming online") {
+				continue
+			}
+			start := strings.Index(msg.Content, "**")
+			if start < 0 {
+				continue
+			}
+			rest := msg.Content[start+2:]
+			end := strings.Index(rest, "**")
+			if end <= 0 {
+				continue
+			}
+			*ackTargets = append(*ackTargets, rest[:end])
+		}
+		return nil
+	}
+}
+
+// newCheckTestWorkerManager builds a WorkerManager scaffolded for Check() tests:
+// initialised maps, in-process MCP (no URL), and a stateMutator that records ack targets.
+func newCheckTestWorkerManager(t *testing.T, state *domain.CollabState, configs []WorkerSpawnConfig, ackTargets *[]string) *WorkerManager {
+	t.Helper()
+	return &WorkerManager{
+		configs:             configs,
+		getAgent:            func() string { return "cursor" },
+		stateLoader:         func() (*domain.CollabState, error) { return state, nil },
+		stateMutator:        captureCheckAcks(state, ackTargets),
+		logger:              testLogger(t),
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		mcpRegistered:       make(map[string]bool),
+		processRuntime:      make(map[string]*workerRuntime),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+		pendingSpawns:       make(map[string][]pendingSpawn),
+	}
+}
+
+// markRunning simulates a live worker process for the given instanceID without
+// actually exec'ing anything.
+func markRunning(wm *WorkerManager, instanceID string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wm.processRuntime[instanceID] = &workerRuntime{
+		info: &ProcessInfo{InstanceID: instanceID, StartedAt: time.Now(), LastOutputAt: time.Now()},
+		tail: newTailBuffer(16384),
+	}
+}
+
+// cleanupLockfiles removes per-instance lockfiles from os.TempDir() so a previous
+// failed test run doesn't poison this one.
+func cleanupLockfiles(t *testing.T, wm *WorkerManager, instanceIDs ...string) {
+	t.Helper()
+	for _, id := range instanceIDs {
+		_ = os.Remove(wm.lockfilePath(id))
+	}
+}
+
+// TestCheck_RespawnsSiblingPoolInstance covers Fix B: when one instance of a
+// pool (claude-code-1) is running, a sibling instance (claude-code-2) must
+// still be eligible for spawn for unread messages addressed to the agent type.
+// The pre-fix call chain `isWorkerProcessRunning(c.AgentType)` prefix-matched
+// claude-code-1 and silently blocked claude-code-2.
+func TestCheck_RespawnsSiblingPoolInstance(t *testing.T) {
+	workspace := t.TempDir()
+	state := &domain.CollabState{
+		Messages: []domain.Message{
+			{ID: 1, From: "cursor", To: "claude-code", Content: "hi pool", Timestamp: time.Now()},
+		},
+		NextMsgID: 2,
+	}
+	EnsureStateMaps(state)
+	state.Presence["cursor"] = &domain.Presence{Workspace: workspace}
+
+	var acks []string
+	wm := newCheckTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+		{InstanceID: "claude-code-2", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	}, &acks)
+
+	markRunning(wm, "claude-code-1")
+	cleanupLockfiles(t, wm, "claude-code-1", "claude-code-2")
+	t.Cleanup(func() { cleanupLockfiles(t, wm, "claude-code-1", "claude-code-2") })
+
+	wm.Check()
+
+	if len(acks) != 1 {
+		t.Fatalf("expected exactly one spawn ack, got %d: %v", len(acks), acks)
+	}
+	if acks[0] != "claude-code-2" {
+		t.Errorf("expected ack for claude-code-2 (sibling instance), got %q", acks[0])
+	}
+}
+
+// TestCheck_DoesNotRespawnRunningInstance covers the basic invariant that the
+// instance-level running check still suppresses double-spawning.
+func TestCheck_DoesNotRespawnRunningInstance(t *testing.T) {
+	workspace := t.TempDir()
+	state := &domain.CollabState{
+		Messages: []domain.Message{
+			{ID: 1, From: "cursor", To: "claude-code-1", Content: "hi", Timestamp: time.Now()},
+		},
+		NextMsgID: 2,
+	}
+	EnsureStateMaps(state)
+	state.Presence["cursor"] = &domain.Presence{Workspace: workspace}
+
+	var acks []string
+	wm := newCheckTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	}, &acks)
+
+	markRunning(wm, "claude-code-1")
+	cleanupLockfiles(t, wm, "claude-code-1")
+	t.Cleanup(func() { cleanupLockfiles(t, wm, "claude-code-1") })
+
+	wm.Check()
+
+	if len(acks) != 0 {
+		t.Errorf("expected no spawn ack when target instance is already running, got %v", acks)
+	}
+}
+
+// TestMarkInstanceSpawning_FreshlySpawnedInstanceLooksAlive covers Fix C: a
+// just-spawned worker must immediately be Status="idle" with current
+// LastHeartbeat AND LastSpawnedAt, even before the worker process emits its
+// first real heartbeat. The orchestrator's isAssignable filter (which rejects
+// "offline") and the watchdog's staleness check both depend on this.
+func TestMarkInstanceSpawning_FreshlySpawnedInstanceLooksAlive(t *testing.T) {
+	state := &domain.CollabState{}
+	EnsureStateMaps(state)
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		MaxTasks:      1,
+		Status:        "offline",
+		LastHeartbeat: time.Now().Add(-2 * time.Hour),
+	}
+
+	wm := &WorkerManager{
+		logger:       testLogger(t),
+		stateMutator: func(fn func(*domain.CollabState) error) error { return fn(state) },
+	}
+
+	before := time.Now().Add(-time.Second)
+	wm.MarkInstanceSpawning("claude-code-1", "claude-code")
+
+	inst := state.AgentInstances["claude-code-1"]
+	if inst == nil {
+		t.Fatal("expected AgentInstance to exist after MarkInstanceSpawning")
+	}
+	if inst.Status != "idle" {
+		t.Errorf("expected Status=idle after spawn, got %q", inst.Status)
+	}
+	if !inst.LastHeartbeat.After(before) {
+		t.Errorf("expected LastHeartbeat to be refreshed to ~now, got %v", inst.LastHeartbeat)
+	}
+	if !inst.LastSpawnedAt.After(before) {
+		t.Errorf("expected LastSpawnedAt to be set to ~now, got %v", inst.LastSpawnedAt)
+	}
+}
+
+// TestMarkInstanceSpawning_CreatesMissingRow ensures that drift between
+// configured workers and persisted AgentInstance rows doesn't prevent spawn:
+// the row is created on the fly so the orchestrator can see and assign it.
+func TestMarkInstanceSpawning_CreatesMissingRow(t *testing.T) {
+	state := &domain.CollabState{}
+	EnsureStateMaps(state)
+
+	wm := &WorkerManager{
+		logger:       testLogger(t),
+		stateMutator: func(fn func(*domain.CollabState) error) error { return fn(state) },
+	}
+
+	wm.MarkInstanceSpawning("codex-2", "codex")
+
+	inst := state.AgentInstances["codex-2"]
+	if inst == nil {
+		t.Fatal("expected MarkInstanceSpawning to create missing row")
+	}
+	if inst.AgentType != "codex" {
+		t.Errorf("expected AgentType=codex, got %q", inst.AgentType)
+	}
+	if inst.Role != domain.RoleWorker {
+		t.Errorf("expected Role=worker, got %q", inst.Role)
+	}
+	if inst.Status != "idle" {
+		t.Errorf("expected Status=idle, got %q", inst.Status)
+	}
+	if inst.LastSpawnedAt.IsZero() {
+		t.Error("expected LastSpawnedAt to be set on freshly-created row")
+	}
+}
+
+// TestMarkInstanceSpawning_DoesNotDowngradeBusyStatus protects against
+// clobbering a busy worker's Status during a respawn (e.g., when a worker
+// crashes and is restarted while still owning a task in CurrentTasks).
+func TestMarkInstanceSpawning_DoesNotDowngradeBusyStatus(t *testing.T) {
+	state := &domain.CollabState{}
+	EnsureStateMaps(state)
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:   "claude-code-1",
+		AgentType:    "claude-code",
+		Role:         domain.RoleWorker,
+		MaxTasks:     1,
+		Status:       "busy",
+		CurrentTasks: []int{42},
+	}
+
+	wm := &WorkerManager{
+		logger:       testLogger(t),
+		stateMutator: func(fn func(*domain.CollabState) error) error { return fn(state) },
+	}
+
+	wm.MarkInstanceSpawning("claude-code-1", "claude-code")
+
+	inst := state.AgentInstances["claude-code-1"]
+	if inst.Status != "busy" {
+		t.Errorf("expected Status to remain busy during respawn, got %q", inst.Status)
+	}
+	if len(inst.CurrentTasks) != 1 || inst.CurrentTasks[0] != 42 {
+		t.Errorf("expected CurrentTasks preserved, got %v", inst.CurrentTasks)
+	}
+	if inst.LastSpawnedAt.IsZero() {
+		t.Error("expected LastSpawnedAt to be set even for busy worker")
+	}
+}
+
+// TestMarkInstanceSpawning_NilStateMutator is a robustness check: scenarios
+// without persistence (some tests, dry-run paths) must not panic.
+func TestMarkInstanceSpawning_NilStateMutator(t *testing.T) {
+	wm := &WorkerManager{logger: testLogger(t)}
+	wm.MarkInstanceSpawning("anything", "anything")
+}
+
+// TestCheck_BumpsAgentInstanceOnSpawn is the integration-style test for Fix C:
+// when Check() decides to spawn, the AgentInstance row is updated so the
+// orchestrator and watchdog see the new state immediately.
+func TestCheck_BumpsAgentInstanceOnSpawn(t *testing.T) {
+	workspace := t.TempDir()
+	state := &domain.CollabState{
+		Messages: []domain.Message{
+			{ID: 1, From: "cursor", To: "claude-code-1", Content: "hi", Timestamp: time.Now()},
+		},
+		NextMsgID: 2,
+	}
+	EnsureStateMaps(state)
+	state.Presence["cursor"] = &domain.Presence{Workspace: workspace}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-1",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		MaxTasks:      1,
+		Status:        "offline",
+		LastHeartbeat: time.Now().Add(-2 * time.Hour),
+	}
+
+	mutator := func(fn func(*domain.CollabState) error) error { return fn(state) }
+	wm := &WorkerManager{
+		configs: []WorkerSpawnConfig{
+			{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+		},
+		getAgent:            func() string { return "cursor" },
+		stateLoader:         func() (*domain.CollabState, error) { return state, nil },
+		stateMutator:        mutator,
+		logger:              testLogger(t),
+		lastSpawn:           make(map[string]time.Time),
+		runningWorkers:      make(map[string]context.CancelFunc),
+		mcpRegistered:       make(map[string]bool),
+		processRuntime:      make(map[string]*workerRuntime),
+		consecutiveFailures: make(map[string]int),
+		lastFailure:         make(map[string]time.Time),
+		backoffUntil:        make(map[string]time.Time),
+		pendingSpawns:       make(map[string][]pendingSpawn),
+	}
+	cleanupLockfiles(t, wm, "claude-code-1")
+	t.Cleanup(func() { cleanupLockfiles(t, wm, "claude-code-1") })
+
+	before := time.Now().Add(-time.Second)
+	wm.Check()
+
+	inst := state.AgentInstances["claude-code-1"]
+	if inst == nil {
+		t.Fatal("expected AgentInstance for claude-code-1")
+	}
+	if inst.Status != "idle" {
+		t.Errorf("expected Status=idle after Check() spawn, got %q", inst.Status)
+	}
+	if !inst.LastSpawnedAt.After(before) {
+		t.Errorf("expected LastSpawnedAt bumped by Check(), got %v", inst.LastSpawnedAt)
+	}
+}
+
+// TestCheck_TaskBoundChildDoesNotBlockPool covers the regression that Fix B
+// repairs end-to-end: even if a task-bound child like claude-code-task-5 is
+// running, the regular pool instances must still be spawnable. The pre-fix
+// `isWorkerProcessRunning("claude-code")` prefix-matched the task-bound child
+// and blocked all pool spawns.
+func TestCheck_TaskBoundChildDoesNotBlockPool(t *testing.T) {
+	workspace := t.TempDir()
+	state := &domain.CollabState{
+		Messages: []domain.Message{
+			{ID: 1, From: "cursor", To: "claude-code", Content: "hi pool", Timestamp: time.Now()},
+		},
+		NextMsgID: 2,
+	}
+	EnsureStateMaps(state)
+	state.Presence["cursor"] = &domain.Presence{Workspace: workspace}
+
+	var acks []string
+	wm := newCheckTestWorkerManager(t, state, []WorkerSpawnConfig{
+		{InstanceID: "claude-code-1", AgentType: "claude-code", Command: []string{"echo", "test"}},
+		{InstanceID: "claude-code-2", AgentType: "claude-code", Command: []string{"echo", "test"}},
+	}, &acks)
+
+	markRunning(wm, "claude-code-task-5")
+	cleanupLockfiles(t, wm, "claude-code-1", "claude-code-2")
+	t.Cleanup(func() { cleanupLockfiles(t, wm, "claude-code-1", "claude-code-2") })
+
+	wm.Check()
+
+	if len(acks) != 2 {
+		t.Fatalf("expected acks for both pool instances, got %d: %v", len(acks), acks)
+	}
+	gotIDs := map[string]bool{acks[0]: true, acks[1]: true}
+	if !gotIDs["claude-code-1"] || !gotIDs["claude-code-2"] {
+		t.Errorf("expected acks for claude-code-1 AND claude-code-2, got %v", acks)
 	}
 }
 

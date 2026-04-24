@@ -111,7 +111,18 @@ type WorkerManager struct {
 	// daemon sets this explicitly so workers hit THIS daemon, not whichever
 	// one happens to own the default path on the machine.
 	socketPath string
+	// spawnSkipLogged rate-limits the per-instance "skipped spawn for X
+	// reason" log lines emitted by Check(). Without this, a noisy worker
+	// (running, in cooldown, in backoff) floods the log every Check() tick.
+	// Key: "<instanceID>|<reason>". Value: last-logged time.
+	spawnSkipLogged map[string]time.Time
 }
+
+// spawnSkipLogWindow is the minimum interval between two log lines for the
+// same (instanceID, reason) pair emitted via logSpawnSkip. Tuned so a busy
+// pool with persistent skip conditions logs at most one line per minute per
+// pair — enough to know "this is still happening" without drowning the log.
+const spawnSkipLogWindow = 1 * time.Minute
 
 // ProcessInfo holds runtime process metadata for a worker instance.
 type ProcessInfo struct {
@@ -202,6 +213,7 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		backoffUntil:        make(map[string]time.Time),
 		pendingSpawns:       make(map[string][]pendingSpawn),
 		lastSessionID:       make(map[string]string),
+		spawnSkipLogged:     make(map[string]time.Time),
 	}
 }
 
@@ -706,7 +718,95 @@ func (m *WorkerManager) StartupCheck() {
 		}
 		m.logger.Printf("WorkerManager: startup recovery check (MCP ready)")
 		m.Check()
+		// Fix D.1: also re-drive workers for any pending tasks that were
+		// already in the database when the daemon started. The watchdog's
+		// driveSpawns sweep would catch these eventually, but on a fresh
+		// start the user-visible delay matters — we want orphan tasks to
+		// pick up immediately, not after a full watchdog interval.
+		recovered := m.recoverPendingSpawnsOnStartup()
+		if recovered > 0 {
+			m.logger.Printf("WorkerManager: startup recovery spawned workers for %d orphan pending task(s)", recovered)
+		}
 	}()
+}
+
+// recoverPendingSpawnsOnStartup walks the persisted task list and drives
+// SpawnForTask for any pending task that has a concrete AssignedTo, isn't
+// already queued/running, and has no live owning instance. Returns the
+// number of spawns initiated.
+//
+// Mirror of Watchdog.driveSpawns() (Fix D.2) without the spawnSweepGrace
+// gate — at startup, every persisted pending task is by definition older
+// than the daemon's uptime, so every candidate has already missed its
+// immediate-path window. Used both by StartupCheck and as a unit-testable
+// helper.
+func (m *WorkerManager) recoverPendingSpawnsOnStartup() int {
+	if m.stateLoader == nil {
+		return 0
+	}
+	state, err := m.stateLoader()
+	if err != nil {
+		m.logger.Printf("WorkerManager: startup recovery — state load error: %v", err)
+		return 0
+	}
+	if state == nil {
+		return 0
+	}
+	driven := 0
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		if t.Status != "pending" {
+			continue
+		}
+		if t.AssignedTo == "" || t.AssignedTo == "any" {
+			continue
+		}
+		// Skip if a real worker already owns the task and is alive enough
+		// to have a non-zero LastHeartbeat — at boot, "alive" is a soft
+		// signal (no watchdog has run yet), so we use heartbeat presence
+		// as the proxy. The watchdog's per-cycle driveSpawns will tighten
+		// this once it starts.
+		owner := findOwnerInstanceForTask(state, t)
+		if owner != nil && !owner.LastHeartbeat.IsZero() && owner.Status != "offline" {
+			continue
+		}
+		if m.IsSpawnQueued(t.ID) {
+			continue
+		}
+		m.logger.Printf("WorkerManager: startup recovery — driving spawn for orphan task #%d (assigned_to=%s)", t.ID, t.AssignedTo)
+		m.SpawnForTask(t.ID, t.AssignedTo)
+		driven++
+	}
+	return driven
+}
+
+// logSpawnSkip emits a single log line explaining why a spawn was skipped,
+// rate-limited per (instanceID, reason) pair to spawnSkipLogWindow. Without
+// this, persistent skip conditions (worker already running, in cooldown,
+// in backoff) flood the log every Check() tick — which on default settings
+// is multiple times a minute. With it, operators see one line per minute
+// per situation, enough to diagnose without drowning.
+//
+// Safe to call with nil receiver-state (no-op when spawnSkipLogged map
+// hasn't been initialised yet, e.g. in zero-value test scaffolds).
+func (m *WorkerManager) logSpawnSkip(instanceID, reason string) {
+	if m.logger == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.spawnSkipLogged == nil {
+		m.spawnSkipLogged = make(map[string]time.Time)
+	}
+	key := instanceID + "|" + reason
+	last := m.spawnSkipLogged[key]
+	now := time.Now()
+	if !last.IsZero() && now.Sub(last) < spawnSkipLogWindow {
+		m.mu.Unlock()
+		return
+	}
+	m.spawnSkipLogged[key] = now
+	m.mu.Unlock()
+	m.logger.Printf("WorkerManager: skipping spawn of %s — %s", instanceID, reason)
 }
 
 // Check examines state and spawns workers for instances that have unread messages.
@@ -769,15 +869,24 @@ func (m *WorkerManager) Check() {
 			continue
 		}
 		if m.sessionChecker != nil && (m.sessionChecker(c.InstanceID) || m.sessionChecker(c.AgentType)) {
+			m.logSpawnSkip(c.InstanceID, "active-session")
 			continue
 		}
-		if m.isWorkerProcessRunning(c.InstanceID) || m.isWorkerProcessRunning(c.AgentType) {
+		// Narrow to InstanceID only. A by-AgentType check here would prefix-match
+		// sibling pool instances (e.g. claude-code-1) and silently block spawning
+		// of another instance in the same pool (e.g. claude-code-2) — leaving
+		// unread messages stranded. Per-instance is the correct granularity:
+		// instanceLimitForType() and the cooldown gate handle pool capacity.
+		if m.isWorkerProcessRunning(c.InstanceID) {
+			m.logSpawnSkip(c.InstanceID, "already-running")
 			continue
 		}
 		if len(c.Command) == 0 {
+			m.logSpawnSkip(c.InstanceID, "no-command-configured")
 			continue
 		}
 		if !m.cooldownElapsed(c.InstanceID, c.Cooldown) {
+			m.logSpawnSkip(c.InstanceID, "in-cooldown")
 			continue
 		}
 		blocked, remaining := m.failureBackoffBlocked(c.InstanceID)
@@ -821,6 +930,7 @@ func (m *WorkerManager) Check() {
 		}
 
 		m.logger.Printf("WorkerManager: spawning %s (%d unread message(s), workspace=%s)", c.InstanceID, unread, spawnDir)
+		m.MarkInstanceSpawning(c.InstanceID, c.AgentType)
 		m.sendAck(c.InstanceID, connected, unread, 0)
 		go m.spawn(c, spawnDir)
 	}
@@ -965,6 +1075,66 @@ func (m *WorkerManager) isWorkerProcessRunning(instanceID string) bool {
 	return false
 }
 
+// MarkInstanceSpawning bumps the AgentInstance row for instanceID at the
+// moment WorkerManager initiates a spawn — BEFORE the worker process actually
+// starts and BEFORE the worker reports its first heartbeat. This:
+//
+//  1. Flips Status from "offline" → "idle" so the orchestrator's assignment
+//     filter (isAssignable) considers it again. Without this, a freshly
+//     spawned worker is invisible to AssignTask until its first heartbeat.
+//
+//  2. Refreshes LastHeartbeat to "now" so the watchdog's staleness check
+//     doesn't mark the brand-new instance offline during the spawn lag.
+//
+//  3. Sets LastSpawnedAt = now so the watchdog can apply respawn_grace
+//     before re-evaluating staleness (the worker process may need a few
+//     seconds to register and emit its first heartbeat).
+//
+// The row is created if it doesn't exist (handles configs that drift in/out
+// between server restarts). InstanceID is used as the map key; agentType
+// populates AgentType when creating the row.
+//
+// No-op when stateMutator is nil (test scenarios that bypass persistence).
+func (m *WorkerManager) MarkInstanceSpawning(instanceID, agentType string) {
+	if m.stateMutator == nil || instanceID == "" {
+		return
+	}
+	now := time.Now()
+	_ = m.stateMutator(func(s *domain.CollabState) error {
+		if s == nil {
+			return nil
+		}
+		if s.AgentInstances == nil {
+			s.AgentInstances = make(map[string]*domain.AgentInstance)
+		}
+		inst, ok := s.AgentInstances[instanceID]
+		if !ok || inst == nil {
+			typ := agentType
+			if typ == "" {
+				typ = instanceID
+			}
+			inst = &domain.AgentInstance{
+				InstanceID:   instanceID,
+				AgentType:    typ,
+				Role:         domain.RoleWorker,
+				MaxTasks:     1,
+				CurrentTasks: []int{},
+			}
+			s.AgentInstances[instanceID] = inst
+		}
+		// Don't downgrade busy → idle: a worker mid-task that we're respawning
+		// (e.g. crash recovery) should keep its task assignment so the row's
+		// CurrentTasks stays accurate. The watchdog or task-completion path
+		// owns busy → idle transitions.
+		if inst.Status != "busy" {
+			inst.Status = "idle"
+		}
+		inst.LastHeartbeat = now
+		inst.LastSpawnedAt = now
+		return nil
+	})
+}
+
 func (m *WorkerManager) cooldownElapsed(instanceID string, cooldown time.Duration) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1072,6 +1242,33 @@ func (m *WorkerManager) BackedOffAgentTypes() []string {
 		}
 	}
 	return result
+}
+
+// KnownAgentTypes returns the configured worker types in declaration order
+// (deduplicated). Implements app.KnownTypesProvider so the orchestrator can
+// fall back to a configured type when no live AgentInstance matches a new
+// task — see TaskOrchestrator.AssignTask for the empty-live-pool fallback.
+//
+// Read-only: configs are set once at construction in NewWorkerManager and
+// never mutated thereafter, so we don't need the mutex here, but we hold it
+// anyway for symmetry with sibling readers (BackedOffAgentTypes etc.) and to
+// be defensive if future refactors introduce mutation.
+func (m *WorkerManager) KnownAgentTypes() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.configs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(m.configs))
+	out := make([]string, 0, len(m.configs))
+	for _, c := range m.configs {
+		if c.AgentType == "" || seen[c.AgentType] {
+			continue
+		}
+		seen[c.AgentType] = true
+		out = append(out, c.AgentType)
+	}
+	return out
 }
 
 // BackoffInfoForType returns the backoff status for a specific agent type:
@@ -2343,6 +2540,7 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 	}
 
 	m.logger.Printf("WorkerManager: spawning %s for task #%d (workspace=%s)", instanceID, taskID, spawnDir)
+	m.MarkInstanceSpawning(instanceID, baseCfg.AgentType)
 	connected := m.getAgent()
 	m.sendTaskSpawnAck(instanceID, connected, taskID, task.Title)
 	go func() {
@@ -2576,6 +2774,47 @@ func (m *WorkerManager) PendingSpawnCount(agentType string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.pendingSpawns[agentType])
+}
+
+// IsSpawnQueued reports whether a spawn is already in flight or queued for the
+// given task ID. Implements app.SpawnDriver so the watchdog's driveSpawns()
+// sweep can avoid double-spawning tasks the immediate create_task →
+// SpawnForTask path is already handling.
+//
+// Two sources count as "queued":
+//
+//  1. pendingSpawns: a task already enqueued waiting for a slot (capacity or
+//     backoff). drainQueue will pick it up.
+//  2. processRuntime: a task-bound child instance "<type>-task-<ID>" is
+//     currently running. The convention is enforced by spawnTaskWorker (see
+//     instanceID := fmt.Sprintf("%s-task-%d", ...)), so a substring suffix
+//     check is the right granularity here.
+//
+// Note: regular pool workers (e.g. "claude-code-1") that own the task via
+// CurrentTasks but were not spawned via SpawnForTask are NOT considered
+// "queued" — that's an ownership signal, not a spawn signal. The watchdog
+// queries ownership separately (via findOwnerInstanceForTask) before
+// consulting IsSpawnQueued.
+func (m *WorkerManager) IsSpawnQueued(taskID int) bool {
+	if taskID <= 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, queue := range m.pendingSpawns {
+		for _, ps := range queue {
+			if ps.TaskID == taskID {
+				return true
+			}
+		}
+	}
+	suffix := fmt.Sprintf("-task-%d", taskID)
+	for instID := range m.processRuntime {
+		if strings.HasSuffix(instID, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *WorkerManager) sendTaskSpawnAck(instanceID, recipient string, taskID int, title string) {

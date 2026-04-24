@@ -76,6 +76,8 @@ func (m *mockPolicy) AuditRetentionDays() int              { return 7 }
 func (m *mockPolicy) PresenceRetentionDays() int           { return 7 }
 func (m *mockPolicy) InstanceRetentionDays() int           { return 7 }
 func (m *mockPolicy) TaskBoundInstanceRetentionHours() int { return 24 }
+func (m *mockPolicy) RespawnGrace() time.Duration          { return 60 * time.Second }
+func (m *mockPolicy) SpawnSweepGrace() time.Duration       { return 30 * time.Second }
 func (m *mockPolicy) Orchestration() *policy.OrchestrationConfig {
 	return &policy.OrchestrationConfig{
 		Driver: "cursor",

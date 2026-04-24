@@ -120,6 +120,15 @@ orchestration:
   heartbeat_interval_seconds: 30
   worker_timeout_seconds: 120
   max_task_failures: 3                 # DLQ: auto-block task after N watchdog failures (default: 3)
+  # respawn_grace_seconds: 60          # how long after a spawn the watchdog leaves the row alone
+  #                                      so a freshly-spawned worker isn't flipped back to offline
+  #                                      before its first heartbeat lands. Lower = faster failure
+  #                                      detection; higher = more tolerant of slow worker startup.
+  # spawn_sweep_grace_seconds: 30      # how old a pending task must be before the watchdog re-drives
+  #                                      assignment for it. The normal create_task → SpawnForTask path
+  #                                      handles the happy case; the sweep is the safety net for tasks
+  #                                      created when no live worker was available (post-crash, empty
+  #                                      pool). Set to 0 (or any negative) to disable the sweep.
   # Git worktree isolation (optional): each worker gets its own checkout.
   # worktrees:
   #   enabled: true

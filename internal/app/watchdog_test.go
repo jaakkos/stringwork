@@ -2500,6 +2500,95 @@ func TestWatchdog_RestartDoesNotMarkAliveAgentDead(t *testing.T) {
 	})
 }
 
+// TestWatchdog_RespectsRespawnGrace covers Fix C-grace: when an instance was
+// just spawned (LastSpawnedAt within respawnGrace) but has not yet emitted
+// its first heartbeat, the watchdog must NOT mark it offline. Without this,
+// the orchestrator/watchdog interaction can ping-pong: spawn → mark offline
+// → kill task assignment → spawn again, and so on.
+func TestWatchdog_RespectsRespawnGrace(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleHB := now.Add(-30 * time.Minute)
+	freshSpawn := now.Add(-10 * time.Second)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status:        "idle",
+		LastHeartbeat: staleHB,    // pre-respawn heartbeat is stale
+		LastSpawnedAt: freshSpawn, // ...but we just respawned this instance
+	}
+	state.DriverID = "cursor"
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(5*time.Minute),
+		WithRespawnGrace(60*time.Second),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["claude-code-1"]
+		if inst == nil {
+			t.Fatal("freshly-spawned instance unexpectedly removed")
+		}
+		if inst.Status == "offline" {
+			t.Errorf("watchdog flipped freshly-spawned instance to offline despite LastSpawnedAt %s ago (within %s grace)",
+				now.Sub(freshSpawn).Round(time.Second), 60*time.Second)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_RespawnGraceExpires verifies the inverse: once the grace
+// window has elapsed and the heartbeat is still stale, the instance IS
+// flipped to offline. We are gating the watchdog, not disabling it.
+func TestWatchdog_RespawnGraceExpires(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleHB := now.Add(-30 * time.Minute)
+	oldSpawn := now.Add(-10 * time.Minute) // far past any reasonable grace
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status:        "idle",
+		LastHeartbeat: staleHB,
+		LastSpawnedAt: oldSpawn,
+	}
+	state.DriverID = "cursor"
+
+	svc := testService(state)
+	registry := NewSessionRegistry()
+	logger := log.New(os.Stderr, "[test] ", 0)
+
+	wd := NewWatchdog(svc, registry, logger,
+		WithHeartbeatThreshold(5*time.Minute),
+		WithRespawnGrace(60*time.Second),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		inst := s.AgentInstances["claude-code-1"]
+		if inst == nil {
+			t.Fatal("instance unexpectedly removed")
+		}
+		if inst.Status != "offline" {
+			t.Errorf("expected offline once grace window expired and heartbeat is stale, got %q", inst.Status)
+		}
+		return nil
+	})
+}
+
 // mockTriggerable records Trigger calls.
 type mockTriggerable struct {
 	fn func()
@@ -2508,5 +2597,264 @@ type mockTriggerable struct {
 func (m *mockTriggerable) Trigger() {
 	if m.fn != nil {
 		m.fn()
+	}
+}
+
+// fakeSpawnDriver is a SpawnDriver double for Fix D.2 tests. It records every
+// SpawnForTask call (so tests can assert which tasks were re-driven) and lets
+// each test stub IsSpawnQueued without setting up a full WorkerManager.
+type fakeSpawnDriver struct {
+	queued  map[int]bool
+	spawned []int
+}
+
+func (f *fakeSpawnDriver) SpawnForTask(taskID int, _ string) {
+	f.spawned = append(f.spawned, taskID)
+}
+
+func (f *fakeSpawnDriver) IsSpawnQueued(taskID int) bool { return f.queued[taskID] }
+
+// newFakeSpawnDriver returns a driver that pre-marks the given task IDs as
+// already-queued (so the watchdog will skip them).
+func newFakeSpawnDriver(alreadyQueued ...int) *fakeSpawnDriver {
+	q := make(map[int]bool, len(alreadyQueued))
+	for _, id := range alreadyQueued {
+		q[id] = true
+	}
+	return &fakeSpawnDriver{queued: q}
+}
+
+// TestWatchdog_DriveSpawnsRevivesOrphanPendingTask covers Fix D.2: a pending
+// task with a configured AssignedTo, no live owner, and no active spawn must
+// trigger a SpawnForTask call from the watchdog. This is the scenario where
+// the user explicitly hit a stuck queue (legacy task or the daemon crashed
+// between create_task and SpawnForTask).
+func TestWatchdog_DriveSpawnsRevivesOrphanPendingTask(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleEnough := now.Add(-2 * time.Minute) // older than the 30s sweep grace
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         42,
+		Title:      "Orphan",
+		Status:     "pending",
+		AssignedTo: "claude-code",
+		UpdatedAt:  staleEnough,
+	})
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 1 || driver.spawned[0] != 42 {
+		t.Fatalf("expected spawn for task #42, got %v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DriveSpawnsRespectsSweepGrace ensures freshly-created tasks
+// (younger than spawnSweepGrace) are NOT re-driven — that would race with
+// the in-flight create_task → SpawnForTask path and could double-spawn.
+func TestWatchdog_DriveSpawnsRespectsSweepGrace(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         7,
+		Title:      "Just-created",
+		Status:     "pending",
+		AssignedTo: "claude-code",
+		UpdatedAt:  now.Add(-5 * time.Second), // way newer than sweep grace
+	})
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 0 {
+		t.Errorf("watchdog must not re-drive young tasks (would race the immediate path), spawned=%v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DriveSpawnsSkipsAlreadyQueued — IsSpawnQueued says the worker
+// manager already has this task in its pendingSpawns or running queue, so
+// the watchdog stays out of the way.
+func TestWatchdog_DriveSpawnsSkipsAlreadyQueued(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleEnough := now.Add(-2 * time.Minute)
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         13,
+		Title:      "Already queued",
+		Status:     "pending",
+		AssignedTo: "claude-code",
+		UpdatedAt:  staleEnough,
+	})
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver(13) // pre-mark as queued
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 0 {
+		t.Errorf("watchdog must not double-spawn when IsSpawnQueued reports queued, spawned=%v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DriveSpawnsSkipsLiveOwner — when an idle pool worker already
+// owns the task via CurrentTasks AND is alive, no spawn is needed.
+func TestWatchdog_DriveSpawnsSkipsLiveOwner(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleEnough := now.Add(-2 * time.Minute)
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", LastHeartbeat: now, CurrentTasks: []int{99},
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID:         99,
+		Title:      "Owned + alive",
+		Status:     "pending", // still pending in state, but a live owner has it
+		AssignedTo: "claude-code",
+		UpdatedAt:  staleEnough,
+	})
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 0 {
+		t.Errorf("watchdog must not spawn when a live owner already has the task, spawned=%v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DriveSpawnsSkipsAnyAndUnassigned — Fix A's fallback should set
+// task.AssignedTo to a concrete type. If it didn't (no provider wired, or
+// the task is older than Fix A), the watchdog has no concrete type to drive
+// and must not invent one. Same for "any".
+func TestWatchdog_DriveSpawnsSkipsAnyAndUnassigned(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleEnough := now.Add(-2 * time.Minute)
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks,
+		domain.Task{ID: 1, Title: "Empty assignee", Status: "pending", AssignedTo: "", UpdatedAt: staleEnough},
+		domain.Task{ID: 2, Title: "Any assignee", Status: "pending", AssignedTo: "any", UpdatedAt: staleEnough},
+	)
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 0 {
+		t.Errorf("watchdog must skip empty/any AssignedTo (Fix A's job), spawned=%v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DriveSpawnsDisabled confirms the safety-net is opt-in. With
+// no SpawnDriver wired, the watchdog must not crash and must not log spawn
+// activity — preserves the legacy behavior for callers that haven't
+// adopted Fix D.2.
+func TestWatchdog_DriveSpawnsDisabled(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Orphan", Status: "pending", AssignedTo: "claude-code",
+		UpdatedAt: now.Add(-2 * time.Minute),
+	})
+
+	svc := testService(state)
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnSweepGrace(30*time.Second), // grace is set, but no driver wired
+	)
+
+	// No panic and no error is the success criteria; driveSpawns short-circuits.
+	wd.CheckOnce()
+}
+
+// TestWatchdog_DriveSpawnsDisabledByZeroGrace — even with a SpawnDriver,
+// setting spawnSweepGrace<=0 disables the sweep entirely. Lets operators
+// turn the safety net off in production while keeping the wiring intact.
+func TestWatchdog_DriveSpawnsDisabledByZeroGrace(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Orphan", Status: "pending", AssignedTo: "claude-code",
+		UpdatedAt: now.Add(-2 * time.Minute),
+	})
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(0), // explicit disable
+	)
+
+	wd.CheckOnce()
+
+	if len(driver.spawned) != 0 {
+		t.Errorf("zero spawnSweepGrace must disable driveSpawns, spawned=%v", driver.spawned)
 	}
 }

@@ -55,6 +55,8 @@ func (p *mockPolicy) AuditRetentionDays() int                    { return 7 }
 func (p *mockPolicy) PresenceRetentionDays() int                 { return 7 }
 func (p *mockPolicy) InstanceRetentionDays() int                 { return 7 }
 func (p *mockPolicy) TaskBoundInstanceRetentionHours() int       { return 24 }
+func (p *mockPolicy) RespawnGrace() time.Duration                { return 60 * time.Second }
+func (p *mockPolicy) SpawnSweepGrace() time.Duration             { return 30 * time.Second }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}
