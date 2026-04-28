@@ -217,9 +217,27 @@ type CollabState struct {
 	// workers actively delivering output aren't auto-cancelled mid-message.
 	// Ephemeral — not persisted to SQLite; rebuilt as send_message fires.
 	LastSendByAgent map[string]time.Time `json:"-"`
+
+	// DaemonStartedAt is the moment the current mcp-server process booted.
+	// It is the driver-side fallback for the STOP-banner spawn cutoff so
+	// agents without a per-instance LastSpawnedAt (notably the cursor
+	// driver, which has no AgentInstance row) do not see STOP banners
+	// triggered by tasks cancelled before the daemon started. Ephemeral
+	// per-process state — not persisted to SQLite. A fresh daemon means
+	// a fresh cutoff, by design.
+	DaemonStartedAt time.Time `json:"-"`
 }
 
 // NewCollabState returns an empty CollabState with maps and IDs initialized.
+//
+// DaemonStartedAt is seeded to time.Now() so the driver-side STOP-banner
+// spawn cutoff (piggyback.BuildBanner) has a non-zero reference even for
+// CollabStates constructed outside main.go's boot path — unit tests,
+// future entrypoints, or any helper that allocates fresh state without
+// going through Service.Run-then-set. main.go overwrites the field
+// inside its boot Run callback (no behavioural change there); this
+// constructor anchor exists so the per-process invariant is enforced
+// structurally instead of being a documentation-only convention.
 func NewCollabState() *CollabState {
 	return &CollabState{
 		Messages:         []Message{},
@@ -236,5 +254,6 @@ func NewCollabState() *CollabState {
 		NextMsgID:        1,
 		NextTaskID:       1,
 		NextNoteID:       1,
+		DaemonStartedAt:  time.Now(),
 	}
 }

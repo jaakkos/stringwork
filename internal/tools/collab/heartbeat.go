@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -49,36 +50,9 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			}
 
 			err := svc.Run(func(state *domain.CollabState) error {
-				inst, ok := state.AgentInstances[agent]
-				if !ok {
-					var match *domain.AgentInstance
-					matchCount := 0
-					for _, i := range state.AgentInstances {
-						if i != nil && i.AgentType == agent {
-							match = i
-							matchCount++
-						}
-					}
-					if matchCount == 1 {
-						inst = match
-					} else if matchCount > 1 {
-						return fmt.Errorf("ambiguous agent %q: %d instances exist — use the specific instance ID (e.g. %q)", agent, matchCount, agent+"-1")
-					}
-				}
-				if inst == nil {
-					parentType := app.ResolveParentAgentType(state, agent)
-					_, hasRegistered := state.RegisteredAgents[parentType]
-					_, hasExactRegistered := state.RegisteredAgents[agent]
-					if hasRegistered || hasExactRegistered {
-						inst = &domain.AgentInstance{
-							InstanceID:   agent,
-							AgentType:    parentType,
-							Role:         domain.RoleWorker,
-							Status:       "idle",
-							CurrentTasks: []int{},
-						}
-						state.AgentInstances[agent] = inst
-					}
+				inst, err := resolveOrMaterializeAgentInstance(state, agent)
+				if err != nil {
+					return err
 				}
 				if inst == nil {
 					return fmt.Errorf("unknown agent %q", agent)
@@ -118,4 +92,83 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			return mcp.NewToolResultText("OK"), nil
 		},
 	)
+}
+
+// resolveOrMaterializeAgentInstance looks up an AgentInstance for the
+// given identifier and, when the identifier names a registered worker
+// type that has not yet bootstrapped its row, materialises one with a
+// fresh LastSpawnedAt.
+//
+// Lookup precedence:
+//
+//  1. Exact instance-ID match in state.AgentInstances.
+//  2. Exactly one instance whose AgentType equals the identifier
+//     (driver/single-instance worker convention). More than one match
+//     is ambiguous and the caller is told which concrete instance IDs
+//     to pick from.
+//  3. Lazy bootstrap: when the identifier resolves to a known parent
+//     type via RegisteredAgents, allocate a new AgentInstance with
+//     LastSpawnedAt = now so the STOP-banner spawn cutoff in
+//     piggyback.BuildBanner has a non-zero reference for CLI /
+//     manually-bootstrapped agents that never went through
+//     MarkInstanceSpawning. Without this, every cancelled task counts
+//     as a reason to STOP — the kill-respawn loop diagnosed in
+//     claude-code-task-32.
+//
+// Returns (nil, nil) when no match exists and no bootstrap fits;
+// callers translate that into a "unknown agent" error so phantom
+// instance IDs cannot silently leak into AgentInstances.
+func resolveOrMaterializeAgentInstance(state *domain.CollabState, agent string) (*domain.AgentInstance, error) {
+	if inst, ok := state.AgentInstances[agent]; ok {
+		return inst, nil
+	}
+	var match *domain.AgentInstance
+	var candidates []string
+	for id, i := range state.AgentInstances {
+		if i == nil || i.AgentType != agent {
+			continue
+		}
+		// Skip task-bound siblings — they are ephemeral and never
+		// the right reuse target for a parent-type heartbeat.
+		if _, taskBound := app.StripTaskBoundSuffix(id); taskBound {
+			continue
+		}
+		match = i
+		candidates = append(candidates, id)
+	}
+	if len(candidates) == 1 {
+		return match, nil
+	}
+	if len(candidates) > 1 {
+		// Show the actual instance IDs the caller can pick from
+		// instead of guessing "<agent>-1", which may not exist
+		// when instances are named differently (e.g. UUID
+		// suffixes from a custom spawner).
+		sort.Strings(candidates)
+		preview := candidates
+		if len(preview) > 4 {
+			preview = preview[:4]
+		}
+		return nil, fmt.Errorf(
+			"ambiguous agent %q: %d instances exist — use one of %v",
+			agent, len(candidates), preview,
+		)
+	}
+
+	parentType := app.ResolveParentAgentType(state, agent)
+	_, hasRegistered := state.RegisteredAgents[parentType]
+	_, hasExactRegistered := state.RegisteredAgents[agent]
+	if !hasRegistered && !hasExactRegistered {
+		return nil, nil
+	}
+	inst := &domain.AgentInstance{
+		InstanceID:    agent,
+		AgentType:     parentType,
+		Role:          domain.RoleWorker,
+		Status:        "idle",
+		CurrentTasks:  []int{},
+		LastSpawnedAt: time.Now(),
+	}
+	state.AgentInstances[agent] = inst
+	return inst, nil
 }

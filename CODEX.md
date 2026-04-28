@@ -6,6 +6,8 @@ This project includes an MCP pair-programming server. When working on tasks, fol
 > - [SETUP_GUIDE.md](docs/SETUP_GUIDE.md) - Complete setup instructions
 > - [WORKFLOW.md](docs/WORKFLOW.md) - Detailed collaboration patterns
 > - [QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md) - Command examples
+> - [CONSTITUTION.md](docs/CONSTITUTION.md) - Persistent team rules prepended to every spawn prompt
+> - [TEAM_RULES.md](docs/TEAM_RULES.md) - Shipping team-wide rules from a shared devtools repo
 
 ## Identity
 
@@ -19,6 +21,16 @@ Three agents collaborate in this system:
 - **`codex`** (you) — OpenAI Codex CLI agent
 
 All agents share the same state via `~/.config/stringwork/state.sqlite`.
+
+## Constitution
+
+Every spawn prompt may be prepended with a layered "constitution" — a
+set of markdown files that capture team rules. The preamble in
+`claim_next` and `get_work_context` lists which files were resolved for
+your current task; treat them as authoritative and read them before
+acting. See [docs/CONSTITUTION.md](docs/CONSTITUTION.md) for the file
+format and [docs/TEAM_RULES.md](docs/TEAM_RULES.md) for how teams ship
+shared rules.
 
 ## Before Starting Any Task
 

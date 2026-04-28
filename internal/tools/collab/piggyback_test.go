@@ -192,6 +192,156 @@ func TestBuildBanner_CancelledTasksInjectStop(t *testing.T) {
 	}
 }
 
+// TestBuildBanner_CancelledBeforeRespawnIsIgnored is the regression test for
+// the STOP-banner-tombstone loop. After a cancel_agent fires, the cancelled
+// task lingers in state with AssignedTo = "<parent-type>" forever (it isn't
+// reassigned or deleted). Every subsequent spawn of that parent type must
+// NOT see the stale cancellation, otherwise the new worker reads the STOP
+// banner on its first tool call and exits cleanly — leaving the watchdog to
+// respawn it again, ad infinitum. The fix: only count cancelled tasks whose
+// UpdatedAt is at or after the resolved instance's LastSpawnedAt.
+func TestBuildBanner_CancelledBeforeRespawnIsIgnored(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	cancelledAt := time.Now().Add(-2 * time.Hour)
+	respawnAt := time.Now().Add(-1 * time.Minute)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code-task-30": {
+			InstanceID:    "claude-code-task-30",
+			AgentType:     "claude-code",
+			Role:          domain.RoleWorker,
+			Status:        "busy",
+			LastSpawnedAt: respawnAt,
+			LastHeartbeat: respawnAt,
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 26, Title: "old work", AssignedTo: "claude-code", Status: "cancelled", UpdatedAt: cancelledAt},
+	}
+	banner := BuildBanner(svc, "claude-code-task-30", "presence")
+	if strings.Contains(banner, "STOP") {
+		t.Errorf("fresh worker must not see STOP for cancellations older than its spawn time; got %q", banner)
+	}
+}
+
+// TestBuildBanner_CancelledAfterRespawnStillStops verifies that a cancellation
+// targeting the currently-running worker still surfaces as STOP. Pairs with
+// TestBuildBanner_CancelledBeforeRespawnIsIgnored.
+func TestBuildBanner_CancelledAfterRespawnStillStops(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	respawnAt := time.Now().Add(-5 * time.Minute)
+	cancelledAt := time.Now().Add(-30 * time.Second)
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code-task-30": {
+			InstanceID:    "claude-code-task-30",
+			AgentType:     "claude-code",
+			Role:          domain.RoleWorker,
+			Status:        "busy",
+			LastSpawnedAt: respawnAt,
+			LastHeartbeat: respawnAt,
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{ID: 31, Title: "active work", AssignedTo: "claude-code", Status: "cancelled", UpdatedAt: cancelledAt},
+	}
+	banner := BuildBanner(svc, "claude-code-task-30", "presence")
+	if !strings.Contains(banner, "STOP") {
+		t.Errorf("cancellation newer than spawn must surface STOP; got %q", banner)
+	}
+}
+
+// TestBuildBanner_CancelledForUnknownAgentStillStops keeps the legacy
+// behavior for callers that have no AgentInstance row (drivers, HTTP-only
+// custom agents): when LastSpawnedAt is zero, every cancellation counts.
+// This avoids regressing test fixtures and out-of-band callers that
+// legitimately want to see all cancellations.
+func TestBuildBanner_CancelledForUnknownAgentStillStops(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "T", AssignedTo: "claude-code", Status: "cancelled", UpdatedAt: time.Now()},
+	}
+	banner := BuildBanner(svc, "claude-code", "presence")
+	if !strings.Contains(banner, "STOP") {
+		t.Errorf("legacy fallback (no AgentInstance row) must still stop; got %q", banner)
+	}
+}
+
+// TestBuildBanner_DriverUsesDaemonStartedAt locks in MUST_FIX #3c. The
+// driver agent has no per-instance LastSpawnedAt, so any cancellation
+// older than the daemon process itself must NOT trigger a STOP banner
+// for cursor — even if the cancellation predates the daemon boot.
+// Without DaemonStartedAt, every cancel_agent leaves a tombstone that
+// trips a STOP on every cursor tool call across daemon restarts.
+func TestBuildBanner_DriverUsesDaemonStartedAt(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	daemonStart := time.Now().Add(-1 * time.Minute)
+	cancelledAt := daemonStart.Add(-2 * time.Hour)
+	repo.state.DriverID = "cursor"
+	repo.state.DaemonStartedAt = daemonStart
+	// Driver has no AgentInstance row in classic deployments — leave
+	// AgentInstances empty so we exercise the DaemonStartedAt fallback
+	// path rather than per-instance LastSpawnedAt.
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{}
+	repo.state.Tasks = []domain.Task{
+		{ID: 99, Title: "old", AssignedTo: "cursor", Status: "cancelled", UpdatedAt: cancelledAt},
+	}
+
+	banner := BuildBanner(svc, "cursor", "some_tool")
+	if strings.Contains(banner, "STOP") {
+		t.Errorf("driver must not see STOP for cancellation older than daemon boot; got %q", banner)
+	}
+}
+
+// TestBuildBanner_DriverStopsForFreshCancellation pairs with the test
+// above: a cancellation issued AFTER daemon boot must still surface as
+// STOP for the driver. Otherwise the DaemonStartedAt fallback would
+// over-suppress and the driver would silently miss real cancellations.
+func TestBuildBanner_DriverStopsForFreshCancellation(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	daemonStart := time.Now().Add(-2 * time.Hour)
+	cancelledAt := time.Now().Add(-30 * time.Second)
+	repo.state.DriverID = "cursor"
+	repo.state.DaemonStartedAt = daemonStart
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{}
+	repo.state.Tasks = []domain.Task{
+		{ID: 100, Title: "fresh", AssignedTo: "cursor", Status: "cancelled", UpdatedAt: cancelledAt},
+	}
+
+	banner := BuildBanner(svc, "cursor", "some_tool")
+	if !strings.Contains(banner, "STOP") {
+		t.Errorf("driver must see STOP for cancellation newer than daemon boot; got %q", banner)
+	}
+}
+
+// TestBuildBanner_TombstoneOlderThan24hSuppressed locks in MUST_FIX #3d.
+// Cancelled tasks linger in state with AssignedTo = "<parent-type>"
+// forever; after 24h they must drop out of the BuildBanner cancellation
+// count so they cannot trip new spawns. Pairs with
+// TestBuildBanner_TombstoneWithin24hStillStops below.
+func TestBuildBanner_TombstoneOlderThan24hSuppressed(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "ancient", AssignedTo: "claude-code", Status: "cancelled", UpdatedAt: time.Now().Add(-25 * time.Hour)},
+	}
+	banner := BuildBanner(svc, "claude-code", "some_tool")
+	if strings.Contains(banner, "STOP") {
+		t.Errorf("cancellation older than 24h must be suppressed by the tombstone TTL; got %q", banner)
+	}
+}
+
+// TestBuildBanner_TombstoneWithin24hStillStops verifies the TTL only
+// trims tombstones beyond 24h, so a cancellation issued within the last
+// day still surfaces as STOP — matching real-world driver intent.
+func TestBuildBanner_TombstoneWithin24hStillStops(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "recent", AssignedTo: "claude-code", Status: "cancelled", UpdatedAt: time.Now().Add(-23 * time.Hour)},
+	}
+	banner := BuildBanner(svc, "claude-code", "some_tool")
+	if !strings.Contains(banner, "STOP") {
+		t.Errorf("cancellation within 24h must still surface as STOP; got %q", banner)
+	}
+}
+
 func TestBuildBanner_CancelledTakesPriority(t *testing.T) {
 	svc, repo := newPiggybackTestService()
 	repo.state.Messages = []domain.Message{

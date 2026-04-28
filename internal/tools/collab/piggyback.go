@@ -25,6 +25,27 @@ const (
 	// progressUrgentThreshold is how long without report_progress before
 	// an urgent warning is appended to the piggyback banner.
 	progressUrgentThreshold = 180 * time.Second
+
+	// stopTombstoneTTL is how long a cancelled-task tombstone keeps
+	// counting toward the STOP banner. Cancelled tasks linger in
+	// state with AssignedTo = "<parent-type>" forever (they are
+	// never reassigned or pruned by current GC paths). Even with
+	// the spawnCutoff in BuildBanner, a cancellation issued moments
+	// before the daemon process restarted, or by a driver that
+	// never set its LastSpawnedAt, can still reach a freshly
+	// spawned worker and STOP it. After this window the tombstone
+	// is uncorrelated with anything currently happening — drop it
+	// from the banner so the worker can proceed.
+	//
+	// 24h is a deliberate balance: short enough that yesterday's
+	// noise does not block today's work, long enough that a
+	// just-cancelled task still stops a respawn within one work
+	// shift. Sites running multi-day batch jobs (long-form codex
+	// benchmarks, migration runs) may want this longer; short-lived
+	// CI test harnesses may want it shorter. Promote to a policy
+	// field if/when an operator actually asks — see Worker A's
+	// QUESTION on this constant in the constitution PR review.
+	stopTombstoneTTL = 24 * time.Hour
 )
 
 // suppressNudgeTools lists tools that should not show progress nudges
@@ -234,6 +255,48 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 		var stalestSince time.Duration
 		var stalestTaskID int
 		agentType := app.ResolveParentAgentType(state, agent)
+		// spawnCutoff is the moment the currently-running worker for this
+		// agent was last (re)spawned. STOP banners must be scoped to that
+		// lifetime: a fresh worker that inherits a parent type whose
+		// PREVIOUS occupant was cancelled should not see those stale
+		// cancellations. Without this gate, every cancel_agent leaves a
+		// "STOP" tombstone that infects every future spawn of the same
+		// type until the cancelled task is reassigned/terminal — which is
+		// what was looping the daemon (claude-code-task-26 cancelled at
+		// 12:23:17 → claude-code-task-28/30/...-1/-2 all immediately
+		// exited on first tool call).
+		//
+		// Resolution: prefer an exact InstanceID match; fall back to the
+		// most recently spawned non-task-bound sibling of agentType. A
+		// zero cutoff (drivers, HTTP-only callers, custom agents that
+		// never spawn) preserves the legacy count-all behavior.
+		var spawnCutoff time.Time
+		if inst, ok := state.AgentInstances[agent]; ok && inst != nil {
+			spawnCutoff = inst.LastSpawnedAt
+		} else if agentType != "" {
+			for _, inst := range state.AgentInstances {
+				if inst == nil || inst.AgentType != agentType {
+					continue
+				}
+				if app.IsTaskBoundInstance(state, inst.InstanceID) {
+					continue
+				}
+				if inst.LastSpawnedAt.After(spawnCutoff) {
+					spawnCutoff = inst.LastSpawnedAt
+				}
+			}
+		}
+		// Driver-side fallback. The cursor driver has no AgentInstance
+		// row in classic deployments, and even when it does the row
+		// may have been created with a zero LastSpawnedAt by a code
+		// path predating Fix #3b. Without a cutoff, every cancelled
+		// task triggers a STOP banner on every cursor tool call —
+		// including ones for tasks cancelled long before this daemon
+		// process started. DaemonStartedAt seeds the cutoff so the
+		// driver never sees STOPs for those stale tombstones.
+		if spawnCutoff.IsZero() && agent == state.DriverID && !state.DaemonStartedAt.IsZero() {
+			spawnCutoff = state.DaemonStartedAt
+		}
 		for _, task := range state.Tasks {
 			if task.AssignedTo != agent && task.AssignedTo != agentType && task.AssignedTo != "any" {
 				continue
@@ -242,6 +305,14 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 			case "pending":
 				pending++
 			case "cancelled":
+				if !spawnCutoff.IsZero() && task.UpdatedAt.Before(spawnCutoff) {
+					continue
+				}
+				// Stale-tombstone TTL — see stopTombstoneTTL below
+				// for the rationale and tuning notes.
+				if !task.UpdatedAt.IsZero() && now.Sub(task.UpdatedAt) > stopTombstoneTTL {
+					continue
+				}
 				cancelled++
 			case "in_progress":
 				// Only check tasks directly assigned to this agent (not "any").

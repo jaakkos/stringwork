@@ -57,6 +57,7 @@ The server provides only coordination tools. Each agent uses its own native capa
 - **Git worktree isolation** -- optional per-worker checkouts to prevent file conflicts
 - **Dynamic workspace** -- switch projects at runtime via `set_presence workspace='...'`
 - **Custom agents** -- register any MCP client as a participant via `register_agent`
+- **Constitution** -- layered, file-backed prompt prepended to every worker; supports per-user rules, team profiles, and `git`-backed shared rule packs (see [docs/CONSTITUTION.md](docs/CONSTITUTION.md))
 
 ## Quick Start
 
@@ -241,6 +242,10 @@ mcp-stringwork --daemon                 # force daemon mode
 mcp-stringwork --standalone             # force standalone mode (no daemon)
 mcp-stringwork --version                # print version
 mcp-stringwork status claude-code       # check unread/pending counts for an agent
+mcp-stringwork constitution init        # scaffold the per-user constitution dir
+mcp-stringwork constitution show        # preview the resolved constitution preamble
+mcp-stringwork constitution sync        # pull every configured 'git' constitution source
+mcp-stringwork constitution doctor      # validate every configured constitution source
 ```
 
 ## Operations
@@ -416,4 +421,6 @@ A browser extension that brings Stringwork monitoring to your toolbar -- see wor
 - [Workflow](docs/WORKFLOW.md) -- collaboration patterns and best practices
 - [Quick Reference](docs/QUICK_REFERENCE.md) -- tool usage examples
 - [Architecture](docs/ARCHITECTURE.md) -- clean architecture overview
+- [Constitution](docs/CONSTITUTION.md) -- layered prompt prepended to every worker
+- [Team Rules](docs/TEAM_RULES.md) -- shipping team-wide rules from a devtools repo
 - [Client Configs](docs/mcp-client-configs/README.md) -- Cursor and Claude Code specifics

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 	"github.com/jaakkos/stringwork/internal/worktree"
@@ -116,6 +117,12 @@ type WorkerManager struct {
 	// (running, in cooldown, in backoff) floods the log every Check() tick.
 	// Key: "<instanceID>|<reason>". Value: last-logged time.
 	spawnSkipLogged map[string]time.Time
+	// constitutionSourcesFn returns the layered guidance sources to
+	// inline into worker spawn prompts. Optional; when nil the worker
+	// is spawned with no constitution preamble. Set by the daemon /
+	// standalone main wiring via SetConstitutionSources so the policy
+	// owns discovery and this manager stays free of policy types.
+	constitutionSourcesFn func() []constitution.Source
 }
 
 // spawnSkipLogWindow is the minimum interval between two log lines for the
@@ -472,6 +479,49 @@ func classifyWorkerError(output string) workerErrorInfo {
 	}
 
 	return workerErrorInfo{Class: workerErrorTransient}
+}
+
+// SetConstitutionSources installs the discovery callback used to
+// inline guidance into worker spawn prompts. Pass policy.ConstitutionSources
+// (bound to the live Policy) so the manager picks up config reloads
+// automatically without holding a Policy reference. When fn is nil or
+// returns nil, the worker is spawned with no constitution preamble —
+// the inline section is simply omitted (zero token cost for users who
+// haven't opted in).
+func (m *WorkerManager) SetConstitutionSources(fn func() []constitution.Source) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.constitutionSourcesFn = fn
+}
+
+// resolvedConstitution returns the rendered inline preamble + content
+// for a task scope, or empty string when no constitution is
+// configured. Errors during resolve are logged but never block a
+// spawn; a typo in one rule path should not stop the worker from
+// starting.
+//
+// Partial resolution is preserved: a non-nil error from Resolve does
+// NOT throw away the surviving files. constitution.Resolve already
+// continues past a bad source via errors.Join, and the spawn path is
+// the most user-visible inheritor of that contract — discarding the
+// good files here was the regression that nullified the upstream fix.
+// The error is logged so operators see which source broke; the
+// surviving content still reaches the worker prompt.
+func (m *WorkerManager) resolvedConstitution(scope constitution.Scope) string {
+	m.mu.Lock()
+	fn := m.constitutionSourcesFn
+	m.mu.Unlock()
+	if fn == nil {
+		return ""
+	}
+	files, err := constitution.Resolve(fn(), scope)
+	if err != nil {
+		m.logger.Printf("WorkerManager: constitution partial resolve failure (using %d surviving file(s)): %v", len(files), err)
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	return constitution.BuildInline(files)
 }
 
 // SetWorktreeManager sets the worktree manager for per-worker git isolation.
@@ -2523,7 +2573,11 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 	taskCfg := baseCfg
 	taskCfg.InstanceID = instanceID
 
-	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver(), taskCfg.Communication)
+	constitutionInline := m.resolvedConstitution(constitution.Scope{
+		TaskKind:  constitution.TaskKindFromTitle(task.Title),
+		AgentRole: baseCfg.AgentType,
+	})
+	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver(), taskCfg.Communication, constitutionInline)
 	taskCfg.Command = appendPromptToCommand(baseCfg.Command, taskPrompt)
 	if wc != nil && wc.WorktreeName != "" {
 		taskCfg.ClaudeWorktreeName = wc.WorktreeName
@@ -2552,7 +2606,11 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 // buildTaskPrompt renders the full task context into a prompt section that is
 // appended to the worker's base command prompt at spawn time.
 // communication is "cli" or "mcp", controlling whether steps reference shell commands or MCP tools.
-func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, workspace, driver, communication string) string {
+// constitutionInline is the fully-rendered constitution body (header +
+// ordered list + file separators + content) to prepend so the worker
+// reads team rules before any task instructions. Empty string disables
+// the section entirely.
+func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, workspace, driver, communication, constitutionInline string) string {
 	priorityNames := map[int]string{1: "critical", 2: "high", 3: "normal", 4: "low"}
 	priority := priorityNames[task.Priority]
 	if priority == "" {
@@ -2560,6 +2618,11 @@ func buildTaskPrompt(task *domain.Task, wc *domain.WorkContext, instanceID, work
 	}
 
 	var b strings.Builder
+	if constitutionInline != "" {
+		b.WriteString("\n\n")
+		b.WriteString(strings.TrimRight(constitutionInline, "\n"))
+		b.WriteString("\n")
+	}
 	b.WriteString(fmt.Sprintf("\n\n--- YOUR ASSIGNED TASK (task #%d) ---\n", task.ID))
 	b.WriteString(fmt.Sprintf("Title: %s\n", task.Title))
 	if task.Description != "" {

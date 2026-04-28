@@ -135,6 +135,42 @@ func TestHeartbeat_RegisteredAgent(t *testing.T) {
 	}
 }
 
+// TestHeartbeat_FreshInstanceGetsLastSpawnedAt locks in MUST_FIX #3b: when
+// a CLI/manual-bootstrapped worker first appears via heartbeat (no prior
+// MarkInstanceSpawning), the fabricated AgentInstance row must seed
+// LastSpawnedAt with the current time. Without this, BuildBanner's
+// spawnCutoff stays zero forever, so any cancelled task assigned to the
+// parent type — including tombstones from a long-dead previous worker —
+// will trip a STOP banner on this fresh worker's first tool call.
+func TestHeartbeat_FreshInstanceGetsLastSpawnedAt(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+
+	repo.state.RegisteredAgents["fresh-bot"] = &domain.RegisteredAgent{
+		Name:        "fresh-bot",
+		DisplayName: "Fresh Bot",
+	}
+
+	srv := testServer(svc, logger)
+
+	before := time.Now()
+	_, err := callTool(t, srv, "heartbeat", map[string]any{"agent": "fresh-bot"})
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	inst, ok := repo.state.AgentInstances["fresh-bot"]
+	if !ok {
+		t.Fatal("expected AgentInstance to be auto-created")
+	}
+	if inst.LastSpawnedAt.IsZero() {
+		t.Fatal("LastSpawnedAt must be non-zero on first-touch heartbeat")
+	}
+	if inst.LastSpawnedAt.Before(before) {
+		t.Errorf("LastSpawnedAt = %v, expected >= %v", inst.LastSpawnedAt, before)
+	}
+}
+
 // TestHeartbeat_AutoCreate_ResolvesParentType verifies that when a task-bound
 // worker (e.g. "my-bot-task-4") heartbeats and no AgentInstance exists yet,
 // the auto-created entry's AgentType resolves to the parent type "my-bot"

@@ -3,6 +3,7 @@ package app
 import (
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/policy"
 )
 
@@ -44,4 +45,11 @@ type Policy interface {
 	// watchdog's spawn sweep re-drives an assignment for it. Default 30s.
 	// Returning 0 disables the sweep entirely.
 	SpawnSweepGrace() time.Duration
+
+	// ConstitutionSources returns the ordered list of layered guidance
+	// sources surfaced to workers via claim_next, get_work_context, and
+	// the inline preamble at spawn time. Returns an empty slice when no
+	// constitution is configured (a no-op for users who haven't opted
+	// in).
+	ConstitutionSources() []constitution.Source
 }

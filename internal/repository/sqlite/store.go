@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS agent_instances (
 	progress TEXT NOT NULL DEFAULT '',
 	progress_step INTEGER NOT NULL DEFAULT 0,
 	progress_total_steps INTEGER NOT NULL DEFAULT 0,
-	progress_updated_at TEXT NOT NULL DEFAULT ''
+	progress_updated_at TEXT NOT NULL DEFAULT '',
+	last_spawned_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS work_contexts (
 	id TEXT PRIMARY KEY,
@@ -227,6 +228,12 @@ func runMigrations(db *sql.DB) error {
 	_, _ = db.Exec(schemaWorkContexts)
 	_, _ = db.Exec("ALTER TABLE work_contexts ADD COLUMN worktree_name TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+	// last_spawned_at is the spawn-cutoff column for the STOP-banner
+	// suppression logic in BuildBanner. Without it, AgentInstance
+	// rows reload from disk with a zero LastSpawnedAt every time,
+	// nullifying the per-spawn cutoff and producing the kill-respawn
+	// loop diagnosed during the codex review (claude-code-task-32).
+	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN last_spawned_at TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE work_contexts ADD COLUMN previous_output TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaRegisteredAgents)
 	_, _ = db.Exec("ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
@@ -257,7 +264,8 @@ CREATE TABLE IF NOT EXISTS agent_instances (
 	status TEXT NOT NULL DEFAULT 'offline',
 	current_tasks TEXT NOT NULL DEFAULT '[]',
 	workspace TEXT NOT NULL DEFAULT '',
-	last_heartbeat TEXT NOT NULL
+	last_heartbeat TEXT NOT NULL,
+	last_spawned_at TEXT NOT NULL DEFAULT ''
 )`
 const schemaWorkContexts = `
 CREATE TABLE IF NOT EXISTS work_contexts (
@@ -623,15 +631,21 @@ func (s *Store) Load() (*domain.CollabState, error) {
 	}
 
 	// agent_instances (table may not exist in very old DBs; only skip "no such table")
-	rows, err = tx.Query("SELECT instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at, COALESCE(session_id, '') FROM agent_instances")
+	// last_spawned_at is COALESCE'd because the migration default ('')
+	// must round-trip cleanly: an instance row written before the
+	// migration ran, or one fabricated with a zero LastSpawnedAt by
+	// the heartbeat path, must reload as time.Time{} (not error). The
+	// STOP-banner cutoff explicitly treats zero as "no cutoff yet"
+	// and falls through to the daemon-level fallback.
+	rows, err = tx.Query("SELECT instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at, COALESCE(session_id, ''), COALESCE(last_spawned_at, '') FROM agent_instances")
 	if err != nil && !isNoSuchTableErr(err) {
 		return nil, fmt.Errorf("agent_instances: %w", err)
 	}
 	if err == nil {
 		for rows.Next() {
 			var ai domain.AgentInstance
-			var caps, curTasks, lh, progressUpdAt string
-			if err := rows.Scan(&ai.InstanceID, &ai.AgentType, &ai.Role, &caps, &ai.MaxTasks, &ai.Status, &curTasks, &ai.Workspace, &lh, &ai.Progress, &ai.ProgressStep, &ai.ProgressTotalSteps, &progressUpdAt, &ai.SessionID); err != nil {
+			var caps, curTasks, lh, progressUpdAt, lastSpawned string
+			if err := rows.Scan(&ai.InstanceID, &ai.AgentType, &ai.Role, &caps, &ai.MaxTasks, &ai.Status, &curTasks, &ai.Workspace, &lh, &ai.Progress, &ai.ProgressStep, &ai.ProgressTotalSteps, &progressUpdAt, &ai.SessionID, &lastSpawned); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
@@ -650,6 +664,15 @@ func (s *Store) Load() (*domain.CollabState, error) {
 			if progressUpdAt != "" {
 				if ai.ProgressUpdatedAt, err = parseTime(progressUpdAt, "agent_instances progress_updated_at"); err != nil {
 					ai.ProgressUpdatedAt = time.Time{}
+				}
+			}
+			if lastSpawned != "" {
+				if ai.LastSpawnedAt, err = parseTime(lastSpawned, "agent_instances last_spawned_at"); err != nil {
+					// Reset to zero rather than fail the whole load:
+					// a corrupted timestamp on a single row should
+					// degrade gracefully to "no spawn cutoff" rather
+					// than poison Load() for every consumer.
+					ai.LastSpawnedAt = time.Time{}
 				}
 			}
 			state.AgentInstances[ai.InstanceID] = &ai
@@ -862,8 +885,16 @@ func (s *Store) Save(state *domain.CollabState) error {
 		if !ai.ProgressUpdatedAt.IsZero() {
 			progressUpdAt = ai.ProgressUpdatedAt.Format(time.RFC3339Nano)
 		}
-		if _, err := tx.Exec("INSERT INTO agent_instances (instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			ai.InstanceID, ai.AgentType, string(ai.Role), string(caps), ai.MaxTasks, ai.Status, string(curTasks), ai.Workspace, ai.LastHeartbeat.Format(time.RFC3339Nano), ai.Progress, ai.ProgressStep, ai.ProgressTotalSteps, progressUpdAt, ai.SessionID); err != nil {
+		// last_spawned_at is the empty string when zero so the column
+		// (NOT NULL DEFAULT '') round-trips with a zero LastSpawnedAt
+		// for instance rows fabricated outside the spawn pipeline
+		// (e.g. heartbeat / set_presence first-touch).
+		lastSpawnedAt := ""
+		if !ai.LastSpawnedAt.IsZero() {
+			lastSpawnedAt = ai.LastSpawnedAt.Format(time.RFC3339Nano)
+		}
+		if _, err := tx.Exec("INSERT INTO agent_instances (instance_id, agent_type, role, capabilities, max_tasks, status, current_tasks, workspace, last_heartbeat, progress, progress_step, progress_total_steps, progress_updated_at, session_id, last_spawned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			ai.InstanceID, ai.AgentType, string(ai.Role), string(caps), ai.MaxTasks, ai.Status, string(curTasks), ai.Workspace, ai.LastHeartbeat.Format(time.RFC3339Nano), ai.Progress, ai.ProgressStep, ai.ProgressTotalSteps, progressUpdAt, ai.SessionID, lastSpawnedAt); err != nil {
 			return err
 		}
 	}

@@ -588,6 +588,11 @@ func EnsureAgentInstances(state *domain.CollabState, orch *policy.OrchestrationC
 	now := time.Now()
 	if orch != nil {
 		state.DriverID = orch.Driver
+		// Driver row deliberately leaves LastSpawnedAt zero. Drivers
+		// are protected from stale STOP banners by the DaemonStartedAt
+		// fallback in BuildBanner — a non-zero per-instance cutoff
+		// here would over-suppress for unit tests that drive cursor
+		// through orchestration without DaemonStartedAt set.
 		state.AgentInstances[orch.Driver] = &domain.AgentInstance{
 			InstanceID:    orch.Driver,
 			AgentType:     orch.Driver,
@@ -611,6 +616,12 @@ func EnsureAgentInstances(state *domain.CollabState, orch *policy.OrchestrationC
 				if n > 1 {
 					instanceID = fmt.Sprintf("%s-%d", w.Type, i+1)
 				}
+				// Worker pool rows leave LastSpawnedAt zero on bootstrap.
+				// MarkInstanceSpawning sets it when the WorkerManager
+				// actually starts a process; until then there is no
+				// real spawn to anchor a STOP-banner cutoff to. A
+				// premature non-zero would suppress legitimate STOPs
+				// emitted between daemon boot and first spawn.
 				state.AgentInstances[instanceID] = &domain.AgentInstance{
 					InstanceID:    instanceID,
 					AgentType:     w.Type,

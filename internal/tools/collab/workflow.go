@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
 
@@ -152,6 +153,14 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 			}
 
 			var result *mcp.CallToolResult
+			// Captured under lock, applied after lock release. When
+			// non-empty, claimedBody is the rendered claim message
+			// without preamble; the post-lock step resolves the
+			// constitution against claimedScope and prepends it.
+			// Other branches (read_messages / continue_task / idle)
+			// don't need a preamble and set result directly.
+			var claimedBody string
+			var claimedScope constitution.Scope
 			err := svc.Run(func(state *domain.CollabState) error {
 				extra := app.RegisteredAgentNames(state)
 				if err := app.ValidateAgent(agent, state, false, false, extra...); err != nil {
@@ -226,7 +235,16 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 							}
 						}
 					}
-					result = mcp.NewToolResultText(claimText)
+					// Defer the preamble build to after Run() returns —
+					// constitution.Resolve does filesystem I/O, and
+					// CollabService.Run holds the global mutex for the
+					// whole callback. Capture only the data the
+					// post-lock step needs. agentType is the resolved
+					// parent type so role-scoped sources resolve
+					// identically to spawn-time (worker_manager passes
+					// the same value as Scope.AgentRole).
+					claimedBody = claimText
+					claimedScope = scopeForTask(&state.Tasks[bestIdx], agentType)
 					return nil
 				}
 
@@ -247,6 +265,13 @@ func registerClaimNext(s *server.MCPServer, svc *app.CollabService, logger *log.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if claimedBody != "" {
+				if preamble := constitutionPreambleForScope(svc, claimedScope); preamble != "" {
+					result = mcp.NewToolResultText(preamble + "\n" + claimedBody)
+				} else {
+					result = mcp.NewToolResultText(claimedBody)
+				}
 			}
 			logger.Printf("claim_next for %s", agent)
 			return result, nil

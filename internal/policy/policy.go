@@ -2,7 +2,9 @@
 package policy
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/jaakkos/stringwork/internal/constitution"
 )
 
 // GlobalStateDir returns the default global state directory (~/.config/stringwork).
@@ -24,6 +28,15 @@ func GlobalStateDir() string {
 // GlobalStateFile returns the default global state file path.
 func GlobalStateFile() string {
 	return filepath.Join(GlobalStateDir(), "state.sqlite")
+}
+
+// GlobalConstitutionDir returns the conventional location of the
+// per-user constitution directory (~/.config/stringwork/constitution).
+// This is the built-in source: any *.md files placed here are read as
+// guidance for every task on every claim. Users can extend this via
+// the `constitution.sources` block in config.yaml (see R4).
+func GlobalConstitutionDir() string {
+	return filepath.Join(GlobalStateDir(), "constitution")
 }
 
 // DefaultConfigFile returns the conventional config-file path
@@ -169,6 +182,11 @@ type Config struct {
 	Daemon        *DaemonConfig              `yaml:"daemon"`
 	Audit         *AuditConfig               `yaml:"audit"`
 	Backup        *BackupConfig              `yaml:"backup"`
+	// Constitution declares user- and team-level rule sources that
+	// extend the built-in ~/.config/stringwork/constitution directory.
+	// Sources are ordered: built-in global first, then profile (R4.c),
+	// then user-declared `sources`. Earlier files win on conflict.
+	Constitution *ConstitutionConfig `yaml:"constitution,omitempty"`
 }
 
 // AuditConfig controls audit logging behavior.
@@ -217,6 +235,13 @@ func DefaultOrchestration() *OrchestrationConfig {
 
 // LoadConfig loads configuration from a YAML file.
 // If orchestration is not set, DefaultOrchestration() is used (driver cursor, no workers).
+//
+// The decoder runs in KnownFields(true) mode so that typos in any
+// top-level key (e.g. `sourcs:` for `sources:` under `constitution`)
+// or any nested block surface as a clear `parse config: <path>: ...`
+// error instead of silently dropping the field on the floor. Every
+// legitimately-supported field has an explicit `yaml:"..."` tag, so
+// strict mode is safe for all known-good configs.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -224,8 +249,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 
 	if cfg.Orchestration == nil {
@@ -239,6 +266,83 @@ func LoadConfig(path string) (*Config, error) {
 type Policy struct {
 	config *Config
 	mu     sync.RWMutex // protects workspaceRoot for dynamic updates
+
+	// Cache for ConstitutionSources. Held under its own mutex so a
+	// slow YAML re-parse during a rebuild does not block
+	// SetWorkspaceRoot or other config-mutating callers. Invalidated
+	// when the profile file mtime changes or the in-memory user
+	// `sources` declaration differs from the cached snapshot.
+	consMu        sync.Mutex
+	consCache     []constitution.Source
+	consCacheKey  constitutionCacheKey
+	consCacheInit bool
+}
+
+// constitutionCacheKey is the snapshot used to decide whether the
+// cached ConstitutionSources slice is still valid. Profile mtime
+// catches edits to the team-shared profile file (cheap stat per
+// call); the user sources snapshot catches in-process config swaps
+// (e.g. a future hot-reload). Comparison is by value via
+// constitutionCacheKey.equal.
+type constitutionCacheKey struct {
+	profilePath  string
+	profileMTime time.Time
+	profileMiss  bool // distinguishes "stat failed" from "absent profile"
+	sources      []ConstitutionSourceConfig
+}
+
+func (a constitutionCacheKey) equal(b constitutionCacheKey) bool {
+	if a.profilePath != b.profilePath ||
+		a.profileMiss != b.profileMiss ||
+		!a.profileMTime.Equal(b.profileMTime) ||
+		len(a.sources) != len(b.sources) {
+		return false
+	}
+	for i := range a.sources {
+		if !sourceConfigEqual(a.sources[i], b.sources[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sourceConfigEqual compares two ConstitutionSourceConfig values for
+// cache-key equality. Slices are compared element-wise; the *Scope
+// pointer is handled structurally so two identical declarations from
+// different decode passes still match.
+func sourceConfigEqual(a, b ConstitutionSourceConfig) bool {
+	if a.Name != b.Name ||
+		a.Type != b.Type ||
+		a.Path != b.Path ||
+		a.Repo != b.Repo ||
+		a.Ref != b.Ref ||
+		a.CacheDir != b.CacheDir {
+		return false
+	}
+	if !stringSliceEqual(a.Include, b.Include) ||
+		!stringSliceEqual(a.Paths, b.Paths) {
+		return false
+	}
+	switch {
+	case a.Scope == nil && b.Scope == nil:
+		return true
+	case a.Scope == nil || b.Scope == nil:
+		return false
+	}
+	return stringSliceEqual(a.Scope.TaskKind, b.Scope.TaskKind) &&
+		stringSliceEqual(a.Scope.AgentRoles, b.Scope.AgentRoles)
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // New creates a new policy enforcer
@@ -523,4 +627,115 @@ func (p *Policy) BackupKeepN() int {
 		return maxKey
 	}
 	return p.config.Backup.KeepN
+}
+
+// ConstitutionDir returns the on-disk location of the built-in
+// per-user constitution directory. It is always
+// ~/.config/stringwork/constitution; the path is stable across
+// invocations so the `constitution init` and `constitution show` CLI
+// subcommands write/read the same place.
+func (p *Policy) ConstitutionDir() string {
+	return GlobalConstitutionDir()
+}
+
+// ConstitutionSources returns the ordered list of constitution sources
+// to feed to constitution.Resolve. The order is:
+//
+//  1. The built-in `global` DirSource pointing at ConstitutionDir().
+//     Always included so a user with no config file still gets their
+//     personal rules attached.
+//  2. Sources loaded from the team profile file referenced by
+//     `constitution.profile`, in declaration order. Profile sources
+//     win over user sources for conflicts (earlier source wins on
+//     conflict). `$PROFILE_DIR` is expanded to the profile file's
+//     directory so a team can ship a single shared file.
+//  3. Sources declared via config.yaml's `constitution.sources` block,
+//     preserved in declaration order.
+//
+// The result is cached on the Policy and reused while the in-process
+// user `sources` declaration is unchanged AND the profile file's
+// mtime has not advanced. claim_next / get_work_context call this on
+// every invocation; without the cache the YAML profile parse plus
+// per-decl validation re-runs on every claim and adds measurable I/O
+// when the profile lives on a network filesystem (ZFS sends, NFS,
+// etc.). The cache hit path returns a fresh slice header so callers
+// remain free to mutate it without affecting subsequent invocations;
+// Source implementations themselves are still stateless wrt the
+// resolver (they re-read the filesystem on every List()).
+//
+// Bad source declarations are logged to stderr and skipped — a typo
+// in one team rule entry must not nuke the worker's view of the rest
+// of the constitution.
+func (p *Policy) ConstitutionSources() []constitution.Source {
+	p.mu.RLock()
+	var profile string
+	var sources []ConstitutionSourceConfig
+	if p.config.Constitution != nil {
+		profile = p.config.Constitution.Profile
+		if len(p.config.Constitution.Sources) > 0 {
+			sources = append([]ConstitutionSourceConfig(nil), p.config.Constitution.Sources...)
+		}
+	}
+	p.mu.RUnlock()
+
+	mtime, miss := constitutionProfileMTime(profile)
+	key := constitutionCacheKey{
+		profilePath:  profile,
+		profileMTime: mtime,
+		profileMiss:  miss,
+		sources:      sources,
+	}
+
+	p.consMu.Lock()
+	defer p.consMu.Unlock()
+	if p.consCacheInit && p.consCacheKey.equal(key) {
+		return append([]constitution.Source(nil), p.consCache...)
+	}
+
+	out := []constitution.Source{
+		&constitution.DirSource{
+			SourceName: "global",
+			Path:       p.ConstitutionDir(),
+			Include:    []string{"*.md"},
+		},
+	}
+	if profile != "" {
+		out = append(out, constitutionProfileSources(profile)...)
+	}
+	for _, decl := range sources {
+		src, err := decl.toSource("")
+		if err != nil {
+			log.Printf("constitution: skipping source %q: %v", decl.Name, err)
+			continue
+		}
+		if src != nil {
+			out = append(out, src)
+		}
+	}
+
+	p.consCache = out
+	p.consCacheKey = key
+	p.consCacheInit = true
+	return append([]constitution.Source(nil), out...)
+}
+
+// constitutionProfileMTime stat-probes the profile file and returns
+// its modification time. Returns (zero, false) when path is empty
+// (no profile configured — cache is keyed on the empty path) and
+// (zero, true) when the stat fails (file missing, perms, etc) so a
+// transient stat error invalidates the cache exactly once and the
+// rebuild path surfaces the underlying problem via constitutionProfileSources.
+func constitutionProfileMTime(path string) (time.Time, bool) {
+	if path == "" {
+		return time.Time{}, false
+	}
+	expanded, err := expandPath(path, "")
+	if err != nil {
+		return time.Time{}, true
+	}
+	info, err := os.Stat(expanded)
+	if err != nil {
+		return time.Time{}, true
+	}
+	return info.ModTime(), false
 }

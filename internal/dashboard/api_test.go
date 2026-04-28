@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 )
@@ -57,6 +58,7 @@ func (p *mockPolicy) InstanceRetentionDays() int                 { return 7 }
 func (p *mockPolicy) TaskBoundInstanceRetentionHours() int       { return 24 }
 func (p *mockPolicy) RespawnGrace() time.Duration                { return 60 * time.Second }
 func (p *mockPolicy) SpawnSweepGrace() time.Duration             { return 30 * time.Second }
+func (p *mockPolicy) ConstitutionSources() []constitution.Source { return nil }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}

@@ -90,6 +90,51 @@ http_port: 0
 #     command: npx
 #     args: ["@playwright/mcp@latest", "--browser", "chromium"]
 
+# --- Constitution (layered worker rules) ---
+# A "constitution" is an ordered set of Markdown rule files that gets:
+#   1. listed (paths only) in claim_next / get_work_context responses, so
+#      the worker reads them before doing any work; and
+#   2. inlined (full content) into the spawn prompt, so the worker sees
+#      them in its initial context window.
+#
+# The built-in source is always read: any *.md file dropped into
+# ~/.config/stringwork/constitution becomes a rule. Run
+# `mcp-stringwork constitution init` to scaffold the directory.
+#
+# Add team-level sources via the block below. See docs/CONSTITUTION.md
+# for the file format and resolution order, and docs/TEAM_RULES.md for
+# how to publish rules from a shared devtools repo.
+#
+# constitution:
+#   # Optional: load a profile shipped at the root of your team's
+#   # devtools repo. $PROFILE_DIR resolves to the profile file's
+#   # directory, so paths inside the profile travel between developers.
+#   profile: ~/Development/regfin-devtools/stringwork.profile.yaml
+#
+#   # Optional: declare extra sources directly. Sources are resolved in
+#   # order (built-in `global` first, then profile entries, then these);
+#   # earlier files win on conflict.
+#   sources:
+#     - name: project-rules
+#       type: dir
+#       path: ~/Development/my-project/.stringwork/rules
+#       include: ["*.md"]
+#
+#     - name: shared-team-rules
+#       type: git
+#       repo: git@github.com:my-org/team-rules.git
+#       ref: main
+#       cache_dir: ~/.cache/stringwork/team-rules
+#       # Network sync is explicit:
+#       # `mcp-stringwork constitution sync shared-team-rules`
+#
+#     - name: review-checklists
+#       type: dir
+#       path: ~/Development/my-project/.stringwork/review
+#       scope:
+#         task_kind: ["review"]      # only attached to review-flavoured tasks
+#         # agent_roles: ["claude-code"]  # or narrow by agent type
+
 # --- Orchestration (driver + workers) ---
 # One driver (e.g. Cursor) and N workers. The server spawns workers automatically
 # when there's pending work -- no need to keep them running manually.

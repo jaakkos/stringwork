@@ -1,14 +1,24 @@
 package sqlite
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
+
+// openSQLiteRaw opens the same database file the production code uses,
+// but without running the package's migrations. Tests that want to
+// inspect or seed pre-migration state use this directly.
+func openSQLiteRaw(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+}
 
 func TestStoreRoundtrip(t *testing.T) {
 	dir := t.TempDir()
@@ -480,5 +490,166 @@ func TestNew_failsOnInvalidDir(t *testing.T) {
 	_, err := New(path)
 	if err == nil {
 		t.Error("New should fail when parent is not a directory")
+	}
+}
+
+// TestMigration_AddsLastSpawnedAtColumn proves the runtime migration
+// adds last_spawned_at to a pre-existing agent_instances table that
+// pre-dates the column. Regression guard for MUST_FIX #3a — the kill-
+// respawn loop diagnosed during the codex review (claude-code-task-32)
+// was caused by AgentInstance rows reloading with zero LastSpawnedAt
+// because the column did not exist on disk, even though the runtime
+// struct had the field.
+func TestMigration_AddsLastSpawnedAtColumn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "premigrate.sqlite")
+
+	// Create a database with a pre-migration agent_instances table that
+	// lacks last_spawned_at. We use the raw sqlite driver to skip the
+	// store's New() (which would run migrations and add the column).
+	rawDB, err := openSQLiteRaw(path)
+	if err != nil {
+		t.Fatalf("openSQLiteRaw: %v", err)
+	}
+	if _, err := rawDB.Exec(`
+CREATE TABLE agent_instances (
+	instance_id TEXT PRIMARY KEY,
+	agent_type TEXT NOT NULL,
+	role TEXT NOT NULL,
+	capabilities TEXT NOT NULL DEFAULT '[]',
+	max_tasks INTEGER NOT NULL DEFAULT 1,
+	status TEXT NOT NULL DEFAULT 'offline',
+	current_tasks TEXT NOT NULL DEFAULT '[]',
+	workspace TEXT NOT NULL DEFAULT '',
+	last_heartbeat TEXT NOT NULL
+)`); err != nil {
+		t.Fatalf("create pre-migration table: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	rawDB2, err := openSQLiteRaw(path)
+	if err != nil {
+		t.Fatalf("openSQLiteRaw post-migration: %v", err)
+	}
+	defer func() { _ = rawDB2.Close() }()
+
+	rows, err := rawDB2.Query("PRAGMA table_info(agent_instances)")
+	if err != nil {
+		t.Fatalf("PRAGMA: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	found := false
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    interface{}
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "last_spawned_at" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("migration did not add last_spawned_at column to agent_instances")
+	}
+}
+
+// TestSaveLoad_PreservesLastSpawnedAt verifies the timestamp round-trips
+// through the SQLite store. Pairs with TestMigration_AddsLastSpawnedAtColumn
+// to lock in MUST_FIX #3a end-to-end.
+func TestSaveLoad_PreservesLastSpawnedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spawn.sqlite")
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code-task-99"] = &domain.AgentInstance{
+		InstanceID:    "claude-code-task-99",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		MaxTasks:      1,
+		Status:        "idle",
+		CurrentTasks:  []int{},
+		LastHeartbeat: now,
+		LastSpawnedAt: now.Add(-2 * time.Minute),
+	}
+
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	got, ok := loaded.AgentInstances["claude-code-task-99"]
+	if !ok {
+		t.Fatal("instance row missing after reload")
+	}
+	expected := now.Add(-2 * time.Minute)
+	if !got.LastSpawnedAt.Equal(expected) {
+		t.Errorf("LastSpawnedAt = %v, want %v", got.LastSpawnedAt, expected)
+	}
+}
+
+// TestSaveLoad_ZeroLastSpawnedAtRoundTrips covers the edge case where
+// LastSpawnedAt has never been set: the empty-string default in the
+// schema must round-trip as time.Time{} rather than poisoning Load().
+func TestSaveLoad_ZeroLastSpawnedAtRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero-spawn.sqlite")
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.(*Store).Close() }()
+
+	state := domain.NewCollabState()
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID:    "claude-code",
+		AgentType:     "claude-code",
+		Role:          domain.RoleWorker,
+		MaxTasks:      1,
+		Status:        "offline",
+		CurrentTasks:  []int{},
+		LastHeartbeat: time.Now(),
+	}
+
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := loaded.AgentInstances["claude-code"]
+	if !ok {
+		t.Fatal("instance row missing after reload")
+	}
+	if !got.LastSpawnedAt.IsZero() {
+		t.Errorf("zero LastSpawnedAt did not round-trip cleanly: %v", got.LastSpawnedAt)
 	}
 }

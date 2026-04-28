@@ -1,0 +1,61 @@
+# Stringwork constitution profile for the RegFin team.
+#
+# NOTE: This file in the open-source Stringwork repo is illustrative only.
+# The canonical, team-maintained version lives at:
+#
+#   creditornot/regfin-devtools : stringwork.profile.yaml
+#
+# RegFin team members should wire that file (not this one) into their
+# personal Stringwork config via `make stringwork-constitution` from a
+# regfin-devtools checkout. This copy is kept in sync as a worked example
+# of the profile shape; if it drifts from the canonical version, the
+# regfin-devtools copy wins.
+#
+# For non-RegFin teams looking to crib this layout: drop a similar
+# stringwork.profile.yaml at the root of your own devtools repo and
+# reference it from your personal Stringwork config:
+#
+#   constitution:
+#     profile: ~/Development/<your-team>-devtools/stringwork.profile.yaml
+#
+# $PROFILE_DIR resolves to the directory of this file at load time, so the
+# paths below work no matter where each developer has cloned the repo.
+#
+# All sources are 'dir'-typed: they are read live from the filesystem and
+# refreshed whenever you run `git pull` on the devtools repo. No need to
+# call `mcp-stringwork constitution sync` — that command is only for
+# 'git'-typed sources, which the regfin team does not use.
+sources:
+  # Safety rules are universal and apply to every task. Cover atlassian,
+  # git, slack, google-workspace, and "no public uploads" guards.
+  - name: regfin-rules
+    type: dir
+    path: $PROFILE_DIR/rules
+    include: ["*.md"]
+
+  # Language and stack style guides — kotlin, typescript, go, proto,
+  # web-next, plus the cross-cutting clean-code-for-agents guide.
+  - name: regfin-instructions
+    type: dir
+    path: $PROFILE_DIR/instructions
+    include: ["*.md"]
+
+  # PR-review checklists. Scoped to review-flavoured tasks so feature
+  # work doesn't carry the extra weight on every claim. Stringwork's
+  # task_kind heuristic maps any title containing "review", "code
+  # review", or "PR review" to task_kind = "review", which is the only
+  # kind currently emitted by TaskKindFromTitle — see
+  # docs/CONSTITUTION.md.
+  - name: regfin-pr-review-checklists
+    type: dir
+    path: $PROFILE_DIR/skills/regfin-pr-review/references
+    include: ["*.md"]
+    scope:
+      task_kind: ["review"]
+
+  # Team metadata: members, repo map, atlassian config, the team page.
+  # Useful as background context for any worker.
+  - name: regfin-team-context
+    type: dir
+    path: $PROFILE_DIR/context
+    include: ["regfin-team.md", "team-members.yaml", "repos.yaml", "atlassian.yaml"]

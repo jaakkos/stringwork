@@ -422,6 +422,35 @@ mcp-stringwork audit --tool create_task
 mcp-stringwork audit --limit 50
 ```
 
+### Constitution (layered worker rules)
+
+```bash
+# Scaffold the per-user constitution dir (~/.config/stringwork/constitution)
+mcp-stringwork constitution init
+
+# Preview the resolved preamble for a default-scope task
+mcp-stringwork constitution show
+
+# Preview with scope filters (review-only sources, role-targeted sources)
+mcp-stringwork constitution show --task-kind review
+mcp-stringwork constitution show --agent claude-code
+
+# Inline the full file contents (mirrors what is injected at spawn time)
+mcp-stringwork constitution show --inline
+
+# Pull every configured 'git'-typed source into its cache_dir
+mcp-stringwork constitution sync
+mcp-stringwork constitution sync regfin-rules    # single source by name
+
+# Validate every configured source (path exists, files match include globs,
+# git remote responds). Exit non-zero only on hard errors; warnings allow 0.
+mcp-stringwork constitution doctor
+```
+
+See [CONSTITUTION.md](CONSTITUTION.md) for the file format and resolution
+order, and [TEAM_RULES.md](TEAM_RULES.md) for shipping team-wide rules from a
+shared devtools repo.
+
 ### Server mode
 
 ```bash

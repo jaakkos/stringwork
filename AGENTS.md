@@ -8,7 +8,8 @@ This repository is a Go MCP server for pair-programming coordination. It support
 - `internal/app/`: application services (CollabService, WorkerManager, TaskOrchestrator).
 - `internal/tools/collab/`: MCP tool handlers (tasks, messaging, plans, locks, worker_status, heartbeat, work_context, cancel_agent).
 - `internal/repository/`: persistence backend (`sqlite/`).
-- `internal/policy/`: workspace and safety policy; orchestration config (driver, workers).
+- `internal/policy/`: workspace and safety policy; orchestration config (driver, workers); constitution sources (`constitution_config.go`, `constitution_profile.go`).
+- `internal/constitution/`: layered prompt resolver and `dir`/`git`-backed sources for team rules. See [docs/CONSTITUTION.md](docs/CONSTITUTION.md).
 - `mcp/`: runtime config (`config.yaml` with `daemon`, `orchestration` sections).
 - `docs/`: setup, architecture, and workflow docs.
 - `chrome-extension/`: Chrome browser extension (alpha) — toolbar popup, badge counter, desktop notifications. Vanilla JS, Manifest V3.
@@ -20,6 +21,7 @@ This repository is a Go MCP server for pair-programming coordination. It support
 - `go test ./... -cover`: run tests with coverage output.
 - `go run ./cmd/mcp-server`: run locally without building.
 - `./mcp-stringwork status claude-code`: check unread/pending counts for an agent.
+- `./mcp-stringwork constitution show|init|sync|doctor`: manage the layered prompt prepended to worker spawns. See [docs/CONSTITUTION.md](docs/CONSTITUTION.md).
 
 ## Coding Style & Naming Conventions
 - Follow standard Go formatting: run `gofmt` on changed files before opening a PR.

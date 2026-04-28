@@ -124,6 +124,12 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 				// above and leave the existing instance untouched so we
 				// don't clobber CurrentTasks / Status.
 				if _, hasInstance := state.AgentInstances[name]; !hasInstance {
+					// LastSpawnedAt seeds the STOP-banner spawn cutoff
+					// for first-touch register_agent calls so any
+					// already-cancelled tasks at the time of
+					// registration do not retroactively trigger a
+					// STOP banner for this fresh worker. See
+					// heartbeat.go for the same rationale.
 					state.AgentInstances[name] = &domain.AgentInstance{
 						InstanceID:    name,
 						AgentType:     name,
@@ -133,6 +139,7 @@ func registerRegisterAgent(s *server.MCPServer, svc *app.CollabService, logger *
 						Status:        "idle",
 						CurrentTasks:  []int{},
 						LastHeartbeat: now,
+						LastSpawnedAt: now,
 					}
 				}
 				return nil

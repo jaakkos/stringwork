@@ -15,6 +15,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 )
@@ -53,7 +54,8 @@ func (m *mockRepository) Save(state *domain.CollabState) error {
 
 // mockPolicy implements app.Policy for tests.
 type mockPolicy struct {
-	workspaceRoot string
+	workspaceRoot       string
+	constitutionSources []constitution.Source
 }
 
 func newMockPolicy() *mockPolicy {
@@ -78,6 +80,9 @@ func (m *mockPolicy) InstanceRetentionDays() int           { return 7 }
 func (m *mockPolicy) TaskBoundInstanceRetentionHours() int { return 24 }
 func (m *mockPolicy) RespawnGrace() time.Duration          { return 60 * time.Second }
 func (m *mockPolicy) SpawnSweepGrace() time.Duration       { return 30 * time.Second }
+func (m *mockPolicy) ConstitutionSources() []constitution.Source {
+	return m.constitutionSources
+}
 func (m *mockPolicy) Orchestration() *policy.OrchestrationConfig {
 	return &policy.OrchestrationConfig{
 		Driver: "cursor",

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -142,6 +143,64 @@ enabled_tools:
 
 	if len(cfg.EnabledTools) != 2 {
 		t.Errorf("expected 2 enabled tools, got %d", len(cfg.EnabledTools))
+	}
+}
+
+// TestConfig_RejectsUnknownTopLevelKey is the regression test for
+// codex SHOULD_FIX #4: a typo at the top level (e.g. `sourcs:` for
+// `sources:` under `constitution`, or any other unknown field) used
+// to be silently dropped by yaml.Unmarshal, hiding the typo and
+// shipping a half-configured server. Strict mode (KnownFields(true))
+// surfaces the typo at config-load time with the file path included.
+func TestConfig_RejectsUnknownTopLevelKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	body := `
+workspace_root: /test
+unknown_top_level_key: oops
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadConfig(configPath)
+	if err == nil {
+		t.Fatal("expected typo'd top-level key to error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown_top_level_key") {
+		t.Errorf("error must name the offending key, got %v", err)
+	}
+	if !strings.Contains(err.Error(), configPath) {
+		t.Errorf("error must include the config path, got %v", err)
+	}
+}
+
+// TestConfig_RejectsUnknownConstitutionScopeKey complements the
+// profile-side test: even when the bad key sits in a constitution
+// source declared inside the main config (not via a separate profile
+// file), strict decoding catches it. This exercises the same
+// `task_kinds` plural-typo pattern codex flagged.
+func TestConfig_RejectsUnknownConstitutionScopeKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	body := `
+workspace_root: /test
+constitution:
+  sources:
+    - name: review-rules
+      type: dir
+      path: /tmp/x
+      scope:
+        task_kinds: ["review"]
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadConfig(configPath)
+	if err == nil {
+		t.Fatal("expected typo'd scope key to error, got nil")
+	}
+	if !strings.Contains(err.Error(), "task_kinds") {
+		t.Errorf("error must name the offending key, got %v", err)
 	}
 }
 

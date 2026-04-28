@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
 
@@ -30,14 +31,37 @@ func registerGetWorkContext(s *server.MCPServer, svc *app.CollabService, logger 
 			}
 			taskID := int(tid)
 			var result string
+			// Captured under lock; the constitution preamble is built
+			// after Query() returns so its filesystem I/O does not
+			// hold the global CollabService lock. scope is derived
+			// from the task's title under the lock (cheap), then
+			// passed to constitutionPreambleForScope outside.
+			var preambleScope constitution.Scope
 			err = svc.Query(func(state *domain.CollabState) error {
 				var wc *domain.WorkContext
-				for _, t := range state.Tasks {
-					if t.ID == taskID && t.ContextID != "" {
-						wc = state.WorkContexts[t.ContextID]
+				var task *domain.Task
+				for i := range state.Tasks {
+					if state.Tasks[i].ID == taskID {
+						task = &state.Tasks[i]
+						if task.ContextID != "" {
+							wc = state.WorkContexts[task.ContextID]
+						}
 						break
 					}
 				}
+				// AgentRole comes from the task's current assignee.
+				// claim_next sets AssignedTo to the parent agent type
+				// (e.g. "claude-code"), so a role-scoped source
+				// declared with `scope.agent_roles: [claude-code]`
+				// resolves identically here and at spawn time. Empty
+				// or "any" assignment leaves AgentRole zero so an
+				// unclaimed task falls through to unscoped sources
+				// only — the safer default than guessing a role.
+				agentRole := ""
+				if task != nil && task.AssignedTo != "" && task.AssignedTo != "any" {
+					agentRole = task.AssignedTo
+				}
+				preambleScope = scopeForTask(task, agentRole)
 				if wc == nil {
 					result = fmt.Sprintf("No work context for task #%d", taskID)
 					return nil
@@ -63,6 +87,9 @@ func registerGetWorkContext(s *server.MCPServer, svc *app.CollabService, logger 
 			})
 			if err != nil {
 				return nil, err
+			}
+			if preamble := constitutionPreambleForScope(svc, preambleScope); preamble != "" {
+				result = preamble + "\n" + result
 			}
 			logger.Printf("get_work_context task_id=%d", taskID)
 			return mcp.NewToolResultText(result), nil

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
 )
@@ -829,7 +831,7 @@ func TestBuildTaskPrompt_Basic(t *testing.T) {
 		Description: "Implement JWT validation",
 		Priority:    2,
 	}
-	prompt := buildTaskPrompt(task, nil, "claude-code-task-42", "/workspace", "cursor", "mcp")
+	prompt := buildTaskPrompt(task, nil, "claude-code-task-42", "/workspace", "cursor", "mcp", "")
 
 	if !strings.Contains(prompt, "task #42") {
 		t.Error("prompt should contain task ID")
@@ -860,7 +862,7 @@ func TestBuildTaskPrompt_CustomDriver(t *testing.T) {
 		Title:    "Test task",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "codex-task-10", "/workspace", "claude-code", "mcp")
+	prompt := buildTaskPrompt(task, nil, "codex-task-10", "/workspace", "claude-code", "mcp", "")
 
 	if !strings.Contains(prompt, "to='claude-code'") {
 		t.Error("prompt should contain send_message to custom driver")
@@ -881,7 +883,7 @@ func TestBuildTaskPrompt_WithWorkContext(t *testing.T) {
 		Background:    "Auth module uses JWT tokens",
 		Constraints:   []string{"do not modify the public API", "read-only investigation"},
 	}
-	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "mcp")
+	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "mcp", "")
 
 	if !strings.Contains(prompt, "src/auth.go") {
 		t.Error("prompt should contain relevant files")
@@ -903,7 +905,7 @@ func TestBuildTaskPrompt_NoDescription(t *testing.T) {
 		Title:    "Quick task",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "agent", "/ws", "cursor", "mcp")
+	prompt := buildTaskPrompt(task, nil, "agent", "/ws", "cursor", "mcp", "")
 
 	if strings.Contains(prompt, "Description:") {
 		t.Error("prompt should not contain Description label when description is empty")
@@ -916,7 +918,7 @@ func TestBuildTaskPrompt_CLIMode(t *testing.T) {
 		Title:    "Add auth middleware",
 		Priority: 2,
 	}
-	prompt := buildTaskPrompt(task, nil, "codex-task-42", "/workspace", "cursor", "cli")
+	prompt := buildTaskPrompt(task, nil, "codex-task-42", "/workspace", "cursor", "cli", "")
 
 	if !strings.Contains(prompt, "COMMUNICATION: Use shell commands") {
 		t.Error("CLI mode prompt should contain CLI communication header")
@@ -951,7 +953,7 @@ func TestBuildTaskPrompt_CLIMode_WithWorkContext(t *testing.T) {
 		RelevantFiles: []string{"src/auth.go"},
 		Constraints:   []string{"read-only"},
 	}
-	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "cli")
+	prompt := buildTaskPrompt(task, wc, "codex-task-7", "/project", "cursor", "cli", "")
 
 	if !strings.Contains(prompt, "src/auth.go") {
 		t.Error("CLI mode prompt should include relevant files")
@@ -966,12 +968,42 @@ func TestBuildTaskPrompt_CLIMode_WithWorkContext(t *testing.T) {
 
 func TestBuildTaskPrompt_EmptyCommDefaultsToCLI(t *testing.T) {
 	task := &domain.Task{ID: 1, Title: "Test"}
-	prompt := buildTaskPrompt(task, nil, "codex-1", "/ws", "cursor", "")
+	prompt := buildTaskPrompt(task, nil, "codex-1", "/ws", "cursor", "", "")
 	if !strings.Contains(prompt, "$STRINGWORK_BIN") {
 		t.Error("empty communication should default to CLI mode")
 	}
 	if strings.Contains(prompt, "set_presence agent=") {
 		t.Error("empty communication should NOT produce MCP instructions")
+	}
+}
+
+func TestBuildTaskPrompt_InlinesConstitutionBeforeTaskBlock(t *testing.T) {
+	task := &domain.Task{ID: 5, Title: "Implement caching", Priority: 3}
+	const inline = "== Constitution ==\nRead these files in order before working. If two files conflict,\nthe earlier file wins.\n\n1. ~/.config/stringwork/constitution/engineering.md\n\n--- ~/.config/stringwork/constitution/engineering.md ---\nAlways ship tests.\n"
+
+	prompt := buildTaskPrompt(task, nil, "codex-task-5", "/workspace", "cursor", "mcp", inline)
+
+	idxConstitution := strings.Index(prompt, "== Constitution ==")
+	idxTaskHeader := strings.Index(prompt, "--- YOUR ASSIGNED TASK")
+	if idxConstitution < 0 {
+		t.Fatalf("constitution header missing in prompt:\n%s", prompt)
+	}
+	if idxTaskHeader < 0 {
+		t.Fatalf("task header missing in prompt:\n%s", prompt)
+	}
+	if idxConstitution >= idxTaskHeader {
+		t.Errorf("constitution must precede task block (constitution=%d, task=%d)", idxConstitution, idxTaskHeader)
+	}
+	if !strings.Contains(prompt, "Always ship tests.") {
+		t.Errorf("inlined file body should be present, got:\n%s", prompt)
+	}
+}
+
+func TestBuildTaskPrompt_NoConstitution_NoExtraHeader(t *testing.T) {
+	task := &domain.Task{ID: 5, Title: "Implement caching", Priority: 3}
+	prompt := buildTaskPrompt(task, nil, "codex-task-5", "/workspace", "cursor", "mcp", "")
+	if strings.Contains(prompt, "== Constitution ==") {
+		t.Errorf("empty constitution should produce no header, got:\n%s", prompt)
 	}
 }
 
@@ -2171,7 +2203,7 @@ func TestBuildTaskPrompt_ClaudeCodeDriver(t *testing.T) {
 		Title:    "Test with claude-code driver",
 		Priority: 3,
 	}
-	prompt := buildTaskPrompt(task, nil, "codex-task-99", "/workspace", "claude-code", "mcp")
+	prompt := buildTaskPrompt(task, nil, "codex-task-99", "/workspace", "claude-code", "mcp", "")
 
 	if !strings.Contains(prompt, "to='claude-code'") {
 		t.Error("prompt should contain send_message to claude-code driver")
@@ -2639,6 +2671,74 @@ func TestNewWorkerManager_PropagatesModel(t *testing.T) {
 		if g := got[id]; g != model {
 			t.Errorf("instance %q: Model = %q, want %q", id, g, model)
 		}
+	}
+}
+
+// erroringSourceForSpawn is a test-only constitution.Source that
+// always returns a configured error. Used to verify resolvedConstitution
+// preserves the surviving good source's content even when another
+// source breaks at spawn time.
+type erroringSourceForSpawn struct {
+	name string
+	err  error
+}
+
+func (e *erroringSourceForSpawn) Name() string { return e.name }
+func (e *erroringSourceForSpawn) List(constitution.Scope) ([]constitution.File, error) {
+	return nil, e.err
+}
+
+// TestResolvedConstitution_PartialFailureSurvivesAtSpawn is the
+// regression test for codex's MUST_FIX #2 on the spawn-prompt side:
+// when one source errors but another resolves cleanly, the spawn
+// prompt must still inline the good source's full body. Discarding
+// the survivors on any non-nil err — which is what the previous
+// implementation did — is the regression that nullified the upstream
+// constitution.Resolve fix.
+func TestResolvedConstitution_PartialFailureSurvivesAtSpawn(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "alpha.md"),
+		[]byte("alpha rule body"), 0o644); err != nil {
+		t.Fatalf("write alpha.md: %v", err)
+	}
+
+	wm := NewWorkerManager(nil, func() string { return "cursor" }, nil, nil, "/tmp", testLogger(t))
+	wm.SetConstitutionSources(func() []constitution.Source {
+		return []constitution.Source{
+			&constitution.DirSource{SourceName: "good", Path: dir, Include: []string{"*.md"}},
+			&erroringSourceForSpawn{name: "broken", err: errors.New("synthetic source failure")},
+		}
+	})
+
+	got := wm.resolvedConstitution(constitution.Scope{})
+	if got == "" {
+		t.Fatal("resolvedConstitution returned empty despite one source resolving cleanly")
+	}
+	if !strings.HasPrefix(got, "== Constitution ==") {
+		t.Errorf("expected constitution preamble header, got:\n%s", got)
+	}
+	if !strings.Contains(got, "alpha.md") {
+		t.Errorf("inline output must list the surviving source's display path, got:\n%s", got)
+	}
+	if !strings.Contains(got, "alpha rule body") {
+		t.Errorf("inline output must include the surviving source's body, got:\n%s", got)
+	}
+}
+
+// TestResolvedConstitution_NoSurvivors_ReturnsEmpty is the inverse —
+// when every source errors out, the spawn prompt must NOT include a
+// mostly-empty constitution header. Prevents regressions where future
+// refactors render preamble headers with zero entries.
+func TestResolvedConstitution_NoSurvivors_ReturnsEmpty(t *testing.T) {
+	wm := NewWorkerManager(nil, func() string { return "cursor" }, nil, nil, "/tmp", testLogger(t))
+	wm.SetConstitutionSources(func() []constitution.Source {
+		return []constitution.Source{
+			&erroringSourceForSpawn{name: "a", err: errors.New("boom-a")},
+			&erroringSourceForSpawn{name: "b", err: errors.New("boom-b")},
+		}
+	})
+	if got := wm.resolvedConstitution(constitution.Scope{}); got != "" {
+		t.Errorf("all-failure case must return empty string, got:\n%s", got)
 	}
 }
 

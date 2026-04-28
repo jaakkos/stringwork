@@ -178,6 +178,14 @@ func (w *workerAPI) handleProgress(rw http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("task #%d not found", req.TaskID)
 		}
 
+		// Mirror handleHeartbeat: a worker that calls `progress` before
+		// its first `heartbeat` has no AgentInstance row yet. Without
+		// resolveWorkerAgent here, findInstance returns nil, the
+		// inst-level LastHeartbeat / Progress updates silently no-op,
+		// and the watchdog (worker_status pane, SLA timers) reads
+		// stale values — defeating the very liveness signal
+		// report_progress is documented to provide.
+		resolveWorkerAgent(state, req.Agent)
 		inst := findInstance(state, req.Agent)
 		if inst != nil {
 			inst.LastHeartbeat = now
@@ -753,12 +761,16 @@ func resolveWorkerAgent(state *domain.CollabState, agent string) string {
 	if !parentRegistered && !parentHasInstance {
 		return agent
 	}
+	// LastSpawnedAt seeds the STOP-banner spawn cutoff for the
+	// task-bound instance row materialised on first contact through
+	// the CLI/REST surface. See heartbeat.go for the rationale.
 	state.AgentInstances[agent] = &domain.AgentInstance{
-		InstanceID:   agent,
-		AgentType:    parentType,
-		Role:         domain.RoleWorker,
-		Status:       "idle",
-		CurrentTasks: []int{},
+		InstanceID:    agent,
+		AgentType:     parentType,
+		Role:          domain.RoleWorker,
+		Status:        "idle",
+		CurrentTasks:  []int{},
+		LastSpawnedAt: time.Now(),
 	}
 	return agent
 }

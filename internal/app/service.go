@@ -76,3 +76,8 @@ func (s *CollabService) Query(fn func(*domain.CollabState) error) error {
 
 // Policy returns the policy for use in handlers that need retention etc.
 func (s *CollabService) Policy() Policy { return s.policy }
+
+// Logger exposes the service's logger for tool handlers that need to
+// surface non-fatal warnings (e.g. partial constitution resolution
+// failures) without taking a separate logger dependency.
+func (s *CollabService) Logger() *log.Logger { return s.logger }

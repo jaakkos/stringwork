@@ -76,6 +76,9 @@ func main() {
 		case "admin":
 			runAdminCommand(os.Args[2:])
 			return
+		case "constitution":
+			runConstitutionCommand(os.Args[2:])
+			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
 			return
@@ -198,6 +201,13 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 	}
 
 	if err := svc.Run(func(state *domain.CollabState) error {
+		// DaemonStartedAt is the driver-side fallback for the
+		// STOP-banner spawn cutoff. Set it immediately on boot so
+		// the cursor driver (which never gets an AgentInstance row)
+		// never sees STOP banners triggered by tasks that were
+		// cancelled before this daemon process started. Per-process
+		// state by design — fresh daemon = fresh cutoff.
+		state.DaemonStartedAt = time.Now()
 		app.RefreshHeartbeatsOnStartup(state)
 		report := app.MigrateTaskBoundCorruption(state)
 		if report.Total() > 0 {
@@ -385,6 +395,10 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		// test daemon — would have the test's workers accidentally dial
 		// back into the personal daemon and get "unknown agent" errors.
 		wm.SetSocketPath(pol.SocketPath())
+		// Bind constitution discovery to the live policy so worker spawn
+		// prompts pick up rule changes (and config reloads) on the next
+		// task without restarting the daemon.
+		wm.SetConstitutionSources(pol.ConstitutionSources)
 		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
 			var entries []app.MCPServerEntry
 			for name, sc := range mcpCfg {
@@ -655,7 +669,16 @@ func setupLogger(logFilePath string) *log.Logger {
 		writers = append(writers, os.Stderr)
 	}
 
-	return log.New(io.MultiWriter(writers...), "[mcp-pair] ", log.LstdFlags|log.Lshortfile)
+	// Also redirect the standard `log` package so callers that use
+	// log.Printf (e.g. policy.constitutionProfileSources) reach the
+	// same destinations. Without this, daemon-mode log.Printf calls
+	// silently disappear when stderr is detached from a terminal.
+	mw := io.MultiWriter(writers...)
+	log.SetOutput(mw)
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("[mcp-pair] ")
+
+	return log.New(mw, "[mcp-pair] ", log.LstdFlags|log.Lshortfile)
 }
 
 // loadConfig loads policy configuration from MCP_CONFIG, falling back to
