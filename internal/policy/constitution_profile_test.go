@@ -185,6 +185,37 @@ sourcs:
 	}
 }
 
+// TestProfile_AcceptsCoLocatedTaskTemplatesBlock is the regression test
+// for Phase 4 of the task-template work: a single
+// stringwork.profile.yaml that ships BOTH `sources:` (constitution) and
+// `task_templates:` (task-template overlay) in the same file must
+// parse cleanly through LoadConstitutionProfile -- the constitution
+// loader is supposed to ignore the task-template block, not strict-
+// reject it as an unknown top-level field. The companion
+// LoadTaskTemplateProfile already permissively decodes the same file
+// to extract its own block (see task_template_config.go).
+func TestProfile_AcceptsCoLocatedTaskTemplatesBlock(t *testing.T) {
+	profilePath, _ := writeProfile(t, `
+sources:
+  - name: rules
+    type: dir
+    path: `+t.TempDir()+`
+task_templates:
+  sources:
+    - name: code-review-overlay
+      type: dir
+      path: `+t.TempDir()+`
+`)
+
+	profile, _, err := LoadConstitutionProfile(profilePath)
+	if err != nil {
+		t.Fatalf("co-located task_templates block must parse cleanly, got %v", err)
+	}
+	if len(profile.Sources) != 1 || profile.Sources[0].Name != "rules" {
+		t.Errorf("constitution sources lost or mangled: %+v", profile.Sources)
+	}
+}
+
 func TestPolicy_ConstitutionSources_ProfileMissingProfile_StillReturnsGlobal(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Constitution = &ConstitutionConfig{

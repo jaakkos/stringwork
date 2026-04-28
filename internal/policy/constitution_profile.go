@@ -27,6 +27,18 @@ import (
 // has cloned the team's devtools repo.
 type ConstitutionProfile struct {
 	Sources []ConstitutionSourceConfig `yaml:"sources,omitempty"`
+
+	// TaskTemplates is accepted-but-ignored at the constitution loader.
+	// A team profile can ship both `sources:` (constitution) and
+	// `task_templates:` (task-template overlays) in the same file --
+	// the task-template subsystem reads its own block via
+	// LoadTaskTemplateProfile. Keeping the field declared here means the
+	// strict-decode enabled below still catches genuine top-level typos
+	// (e.g. `tsk_templates:`) without rejecting the documented co-located
+	// shape. yaml.Node accepts any sub-tree without validating its inner
+	// fields, which is what we want -- inner typos are caught when the
+	// task-template loader strict-decodes its own block.
+	TaskTemplates yaml.Node `yaml:"task_templates,omitempty"`
 }
 
 // LoadConstitutionProfile reads and parses a profile file. The
