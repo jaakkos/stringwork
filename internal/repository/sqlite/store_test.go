@@ -556,6 +556,83 @@ func TestNew_failsOnInvalidDir(t *testing.T) {
 	}
 }
 
+// TestAddColumn_SuppressesDuplicate verifies the narrowed migration
+// error path: re-running an ALTER TABLE … ADD COLUMN against an
+// already-migrated table is a no-op, while every other failure mode
+// (invalid SQL, missing table) propagates so it surfaces at startup.
+//
+// The pre-fix runMigrations used `_, _ = db.Exec(...)` which swallowed
+// every error — the symptom was a much-later cryptic "no such column"
+// from a downstream SELECT when migrations actually failed. Caught by
+// the claude-code worker on Phases 1-3 (raised as QUESTION).
+func TestAddColumn_SuppressesDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "addcol.sqlite")
+	db, err := openSQLiteRaw(path)
+	if err != nil {
+		t.Fatalf("openSQLiteRaw: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`CREATE TABLE widgets (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	addColor := "ALTER TABLE widgets ADD COLUMN color TEXT NOT NULL DEFAULT ''"
+
+	if err := addColumn(db, addColor); err != nil {
+		t.Fatalf("addColumn first call: %v", err)
+	}
+	if err := addColumn(db, addColor); err != nil {
+		t.Errorf("addColumn re-run should suppress duplicate-column, got: %v", err)
+	}
+}
+
+// TestAddColumn_PropagatesRealErrors confirms addColumn does NOT
+// swallow non-duplicate errors. Without this guard a typo in the DDL
+// (e.g. wrong table name) would silently fail at startup and surface
+// as a downstream "no such column" much later.
+func TestAddColumn_PropagatesRealErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "addcol_err.sqlite")
+	db, err := openSQLiteRaw(path)
+	if err != nil {
+		t.Fatalf("openSQLiteRaw: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := addColumn(db, "ALTER TABLE no_such_table ADD COLUMN x TEXT"); err == nil {
+		t.Error("addColumn should propagate error when target table does not exist")
+	}
+}
+
+// TestNew_PropagatesMigrationFailure pins the New() contract: a
+// migration that fails for a real reason (not "duplicate column")
+// must surface as a New() error so the daemon refuses to start with
+// a half-migrated database. The pre-fix code dropped the error on the
+// floor and returned a usable Store on top of a broken schema.
+func TestNew_PropagatesMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.sqlite")
+	rawDB, err := openSQLiteRaw(path)
+	if err != nil {
+		t.Fatalf("openSQLiteRaw: %v", err)
+	}
+	if _, err := rawDB.Exec(`
+CREATE TABLE tasks (
+	id INTEGER PRIMARY KEY,
+	template INTEGER NOT NULL DEFAULT 0
+)`); err != nil {
+		t.Fatalf("seed broken schema: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	if _, err := New(path); err == nil {
+		t.Error("New should fail when a migration would conflict with the existing schema (template column with wrong type)")
+	}
+}
+
 // TestMigration_AddsLastSpawnedAtColumn proves the runtime migration
 // adds last_spawned_at to a pre-existing agent_instances table that
 // pre-dates the column. Regression guard for MUST_FIX #3a — the kill-

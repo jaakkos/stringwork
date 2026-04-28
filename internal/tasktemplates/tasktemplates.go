@@ -128,15 +128,22 @@ type Classifier struct {
 // Constraints become the task's constraints. Template + Aspect are the
 // metadata fields persisted on domain.Task (drive list_tasks --template
 // queries and the constitution alias rule).
+//
+// Both `json:` and `yaml:` tags are required. The MCP tool task_plan
+// returns JSON; the CLI `task-template plan` subcommand prints YAML.
+// yaml.v3 falls back to lowercased-no-separator field names when no
+// tag is present, so missing tags emit `relevantfiles` instead of the
+// snake_case the loader's input YAML uses (caught by claude-code review
+// on Phases 1-3, file:line drift verified).
 type PlannedAspect struct {
-	Template      string   `json:"template"`
-	Aspect        string   `json:"aspect"`
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	RelevantFiles []string `json:"relevant_files"`
-	Constraints   []string `json:"constraints"`
-	FindingFormat string   `json:"finding_format"`
-	SpawnedBy     []string `json:"spawned_by"`
+	Template      string   `json:"template" yaml:"template"`
+	Aspect        string   `json:"aspect" yaml:"aspect"`
+	Title         string   `json:"title" yaml:"title"`
+	Description   string   `json:"description" yaml:"description"`
+	RelevantFiles []string `json:"relevant_files" yaml:"relevant_files"`
+	Constraints   []string `json:"constraints,omitempty" yaml:"constraints,omitempty"`
+	FindingFormat string   `json:"finding_format" yaml:"finding_format"`
+	SpawnedBy     []string `json:"spawned_by" yaml:"spawned_by"`
 }
 
 // Plan is the result of Plan(inputs, template). Tags is the union of
@@ -146,9 +153,9 @@ type PlannedAspect struct {
 // order the driver should spawn them — defaults first, then routing-rule
 // declaration order across sources.
 type Plan struct {
-	Template string          `json:"template"`
-	Tags     []string        `json:"tags"`
-	Aspects  []PlannedAspect `json:"aspects"`
+	Template string          `json:"template" yaml:"template"`
+	Tags     []string        `json:"tags" yaml:"tags"`
+	Aspects  []PlannedAspect `json:"aspects" yaml:"aspects"`
 }
 
 // Source produces the templates this source contributes. Each source
@@ -206,9 +213,15 @@ type ChecklistBody struct {
 //     unless a source's body has Replace=true, in which case the
 //     accumulated content is dropped and only the replacing body is kept
 //     (later sources still concatenate after a Replace).
-//   - Inputs declaration: first source wins outright; later sources are
-//     ignored. Teams that want to relax `required` keys must redeclare
-//     the inputs block at their source position.
+//   - Title / Description / Inputs.Required / Inputs.Declarations:
+//     first source declaring a non-empty value wins; later sources can
+//     fill in fields the earlier source left unset (nil slice / nil
+//     map / "" string) but cannot overwrite a value already present.
+//     Same fill-in rule applies uniformly to all four fields. Teams
+//     that ship an `inputs:` block AFTER defaults therefore cannot
+//     relax `required` if the defaults already declared it; they need
+//     to fork the template id (one source, one definition) or convince
+//     upstream defaults to drop the key.
 //
 // Duplicate ids within a SINGLE source are surfaced as an error from
 // the source (DirSource.List, EmbedSource.List); Resolve trusts that

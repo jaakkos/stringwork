@@ -193,61 +193,137 @@ func New(path string) (app.StateRepository, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite indexes: %w", err)
 	}
-	// Run migrations for existing databases (ignore errors for already-applied migrations).
-	_ = runMigrations(db)
+	if err := runMigrations(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite migrations: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
-// runMigrations applies schema migrations for older databases. Errors are
-// silently ignored because some may already be applied.
+// runMigrations applies schema migrations for older databases. Each
+// migration is idempotent — an ALTER TABLE that adds a column that's
+// already present is suppressed via the "duplicate column" filter in
+// addColumn so a re-run is a no-op. Real failures (DB locked, disk
+// full, corrupt DB, permission errors) propagate so they surface at
+// startup where they're easy to diagnose, instead of much later as a
+// cryptic "no such column" from a downstream SELECT.
+//
+// CREATE TABLE statements use IF NOT EXISTS for the same idempotency
+// and their errors propagate via createTable.
 func runMigrations(db *sql.DB) error {
-	_, _ = db.Exec("ALTER TABLE presence ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN dependencies TEXT NOT NULL DEFAULT '[]'")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN context_id TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN worker_type TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN result_summary TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN expected_duration_sec INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN progress_description TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN last_progress_at TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN last_failure_at TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN requires_review INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN review_status TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
-	// template / aspect carry the task-templates provenance for this
-	// row; see domain.Task.Template for the full contract. NOT NULL
-	// DEFAULT '' so pre-deploy rows back-fill as "" — the empty
-	// string is the documented "no template" signal at the Go layer
-	// (constitution.TaskKindForTask falls back to TaskKindFromTitle
-	// when Template == "").
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN template TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN aspect TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec(schemaAgentInstances)
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_step INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_total_steps INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress_updated_at TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec(schemaWorkContexts)
-	_, _ = db.Exec("ALTER TABLE work_contexts ADD COLUMN worktree_name TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
-	// last_spawned_at is the spawn-cutoff column for the STOP-banner
-	// suppression logic in BuildBanner. Without it, AgentInstance
-	// rows reload from disk with a zero LastSpawnedAt every time,
-	// nullifying the per-spawn cutoff and producing the kill-respawn
-	// loop diagnosed during the codex review (claude-code-task-32).
-	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN last_spawned_at TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE work_contexts ADD COLUMN previous_output TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec(schemaRegisteredAgents)
-	_, _ = db.Exec("ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN acceptance TEXT NOT NULL DEFAULT '[]'")
-	_, _ = db.Exec("ALTER TABLE plan_items ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]'")
+	migrations := []string{
+		"ALTER TABLE presence ADD COLUMN workspace TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 3",
+		"ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN dependencies TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE tasks ADD COLUMN context_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN worker_type TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE tasks ADD COLUMN result_summary TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN expected_duration_sec INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE tasks ADD COLUMN progress_description TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE tasks ADD COLUMN last_progress_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE tasks ADD COLUMN last_failure_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN requires_review INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE tasks ADD COLUMN review_status TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''",
+		// template / aspect carry the task-templates provenance for
+		// this row; see domain.Task.Template for the full contract.
+		// NOT NULL DEFAULT '' so pre-deploy rows back-fill as "" —
+		// the empty string is the documented "no template" signal
+		// at the Go layer (constitution.TaskKindForTask falls back
+		// to TaskKindFromTitle when Template == "").
+		"ALTER TABLE tasks ADD COLUMN template TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN aspect TEXT NOT NULL DEFAULT ''",
+	}
+	for _, ddl := range migrations {
+		if err := addColumn(db, ddl); err != nil {
+			return err
+		}
+	}
+	if err := createTable(db, schemaAgentInstances); err != nil {
+		return err
+	}
+	agentInstancesMigrations := []string{
+		"ALTER TABLE agent_instances ADD COLUMN workspace TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agent_instances ADD COLUMN progress TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agent_instances ADD COLUMN progress_step INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE agent_instances ADD COLUMN progress_total_steps INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE agent_instances ADD COLUMN progress_updated_at TEXT NOT NULL DEFAULT ''",
+	}
+	for _, ddl := range agentInstancesMigrations {
+		if err := addColumn(db, ddl); err != nil {
+			return err
+		}
+	}
+	if err := createTable(db, schemaWorkContexts); err != nil {
+		return err
+	}
+	tailMigrations := []string{
+		"ALTER TABLE work_contexts ADD COLUMN worktree_name TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agent_instances ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+		// last_spawned_at is the spawn-cutoff column for the STOP-
+		// banner suppression logic in BuildBanner. Without it,
+		// AgentInstance rows reload from disk with a zero
+		// LastSpawnedAt every time, nullifying the per-spawn cutoff
+		// and producing the kill-respawn loop diagnosed during the
+		// codex review (claude-code-task-32).
+		"ALTER TABLE agent_instances ADD COLUMN last_spawned_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE work_contexts ADD COLUMN previous_output TEXT NOT NULL DEFAULT ''",
+	}
+	for _, ddl := range tailMigrations {
+		if err := addColumn(db, ddl); err != nil {
+			return err
+		}
+	}
+	if err := createTable(db, schemaRegisteredAgents); err != nil {
+		return err
+	}
+	finalMigrations := []string{
+		"ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE plan_items ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE plan_items ADD COLUMN acceptance TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE plan_items ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]'",
+	}
+	for _, ddl := range finalMigrations {
+		if err := addColumn(db, ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addColumn runs an ALTER TABLE … ADD COLUMN statement, suppressing
+// the SQLite "duplicate column" error so re-running migrations against
+// an already-migrated database is a no-op. Every other error
+// (DB locked, disk full, corrupt DB, permission denied) propagates so
+// callers can surface them at startup.
+//
+// SQLite's error text for the suppressed case is "duplicate column
+// name: <col>" — a substring match is sufficient and avoids depending
+// on the modernc.org/sqlite driver's typed errors.
+func addColumn(db *sql.DB, ddl string) error {
+	_, err := db.Exec(ddl)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "duplicate column") {
+		return nil
+	}
+	return fmt.Errorf("migration %q: %w", ddl, err)
+}
+
+// createTable runs a CREATE TABLE IF NOT EXISTS schema. The IF NOT
+// EXISTS guard makes the statement idempotent at the SQL layer, so
+// here we just propagate any error directly — there is no expected
+// "this already exists" error class to suppress.
+func createTable(db *sql.DB, ddl string) error {
+	if _, err := db.Exec(ddl); err != nil {
+		return fmt.Errorf("create table: %w", err)
+	}
 	return nil
 }
 

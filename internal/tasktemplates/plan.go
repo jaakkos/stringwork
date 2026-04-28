@@ -211,10 +211,10 @@ func composeBackground(template Template, files, tags []string, summary string) 
 	}
 	if len(files) > 0 {
 		b.WriteString("**Files in scope**:\n")
-		const cap = 20
+		const maxFiles = 20
 		for i, f := range files {
-			if i >= cap {
-				fmt.Fprintf(&b, "- (+%d more)\n", len(files)-cap)
+			if i >= maxFiles {
+				fmt.Fprintf(&b, "- (+%d more)\n", len(files)-maxFiles)
 				break
 			}
 			fmt.Fprintf(&b, "- %s\n", f)
@@ -282,7 +282,14 @@ Severity: MUST_FIX | SHOULD_FIX | NIT | QUESTION
 // separator otherwise.
 //
 // Patterns that fail to compile (filepath.ErrBadPattern) silently
-// produce no matches; doctor surfaces them at validation time.
+// produce no matches at runtime. Doctor catches two failure modes
+// at validation time:
+//
+//   - filepath.Match's own bad-pattern errors (rare; "[" without "]").
+//   - Middle-"**" constructions like "a/**/b" that this engine does
+//     NOT support — filepath.Match accepts them silently (treats "**"
+//     as two adjacent "*"s with no error), so doctor has to detect
+//     them by string inspection. See doctorTemplate's classifier loop.
 func matchPattern(pattern, path string) bool {
 	if pattern == "" || path == "" {
 		return false
@@ -310,9 +317,10 @@ func matchPattern(pattern, path string) bool {
 	}
 	// A "**" left in the middle (e.g. "a/**/b") falls back to "no match"
 	// rather than guessing — keeps the engine predictable. Doctor
-	// surfaces unsupported patterns as ERROR via filepath.Match's bad-
-	// pattern check above (which returns ErrBadPattern for "**"-in-the-
-	// middle constructions).
+	// surfaces middle-"**" patterns explicitly via string inspection
+	// (filepath.Match treats "**" as two adjacent "*"s and does NOT
+	// return ErrBadPattern, so we cannot rely on the loader's pattern
+	// check to catch them).
 	if strings.Contains(core, "**") {
 		return false
 	}

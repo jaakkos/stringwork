@@ -122,63 +122,123 @@ func doctorTemplate(t Template) []DoctorIssue {
 		aspectIDs[a.ID] = struct{}{}
 	}
 
-	routingIDs := map[string]bool{}
+	// Group routing rules by id so the duplicate check can distinguish
+	// "two enabled rules from different sources" (a true conflict —
+	// both will fire) from "one enabled + one disabled" (the documented
+	// override pattern: a team uses disabled: true to suppress an
+	// upstream default).
+	routingByID := map[string][]RoutingRule{}
 	for _, r := range t.Routing {
-		if _, dup := routingIDs[r.ID]; dup {
-			// Cross-source dup — this can happen when a team file
-			// reuses a default rule's id without `disabled: true`.
+		routingByID[r.ID] = append(routingByID[r.ID], r)
+	}
+	for id, rs := range routingByID {
+		if len(rs) <= 1 {
+			continue
+		}
+		enabled := 0
+		var firstOverlay RoutingRule
+		for i, r := range rs {
+			if !r.Disabled {
+				enabled++
+			}
+			if i == 1 {
+				// Source of the second declaration — the one that
+				// "should have" used disabled: true if it meant to
+				// override.
+				firstOverlay = r
+			}
+		}
+		if enabled > 1 {
+			issues = append(issues, DoctorIssue{
+				Severity: "ERROR",
+				Source:   firstOverlay.Source,
+				Template: t.ID,
+				Message:  fmt.Sprintf("routing rule %q declared by multiple sources, all enabled — at least one must set disabled: true to override", id),
+			})
+		}
+	}
+
+	for _, r := range t.Routing {
+		if r.Disabled {
+			continue
+		}
+		if _, ok := aspectIDs[r.Spawn]; !ok {
 			issues = append(issues, DoctorIssue{
 				Severity: "ERROR",
 				Source:   r.Source,
 				Template: t.ID,
-				Message:  fmt.Sprintf("routing rule %q declared by multiple sources without disabled: true", r.ID),
+				Message:  fmt.Sprintf("routing rule %q spawns unknown aspect %q", r.ID, r.Spawn),
 			})
 		}
-		routingIDs[r.ID] = true
-		if !r.Disabled {
-			if _, ok := aspectIDs[r.Spawn]; !ok {
-				issues = append(issues, DoctorIssue{
-					Severity: "ERROR",
-					Source:   r.Source,
-					Template: t.ID,
-					Message:  fmt.Sprintf("routing rule %q spawns unknown aspect %q", r.ID, r.Spawn),
-				})
-			}
-			if strings.TrimSpace(r.When) == "" && len(r.WhenTags) == 0 {
-				issues = append(issues, DoctorIssue{
-					Severity: "WARN",
-					Source:   r.Source,
-					Template: t.ID,
-					Message:  fmt.Sprintf("routing rule %q has neither when nor when_tags — it will never fire", r.ID),
-				})
-			}
+		if strings.TrimSpace(r.When) == "" && len(r.WhenTags) == 0 {
+			issues = append(issues, DoctorIssue{
+				Severity: "WARN",
+				Source:   r.Source,
+				Template: t.ID,
+				Message:  fmt.Sprintf("routing rule %q has neither when nor when_tags — it will never fire", r.ID),
+			})
 		}
 	}
 
-	classifierIDs := map[string]bool{}
+	// Classifiers: duplicate check uses the same enabled-vs-disabled
+	// distinction as routing. Pattern validation also runs here, with
+	// an explicit middle-"**" guard because filepath.Match silently
+	// accepts "a/**/b" (it treats "**" as two adjacent "*"s with no
+	// ErrBadPattern), but matchPattern in plan.go drops to "no match"
+	// for any unsupported "**" position. Without this check the
+	// classifier compiles, the doctor passes, and the runtime never
+	// fires — silent failure mode the team has no way to attribute.
+	classifierByID := map[string][]Classifier{}
+	for _, c := range t.Classifiers {
+		classifierByID[c.ID] = append(classifierByID[c.ID], c)
+	}
+	for id, cs := range classifierByID {
+		if len(cs) <= 1 {
+			continue
+		}
+		enabled := 0
+		var firstOverlay Classifier
+		for i, c := range cs {
+			if !c.Disabled {
+				enabled++
+			}
+			if i == 1 {
+				firstOverlay = c
+			}
+		}
+		if enabled > 1 {
+			issues = append(issues, DoctorIssue{
+				Severity: "ERROR",
+				Source:   firstOverlay.Source,
+				Template: t.ID,
+				Message:  fmt.Sprintf("classifier %q declared by multiple sources, all enabled — at least one must set disabled: true to override", id),
+			})
+		}
+	}
+
 	emittedTags := map[string]struct{}{}
 	for _, c := range t.Classifiers {
-		if _, dup := classifierIDs[c.ID]; dup {
+		if c.Disabled {
+			continue
+		}
+		if _, err := filepath.Match(c.Pattern, ""); err != nil {
 			issues = append(issues, DoctorIssue{
 				Severity: "ERROR",
 				Source:   c.Source,
 				Template: t.ID,
-				Message:  fmt.Sprintf("classifier %q declared by multiple sources without disabled: true", c.ID),
+				Message:  fmt.Sprintf("classifier %q has invalid pattern %q: %v", c.ID, c.Pattern, err),
 			})
 		}
-		classifierIDs[c.ID] = true
-		if !c.Disabled {
-			if _, err := filepath.Match(c.Pattern, ""); err != nil {
-				issues = append(issues, DoctorIssue{
-					Severity: "ERROR",
-					Source:   c.Source,
-					Template: t.ID,
-					Message:  fmt.Sprintf("classifier %q has invalid pattern %q: %v", c.ID, c.Pattern, err),
-				})
-			}
-			if c.Tag != "" {
-				emittedTags[c.Tag] = struct{}{}
-			}
+		if isMiddleDoubleStar(c.Pattern) {
+			issues = append(issues, DoctorIssue{
+				Severity: "ERROR",
+				Source:   c.Source,
+				Template: t.ID,
+				Message:  fmt.Sprintf("classifier %q pattern %q has unsupported middle \"**\" — use leading \"**/X\", trailing \"X/**\", or \"**/X/**\" instead", c.ID, c.Pattern),
+			})
+		}
+		if c.Tag != "" {
+			emittedTags[c.Tag] = struct{}{}
 		}
 	}
 
@@ -232,17 +292,25 @@ func doctorTemplate(t Template) []DoctorIssue {
 		}
 	}
 
-	// Disabled rules pointing at ids no source declares — typo guard.
+	// Orphan-disable: a `disabled: true` declaration only makes sense
+	// when SOME other (enabled) source declares the same id — the
+	// disable is overriding that one. If no enabled rule with this id
+	// exists in any source, the disable is dead config (typo guard:
+	// catches "when-securty-tag" trying to disable "when-security-tag").
+	//
+	// The check uses routingByID / classifierByID built above, which
+	// group by id across all sources. A disabled rule whose group
+	// contains zero enabled rules is the orphan case.
 	for _, r := range t.Routing {
 		if !r.Disabled {
 			continue
 		}
-		if !routingIDs[r.ID] {
+		if !groupHasEnabledRule(routingByID[r.ID]) {
 			issues = append(issues, DoctorIssue{
 				Severity: "ERROR",
 				Source:   r.Source,
 				Template: t.ID,
-				Message:  fmt.Sprintf("disabled routing rule %q matches no other source's rule", r.ID),
+				Message:  fmt.Sprintf("disabled routing rule %q matches no enabled rule from any source", r.ID),
 			})
 		}
 	}
@@ -250,12 +318,12 @@ func doctorTemplate(t Template) []DoctorIssue {
 		if !c.Disabled {
 			continue
 		}
-		if !classifierIDs[c.ID] {
+		if !groupHasEnabledClassifier(classifierByID[c.ID]) {
 			issues = append(issues, DoctorIssue{
 				Severity: "ERROR",
 				Source:   c.Source,
 				Template: t.ID,
-				Message:  fmt.Sprintf("disabled classifier %q matches no other source's classifier", c.ID),
+				Message:  fmt.Sprintf("disabled classifier %q matches no enabled classifier from any source", c.ID),
 			})
 		}
 	}
@@ -293,4 +361,41 @@ func doctorTemplate(t Template) []DoctorIssue {
 	}
 
 	return issues
+}
+
+// isMiddleDoubleStar reports whether pattern contains a "**" segment
+// that is not a leading "**/" or trailing "/**". Middle-"**" is the
+// silent-failure case matchPattern explicitly drops to "no match" —
+// see plan.go's matchPattern doc and inline comment for why.
+func isMiddleDoubleStar(pattern string) bool {
+	if !strings.Contains(pattern, "**") {
+		return false
+	}
+	core := pattern
+	core = strings.TrimPrefix(core, "**/")
+	core = strings.TrimSuffix(core, "/**")
+	return strings.Contains(core, "**")
+}
+
+// groupHasEnabledRule reports whether any rule in rs has Disabled=false.
+// Used by the orphan-disable check: a disabled rule is orphan when its
+// id-group contains zero enabled rules across all sources.
+func groupHasEnabledRule(rs []RoutingRule) bool {
+	for _, r := range rs {
+		if !r.Disabled {
+			return true
+		}
+	}
+	return false
+}
+
+// groupHasEnabledClassifier is the classifier counterpart to
+// groupHasEnabledRule.
+func groupHasEnabledClassifier(cs []Classifier) bool {
+	for _, c := range cs {
+		if !c.Disabled {
+			return true
+		}
+	}
+	return false
 }

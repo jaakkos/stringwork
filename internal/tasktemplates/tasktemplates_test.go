@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestDefaultEmbeddedSource_LoadsCodeReview asserts the shipped
@@ -370,6 +372,279 @@ classifiers:
 		if !found {
 			t.Errorf("missing doctor finding %q in %v", want, gotMessages)
 		}
+	}
+}
+
+// TestPlan_YAMLMarshalUsesSnakeCase pins the snake_case wire format
+// for the CLI `task-template plan` YAML dump. yaml.v3 falls back to
+// lowercased-no-separator field names when a struct lacks `yaml:`
+// tags ("relevantfiles" instead of "relevant_files"), which silently
+// breaks every author who copy-pastes the CLI YAML to validate
+// driver code shape. Caught by the claude-code worker on Phases 1-3.
+func TestPlan_YAMLMarshalUsesSnakeCase(t *testing.T) {
+	plan := Plan{
+		Template: "code-review",
+		Tags:     []string{"PROTO"},
+		Aspects: []PlannedAspect{
+			{
+				Template:      "code-review",
+				Aspect:        "correctness",
+				Title:         "Correctness",
+				Description:   "body",
+				RelevantFiles: []string{"a.go"},
+				FindingFormat: "format",
+				SpawnedBy:     []string{"always-correctness"},
+			},
+		},
+	}
+	out, err := yaml.Marshal(plan)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	got := string(out)
+	mustContain := []string{
+		"relevant_files:",
+		"finding_format:",
+		"spawned_by:",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in YAML output:\n%s", want, got)
+		}
+	}
+	mustNotContain := []string{
+		"relevantfiles:",
+		"findingformat:",
+		"spawnedby:",
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(got, bad) {
+			t.Errorf("unexpected %q in YAML output (yaml: tag missing?):\n%s", bad, got)
+		}
+	}
+}
+
+// TestDoctor_OrphanDisableFiresWhenNoEnabledMatch covers the case the
+// pre-fix orphan-disable check was structurally unable to catch: a
+// `disabled: true` declaration whose id matches no enabled rule from
+// any source. The original implementation populated a single map from
+// every rule (disabled included), then asked "is this id in the map?"
+// — always true, so the warning never fired.
+func TestDoctor_OrphanDisableFiresWhenNoEnabledMatch(t *testing.T) {
+	src := newFakeSource("orphan", map[string]string{
+		"buggy/template.yaml": `
+id: buggy
+title: Buggy
+aspects:
+  - id: correctness
+    title: Correctness
+`,
+		"buggy/routing.yaml": `
+routing:
+  - id: typo-disable
+    disabled: true
+    spawn: correctness
+  - id: real-rule
+    when: always
+    spawn: correctness
+`,
+		"buggy/classifiers.yaml": `
+classifiers:
+  - id: typo-classifier-disable
+    disabled: true
+    pattern: "*.go"
+    tag: GO
+  - id: real-classifier
+    pattern: "*.proto"
+    tag: PROTO
+`,
+	})
+	issues, err := Doctor([]Source{src})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	gotMessages := make([]string, 0, len(issues))
+	for _, iss := range issues {
+		gotMessages = append(gotMessages, iss.Severity+": "+iss.Message)
+	}
+	mustContain := []string{
+		"ERROR: disabled routing rule \"typo-disable\" matches no enabled rule from any source",
+		"ERROR: disabled classifier \"typo-classifier-disable\" matches no enabled classifier from any source",
+	}
+	for _, want := range mustContain {
+		found := false
+		for _, m := range gotMessages {
+			if strings.Contains(m, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing doctor finding %q in %v", want, gotMessages)
+		}
+	}
+}
+
+// TestDoctor_AcceptsDisabledOverride confirms the duplicate-rule check
+// distinguishes "two enabled rules from different sources, conflict"
+// (ERROR) from "one enabled, one disabled, intentional override"
+// (no error). The pre-fix message claimed it inspected `disabled` but
+// the code never did.
+func TestDoctor_AcceptsDisabledOverride(t *testing.T) {
+	defaults := newFakeSource("defaults", map[string]string{
+		"shared/template.yaml": `
+id: shared
+title: Shared
+aspects:
+  - id: correctness
+    title: Correctness
+`,
+		"shared/routing.yaml": `
+routing:
+  - id: when-correctness
+    when: always
+    spawn: correctness
+`,
+		"shared/classifiers.yaml": `
+classifiers:
+  - id: secrets
+    pattern: "*secret*"
+    tag: SECURITY
+`,
+	})
+	teamOverride := newFakeSource("team", map[string]string{
+		"shared/template.yaml": `
+id: shared
+title: Shared
+`,
+		"shared/routing.yaml": `
+routing:
+  - id: when-correctness
+    disabled: true
+    spawn: correctness
+`,
+		"shared/classifiers.yaml": `
+classifiers:
+  - id: secrets
+    disabled: true
+    pattern: "*secret*"
+    tag: SECURITY
+`,
+	})
+	issues, err := Doctor([]Source{defaults, teamOverride})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	for _, iss := range issues {
+		if iss.Severity != "ERROR" {
+			continue
+		}
+		if strings.Contains(iss.Message, "declared by multiple sources") {
+			t.Errorf("override pair flagged as duplicate-conflict, but one side has disabled: true: %v", iss.Message)
+		}
+		if strings.Contains(iss.Message, "matches no enabled") {
+			t.Errorf("override pair flagged as orphan-disable, but the default IS enabled: %v", iss.Message)
+		}
+	}
+}
+
+// TestDoctor_RejectsConflictingEnabledRules confirms the inverse: two
+// enabled rules with the same id from different sources is an ERROR
+// (because both will fire at runtime — no override semantics apply).
+func TestDoctor_RejectsConflictingEnabledRules(t *testing.T) {
+	defaults := newFakeSource("defaults", map[string]string{
+		"shared/template.yaml": `
+id: shared
+title: Shared
+aspects:
+  - id: correctness
+    title: Correctness
+`,
+		"shared/routing.yaml": `
+routing:
+  - id: when-correctness
+    when: always
+    spawn: correctness
+`,
+	})
+	teamConflict := newFakeSource("team", map[string]string{
+		"shared/template.yaml": `
+id: shared
+title: Shared
+`,
+		"shared/routing.yaml": `
+routing:
+  - id: when-correctness
+    when: always
+    spawn: correctness
+`,
+	})
+	issues, err := Doctor([]Source{defaults, teamConflict})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	wantSubstr := "routing rule \"when-correctness\" declared by multiple sources, all enabled"
+	found := false
+	for _, iss := range issues {
+		if iss.Severity == "ERROR" && strings.Contains(iss.Message, wantSubstr) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		gotMessages := make([]string, 0, len(issues))
+		for _, iss := range issues {
+			gotMessages = append(gotMessages, iss.Severity+": "+iss.Message)
+		}
+		t.Errorf("missing duplicate-enabled finding %q in %v", wantSubstr, gotMessages)
+	}
+}
+
+// TestDoctor_RejectsMiddleDoubleStar covers the silent-failure case
+// matchPattern explicitly drops to "no match": a "**" segment between
+// other path components (e.g. "src/**/*.go"). filepath.Match treats
+// "**" as two adjacent "*"s with no error, so doctor has to detect
+// the case via string inspection. See plan.go matchPattern doc.
+func TestDoctor_RejectsMiddleDoubleStar(t *testing.T) {
+	src := newFakeSource("middle-star", map[string]string{
+		"buggy/template.yaml": `
+id: buggy
+title: Buggy
+aspects:
+  - id: correctness
+    title: Correctness
+`,
+		"buggy/routing.yaml": `
+routing:
+  - id: when-go
+    when_tags: [GO]
+    spawn: correctness
+`,
+		"buggy/classifiers.yaml": `
+classifiers:
+  - id: middle-star-pattern
+    pattern: "src/**/*.go"
+    tag: GO
+`,
+	})
+	issues, err := Doctor([]Source{src})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	gotMessages := make([]string, 0, len(issues))
+	for _, iss := range issues {
+		gotMessages = append(gotMessages, iss.Severity+": "+iss.Message)
+	}
+	want := "ERROR: classifier \"middle-star-pattern\" pattern \"src/**/*.go\" has unsupported middle \"**\""
+	found := false
+	for _, m := range gotMessages {
+		if strings.Contains(m, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing doctor finding %q in %v", want, gotMessages)
 	}
 }
 
