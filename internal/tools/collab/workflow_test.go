@@ -914,6 +914,39 @@ func TestRequestReview_TruncatesLongDescription(t *testing.T) {
 	}
 }
 
+// TestRequestReview_StampsCodeReviewTemplate locks in Phase-3
+// behaviour: the legacy single-task entry point must tag the
+// resulting task with Template="code-review" so the constitution
+// alias rule attaches review-scoped sources without the title
+// containing "review". Aspect stays empty because request_review
+// does NOT decompose into multiple aspects (the task_plan path
+// owns multi-aspect spawns).
+func TestRequestReview_StampsCodeReviewTemplate(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	_, err := callTool(t, srv, "request_review", map[string]any{
+		"from":        "cursor",
+		"to":          "claude-code",
+		"description": "Audit auth flow", // intentionally no "review" substring in title
+		"files":       []interface{}{"auth.go"},
+	})
+	if err != nil {
+		t.Fatalf("request_review: %v", err)
+	}
+	if len(repo.state.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(repo.state.Tasks))
+	}
+	task := repo.state.Tasks[0]
+	if task.Template != "code-review" {
+		t.Errorf("Template = %q, want \"code-review\"", task.Template)
+	}
+	if task.Aspect != "" {
+		t.Errorf("Aspect = %q, want empty (request_review is single-task)", task.Aspect)
+	}
+}
+
 // TestRequestReview_NotifiesReviewer (H5) — request_review must enqueue
 // a system message addressed to the reviewer. Without it, a review task
 // silently sits in the reviewer's pending queue with no banner, no

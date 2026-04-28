@@ -336,6 +336,20 @@ func registerRequestReview(s *server.MCPServer, svc *app.CollabService, logger *
 					CreatedAt:   time.Now(),
 					UpdatedAt:   time.Now(),
 					Priority:    2,
+					// Stamp the code-review template id so the
+					// constitution alias rule
+					// (constitution.TaskKindForTask) attaches
+					// review-scoped sources without depending on
+					// the title containing "review". Aspect is
+					// intentionally left empty: request_review is
+					// the legacy single-task entry point — one ad
+					// hoc review → one task assigned to one
+					// specific reviewer. Multi-aspect decomposition
+					// is the task_plan('code-review', …) → driver
+					// iterates → create_task-per-aspect path,
+					// which is the route the cursor-plugin
+					// code-review skill uses.
+					Template: "code-review",
 				}
 				state.Tasks = append(state.Tasks, task)
 				taskID = task.ID

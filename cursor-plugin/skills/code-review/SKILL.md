@@ -12,44 +12,64 @@ description: Coordinate structured code reviews using Stringwork workers. Use wh
 - Security or performance audits on specific files
 - Reviewing changes across multiple files that benefit from parallel review
 
-## Single-Worker Review
+## How it works
 
-Create a review task for one worker:
+The aspect decomposition (which workers, focused on what) lives in
+the Stringwork [task templates](../../../docs/TASK_TEMPLATES.md)
+system, not in this skill. You call the planner; it returns the
+ordered list of `PlannedAspect` records to spawn. Your only jobs are:
+gather inputs, ask the planner, iterate the plan, and synthesize the
+findings that come back.
+
+## Step 1 — Plan the review
+
+Call `task_plan` with the file list and a one-line summary:
+
+```
+task_plan
+  template='code-review'
+  inputs={
+    files: ['internal/middleware/auth.go', 'internal/middleware/auth_test.go'],
+    summary: 'Add JWT middleware to enforce auth on protected routes'
+  }
+```
+
+The response is JSON with `template`, `tags` (the classifier tags
+that fired), and `aspects` (the planned worker briefs). Each aspect
+already has a composed `description` (background + checklist +
+finding format) ready to pass through unchanged.
+
+## Step 2 — Spawn one task per planned aspect
+
+For each entry in `aspects`, call `create_task` with the planner's
+output copied through, including the `template` and `aspect` metadata
+so listings and the constitution alias rule see the provenance:
 
 ```
 create_task
-  title='Review PR #123: Add auth middleware'
+  title='<PlannedAspect.title>'
+  description='<PlannedAspect.description>'
+  relevant_files=<PlannedAspect.relevant_files>
+  template='code-review'
+  aspect='<PlannedAspect.aspect>'
   assigned_to='any'
   created_by='cursor'
-  description='Review the auth middleware changes. Focus on security, error handling, and test coverage.'
-  relevant_files=['internal/middleware/auth.go', 'internal/middleware/auth_test.go']
-  background='Auth service architecture and relevant patterns.'
-  constraints=['Classify findings as MUST-FIX, SHOULD-FIX, or NIT']
+  priority=2
 ```
 
-## Multi-Worker Review (parallel)
+Use `assigned_to='any'` so workers pull aspects off the queue in
+parallel. `priority=2` (high) puts review work above normal feature
+tasks.
 
-Split review concerns across workers for faster, deeper analysis:
+> If `task_plan` returns zero aspects (typically a docs-only or
+> config-only change where no classifier fired), it includes a
+> `notes` field explaining why. Do not spawn anything — surface the
+> note to the user.
 
-```
-# Worker 1: Security focus
-create_task
-  title='Security review: auth middleware'
-  assigned_to='any'
-  description='Focus on security: injection, auth bypass, PII exposure, token validation.'
-  relevant_files=[...]
+## Lightweight alternative — `request_review`
 
-# Worker 2: Code quality focus
-create_task
-  title='Code quality review: auth middleware'
-  assigned_to='any'
-  description='Focus on code quality, error handling, test coverage, naming, language idioms.'
-  relevant_files=[...]
-```
-
-## Using request_review
-
-For lightweight reviews, use `request_review` instead of `create_task`:
+For an ad hoc, single-reviewer review (no decomposition needed),
+`request_review` is the legacy entry point:
 
 ```
 request_review
@@ -59,25 +79,29 @@ request_review
   files=['internal/handler.go']
 ```
 
-## Synthesizing Findings
+This stamps `Template='code-review'` on the resulting task (so the
+constitution still attaches review-scoped sources) but skips the
+multi-aspect plan. Reach for `task_plan` when the change is large or
+spans concerns; reach for `request_review` when one pair of eyes is
+enough.
 
-When workers report back via `send_message`, synthesize their findings:
+## Step 3 — Synthesize findings
 
-1. Collect all findings from all reviewers
-2. De-duplicate overlapping concerns
-3. Prioritize by severity:
-   - **Critical** — security, data loss, crashes (block merge)
-   - **Important** — performance, correctness, maintainability (should fix)
-   - **Nice-to-have** — style, docs, minor improvements (optional)
-4. Present a consolidated review to the user
+When workers report back via `send_message`, combine their findings
+into a single report:
 
-## Review Template for Workers
+1. Collect all findings from all spawned aspects
+2. De-duplicate overlapping concerns (the same issue surfaced by
+   two aspects — keep one, note both source aspects)
+3. Resolve conflicting opinions by preferring the more conservative
+   assessment
+4. Order by severity:
+   - **MUST_FIX** — security, data loss, crashes (block merge)
+   - **SHOULD_FIX** — correctness, maintainability, performance
+   - **NIT** — style, docs, minor improvements
+5. Present the consolidated review to the user with file paths,
+   line numbers, and concrete fix suggestions
 
-When writing the task description, ask workers to format findings as:
-
-```
-### [SEVERITY] Title (file:line)
-- Description of the issue
-- Why it matters
-- Suggested fix
-```
+The finding format is fixed by the planner (`### Finding format` at
+the bottom of every aspect description), so all workers report in the
+same shape. Trust the format.
