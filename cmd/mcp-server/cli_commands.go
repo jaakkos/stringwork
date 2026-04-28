@@ -238,6 +238,7 @@ func runTaskUpdateCLI(args []string) {
 func runTaskListCLI(args []string) {
 	assignedTo := flagValue(args, "--assigned-to")
 	status := flagValue(args, "--status")
+	template := flagValue(args, "--template")
 	agent := flagValue(args, "--agent")
 	if agent == "" {
 		agent = os.Getenv("STRINGWORK_AGENT")
@@ -249,6 +250,9 @@ func runTaskListCLI(args []string) {
 	}
 	if status != "" {
 		qv.Set("status", status)
+	}
+	if template != "" {
+		qv.Set("template", template)
 	}
 	if agent != "" {
 		qv.Set("agent", agent)

@@ -437,6 +437,98 @@ func TestGitSource_RelativePathStaysInsideCache(t *testing.T) {
 	}
 }
 
+// TestTaskKindForTask exercises the Phase-2 alias rule documented on
+// constitution.TaskKindForTask. Locks in three behaviours:
+//
+//  1. Pre-Phase-2 task (Template == "") falls back to TaskKindFromTitle
+//     so pending rows backfilled with empty Template still match
+//     review-scoped sources.
+//  2. Known template id ("code-review") maps to its alias ("review")
+//     even when the title would not match the title heuristic.
+//  3. Unknown template id returns "" outright — explicit template
+//     wins over a title that happens to contain "review", so a future
+//     "bug-investigation" template won't accidentally pull in review
+//     rules.
+func TestTaskKindForTask(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		title    string
+		want     string
+	}{
+		{
+			name:     "no template falls back to title heuristic - review",
+			template: "",
+			title:    "Review the auth module",
+			want:     "review",
+		},
+		{
+			name:     "no template falls back to title heuristic - non-review",
+			template: "",
+			title:    "Implement caching",
+			want:     "",
+		},
+		{
+			name:     "known template alias bypasses title heuristic",
+			template: "code-review",
+			title:    "Implement caching", // title doesn't say review
+			want:     "review",
+		},
+		{
+			name:     "known template alias still emits even when title also matches",
+			template: "code-review",
+			title:    "Code review for PR #1",
+			want:     "review",
+		},
+		{
+			name:     "unknown template wins over title - review-substring suppressed",
+			template: "bug-investigation",
+			title:    "Review the failure logs",
+			want:     "",
+		},
+		{
+			name:     "unknown template plain title returns empty",
+			template: "bug-investigation",
+			title:    "Investigate timeout",
+			want:     "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TaskKindForTask(tt.template, tt.title); got != tt.want {
+				t.Errorf("TaskKindForTask(%q, %q) = %q, want %q",
+					tt.template, tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsTemplateKindAlias is the doctor-side companion: known
+// template ids must report true so the constitution doctor can warn
+// when a profile scope writes `task_kind: ["code-review"]` instead of
+// `["review"]`. Unknown ids and the alias itself ("review") must
+// report false so the warning isn't fired on legitimate config.
+func TestIsTemplateKindAlias(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"code-review", true},
+		{"CODE-REVIEW", false}, // alias map is case-sensitive
+		{"review", false},      // the alias itself, not a template id
+		{"bug-investigation", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := IsTemplateKindAlias(tt.in); got != tt.want {
+				t.Errorf("IsTemplateKindAlias(%q) = %v, want %v",
+					tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestGitSource_EmptyPathsDefaultsToRoot preserves the documented
 // "empty Paths means repo root" behaviour. A regression here would
 // break every existing GitSource that doesn't enumerate its

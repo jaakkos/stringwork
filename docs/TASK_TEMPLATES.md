@@ -359,6 +359,54 @@ flowchart LR
     Aspects --> Driver["driver: one create_task per aspect"]
 ```
 
+## Template / aspect on `domain.Task`
+
+Phase 2 added two metadata fields to every task row:
+
+- `template` — the template id this task was planned from (e.g.
+  `"code-review"`).
+- `aspect` — the aspect id within the template (e.g. `"security"`).
+
+Both are stored as `TEXT NOT NULL DEFAULT ''` in sqlite. Empty string
+is the documented "no template" signal at the Go layer — pre-Phase-2
+rows backfill cleanly without a separate data migration, and the
+constitution alias rule's empty-string check works the same whether
+the column was migrated in or set explicitly.
+
+The driver sets both fields when iterating a `task_plan` response,
+typically by calling `create_task` once per `PlannedAspect`:
+
+```jsonc
+// One create_task call per aspect, copied from the task_plan response:
+{
+  "title":          "<PlannedAspect.Title>",
+  "description":    "<PlannedAspect.Description>",
+  "relevant_files": "<PlannedAspect.RelevantFiles>",
+  "template":       "<Plan.Template>",   // e.g. "code-review"
+  "aspect":         "<PlannedAspect.Aspect>"  // e.g. "security"
+}
+```
+
+The fields drive two things:
+
+1. **Constitution scope alias.** A task with
+   `Template == "code-review"` automatically pulls in any source
+   scoped to `task_kind: ["review"]`, even if the title would not
+   match the legacy heuristic. See
+   [CONSTITUTION.md](CONSTITUTION.md#scope-filtering) for the full
+   alias rule, including the "unknown template wins over title"
+   semantics that prevent a future `bug-investigation` template from
+   accidentally inheriting review rules.
+2. **Listing and grouping.** `list_tasks --template code-review`
+   filters down to all aspects spawned from one plan. The CLI
+   listing also annotates tasks with a `Template: <id> (<aspect>)`
+   line so a worker browsing assignments can see which plan a task
+   belongs to.
+
+Setting `aspect` without `template` is a no-op: `create_task` drops
+the stray aspect id rather than persisting dangling provenance that
+no doctor would ever flag.
+
 ## Relationship to the constitution
 
 Both systems layer markdown files from defaults + team + user sources,
@@ -373,3 +421,9 @@ Hence `constitution.Resolve(sources, scope)` returns the full applicable
 file set, while `tasktemplates.Resolve(id, sources)` returns one merged
 template. Keep them parallel — they share the layered-source idea but
 shouldn't be unified into a single abstraction.
+
+The `template` and `aspect` fields on `domain.Task` are the bridge:
+they live on the task row and are read by both subsystems — the
+constitution alias rule consults `Template` to decide which kind to
+scope on, and the templates subsystem stamps both fields on every
+task it plans.

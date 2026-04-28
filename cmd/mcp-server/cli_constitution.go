@@ -320,6 +320,12 @@ func runConstitutionDoctor(args []string) {
 // case), when every declared kind is reachable, or when the source
 // declares no kind filter at all. Comparison is case-insensitive
 // with whitespace trimmed, mirroring constitution.ScopeFilter.matches.
+//
+// Phase 2 addendum: when an unreachable kind happens to be the id of
+// a known task-templates template that has an alias (e.g.
+// "code-review" → "review"), the warning is upgraded with a hint
+// pointing at the alias. This is the most common authoring mistake
+// once teams start writing template-aware profiles.
 func doctorScopeWarning(name string, scope constitution.ScopeFilter) string {
 	if len(scope.TaskKind) == 0 {
 		return ""
@@ -328,24 +334,38 @@ func doctorScopeWarning(name string, scope constitution.ScopeFilter) string {
 	for _, k := range constitution.KnownTaskKinds {
 		known[strings.ToLower(strings.TrimSpace(k))] = struct{}{}
 	}
-	var unknown []string
+	var (
+		unknown    []string
+		aliasHints []string
+	)
 	for _, k := range scope.TaskKind {
 		key := strings.ToLower(strings.TrimSpace(k))
 		if key == "" {
 			continue
 		}
-		if _, ok := known[key]; !ok {
-			unknown = append(unknown, k)
+		if _, ok := known[key]; ok {
+			continue
+		}
+		unknown = append(unknown, k)
+		if constitution.IsTemplateKindAlias(key) {
+			aliasHints = append(aliasHints,
+				fmt.Sprintf("%q is a template id; use task_kind %q instead",
+					k, constitution.TaskKindForTask(key, "")),
+			)
 		}
 	}
 	if len(unknown) == 0 {
 		return ""
 	}
 	emitted := strings.Join(constitution.KnownTaskKinds, ", ")
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"[WARN]  %-20s scope.task_kind references unreachable kind(s) %v — classifier emits only [%s]; the source will never resolve",
 		name, unknown, emitted,
 	)
+	if len(aliasHints) > 0 {
+		msg += " — " + strings.Join(aliasHints, "; ")
+	}
+	return msg
 }
 
 // selectGitSources flattens the resolved source list down to the

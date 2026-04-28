@@ -2574,7 +2574,7 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 	taskCfg.InstanceID = instanceID
 
 	constitutionInline := m.resolvedConstitution(constitution.Scope{
-		TaskKind:  constitution.TaskKindFromTitle(task.Title),
+		TaskKind:  constitution.TaskKindForTask(task.Template, task.Title),
 		AgentRole: baseCfg.AgentType,
 	})
 	taskPrompt := buildTaskPrompt(task, wc, instanceID, workspace, m.driver(), taskCfg.Communication, constitutionInline)

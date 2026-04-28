@@ -30,6 +30,8 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithArray("depends_on", mcp.Description("Task IDs this task depends on")),
 			mcp.WithNumber("expected_duration_seconds", mcp.Description("Expected task duration in seconds. The watchdog alerts the driver if this SLA is exceeded. Example: 300 for a 5-minute task.")),
 			mcp.WithBoolean("requires_review", mcp.Description("Whether this task requires manual review approval before it can be marked completed")),
+			mcp.WithString("template", mcp.Description("Task-templates template id this task was planned from (e.g. \"code-review\"). Drives the constitution alias rule and `list_tasks --template` filtering. Set automatically by the driver when iterating a task_plan response; rarely set by hand.")),
+			mcp.WithString("aspect", mcp.Description("Aspect id within the template (e.g. \"security\" inside \"code-review\"). Set alongside `template`; ignored when `template` is empty.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -126,6 +128,15 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 				if requiresReview {
 					reviewStatus = "pending"
 				}
+				template, _ := args["template"].(string)
+				aspect, _ := args["aspect"].(string)
+				if template == "" {
+					// Aspect is meaningful only inside a template
+					// — drop a stray `aspect` so a misconfigured
+					// caller doesn't store dangling provenance
+					// that no doctor will ever flag.
+					aspect = ""
+				}
 				task := domain.Task{
 					ID:                  state.NextTaskID,
 					Title:               title,
@@ -140,6 +151,8 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					ExpectedDurationSec: expectedDurationSec,
 					RequiresReview:      requiresReview,
 					ReviewStatus:        reviewStatus,
+					Template:            template,
+					Aspect:              aspect,
 				}
 				state.Tasks = append(state.Tasks, task)
 				taskID = state.NextTaskID
@@ -195,6 +208,7 @@ func registerListTasks(s *server.MCPServer, svc *app.CollabService, logger *log.
 			mcp.WithDescription("List shared tasks. Check this to see what work needs to be done."),
 			mcp.WithString("status", mcp.Description("Filter by status (default: 'all')"), mcp.Enum("all", "pending", "in_progress", "completed", "blocked")),
 			mcp.WithString("assigned_to", mcp.Description("Filter by assignee")),
+			mcp.WithString("template", mcp.Description("Filter by task-templates template id (e.g. \"code-review\"). Useful for grouping driver-spawned aspects of one plan together.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -206,6 +220,10 @@ func registerListTasks(s *server.MCPServer, svc *app.CollabService, logger *log.
 			assignedFilter := ""
 			if v, ok := args["assigned_to"].(string); ok {
 				assignedFilter = v
+			}
+			templateFilter := ""
+			if v, ok := args["template"].(string); ok {
+				templateFilter = v
 			}
 
 			var result string
@@ -228,7 +246,17 @@ func registerListTasks(s *server.MCPServer, svc *app.CollabService, logger *log.
 					if assignedFilter != "" && task.AssignedTo != assignedFilter && task.AssignedTo != "any" {
 						continue
 					}
+					if templateFilter != "" && task.Template != templateFilter {
+						continue
+					}
 					result += fmt.Sprintf("Task #%d [%s] - %s\n", task.ID, task.Status, task.Title)
+					if task.Template != "" {
+						if task.Aspect != "" {
+							result += fmt.Sprintf("  Template: %s (%s)\n", task.Template, task.Aspect)
+						} else {
+							result += fmt.Sprintf("  Template: %s\n", task.Template)
+						}
+					}
 					if task.Description != "" {
 						result += fmt.Sprintf("  Description: %s\n", task.Description)
 					}

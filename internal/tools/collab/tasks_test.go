@@ -61,6 +61,102 @@ func TestCreateTask_Basic(t *testing.T) {
 	}
 }
 
+// TestCreateTask_TemplateAndAspect exercises Phase-2 task-template
+// provenance plumbing: create_task accepts `template` and `aspect`
+// args, persists them on domain.Task, and `aspect` is silently
+// dropped when `template` is empty (the documented "no provenance
+// without a template" rule that stops drivers from writing dangling
+// aspect ids).
+func TestCreateTask_TemplateAndAspect(t *testing.T) {
+	t.Run("with template and aspect", func(t *testing.T) {
+		svc, repo := newTestService()
+		logger := log.New(io.Discard, "", 0)
+		srv := testServer(svc, logger)
+
+		_, err := callTool(t, srv, "create_task", map[string]any{
+			"title":       "Code review aspect: security",
+			"created_by":  "claude-code",
+			"assigned_to": "cursor",
+			"template":    "code-review",
+			"aspect":      "security",
+		})
+		if err != nil {
+			t.Fatalf("create_task: %v", err)
+		}
+		if len(repo.state.Tasks) != 1 {
+			t.Fatalf("expected 1 task, got %d", len(repo.state.Tasks))
+		}
+		task := repo.state.Tasks[0]
+		if task.Template != "code-review" {
+			t.Errorf("Template = %q, want \"code-review\"", task.Template)
+		}
+		if task.Aspect != "security" {
+			t.Errorf("Aspect = %q, want \"security\"", task.Aspect)
+		}
+	})
+
+	t.Run("aspect without template is dropped", func(t *testing.T) {
+		svc, repo := newTestService()
+		logger := log.New(io.Discard, "", 0)
+		srv := testServer(svc, logger)
+
+		_, err := callTool(t, srv, "create_task", map[string]any{
+			"title":      "Bare task with stray aspect",
+			"created_by": "claude-code",
+			"aspect":     "security",
+		})
+		if err != nil {
+			t.Fatalf("create_task: %v", err)
+		}
+		if len(repo.state.Tasks) != 1 {
+			t.Fatalf("expected 1 task, got %d", len(repo.state.Tasks))
+		}
+		task := repo.state.Tasks[0]
+		if task.Template != "" {
+			t.Errorf("Template = %q, want empty", task.Template)
+		}
+		if task.Aspect != "" {
+			t.Errorf("Aspect = %q, want empty (template was empty)", task.Aspect)
+		}
+	})
+}
+
+// TestListTasks_TemplateFilter locks in Phase-2 list_tasks UX: a
+// template filter narrows the listing to tasks carrying that
+// template id, which is the canonical way to ask "show me all the
+// aspects of code-review #1234". Unfiltered listings continue to
+// show all tasks regardless of template.
+func TestListTasks_TemplateFilter(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	now := time.Now()
+	repo.state.Tasks = []domain.Task{
+		{ID: 1, Title: "Plain task", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3},
+		{ID: 2, Title: "Code review aspect security", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3, Template: "code-review", Aspect: "security"},
+		{ID: 3, Title: "Code review aspect correctness", Status: "pending", AssignedTo: "any", CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3, Template: "code-review", Aspect: "correctness"},
+	}
+	repo.state.NextTaskID = 4
+
+	res, err := callTool(t, srv, "list_tasks", map[string]any{
+		"template": "code-review",
+	})
+	if err != nil {
+		t.Fatalf("list_tasks: %v", err)
+	}
+	text := resultText(t, res)
+	if strings.Contains(text, "Task #1") {
+		t.Errorf("template filter should hide non-template task #1; got:\n%s", text)
+	}
+	if !strings.Contains(text, "Task #2") || !strings.Contains(text, "Task #3") {
+		t.Errorf("template filter should show both code-review tasks; got:\n%s", text)
+	}
+	if !strings.Contains(text, "Template: code-review (security)") {
+		t.Errorf("expected template/aspect annotation in listing; got:\n%s", text)
+	}
+}
+
 func TestCreateTask_MissingRequired(t *testing.T) {
 	svc, _ := newTestService()
 	logger := log.New(io.Discard, "", 0)

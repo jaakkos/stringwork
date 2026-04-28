@@ -134,12 +134,40 @@ Sources can be scoped so they only attach to certain tasks.
     agent_roles: ["reviewer"]   # optional, matches AgentInstance.Role
 ```
 
-The `task_kind` field is derived from a task's title via the
-`TaskKindFromTitle` heuristic. The only kind that heuristic currently
-emits is `"review"` (titles containing the word `review`, `code review`,
-or `pr review` all map to it). A future iteration could swap this for
-an explicit `task.kind` field on `domain.Task`; sources scoped to
-`task_kind: ["review"]` will keep working either way.
+The `task_kind` field is derived from a task's `Template` (set by the
+[task-templates](TASK_TEMPLATES.md) planner) and `Title`, via the
+`constitution.TaskKindForTask` alias rule:
+
+1. **Tasks carrying a known template id** map directly to that
+   template's aliased kind. Today there is one alias —
+   `Template = "code-review"` → kind `"review"`. New aliases land
+   alongside new templates in the same change, in
+   `templateKindAliases` (`internal/constitution/constitution.go`).
+2. **Tasks with no template** (the empty-string case, including all
+   pending rows that pre-date Phase 2) fall back to the legacy
+   `TaskKindFromTitle` heuristic — currently a case-insensitive
+   substring check for "review". This protects pre-deploy tasks: they
+   keep matching review-scoped sources exactly as they did before the
+   `Template` column existed.
+3. **Tasks with an unknown template id** return no kind, even if the
+   title would match the heuristic. The explicit template wins. This
+   stops a future "bug-investigation: review the logs" task from
+   accidentally pulling in review checklists.
+
+The only kind the system emits today is `"review"`. The
+`KnownTaskKinds` slice and the `mcp-stringwork constitution doctor`
+command both close over that set, so a profile scope writing
+`task_kind: ["code-review"]` (the template id) gets a doctor warning
+with an alias hint pointing at the right kind to use (`"review"`).
+
+> **Aspect-scoped rules are not supported.** A `task_kind` filter
+> only matches the alias kind (`"review"`), never an aspect-scoped
+> string like `"review:security"` or a template id like
+> `"code-review"`. Aspect-specific guidance lives in the task
+> description composed by `task_plan` (see
+> [TASK_TEMPLATES.md](TASK_TEMPLATES.md#composed-worker-brief)) — the
+> constitution attaches the same rules to every aspect of a planned
+> task.
 
 Empty scope filters mean "always match".
 

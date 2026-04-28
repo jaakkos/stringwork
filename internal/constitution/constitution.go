@@ -188,3 +188,57 @@ func TaskKindFromTitle(title string) string {
 	}
 	return ""
 }
+
+// templateKindAliases maps task-templates template ids to the
+// constitution scope kind they should activate. Keep narrow — a new
+// alias here changes the rules every team's review-scoped sources
+// attach to. The single entry today is the Phase-1 default
+// "code-review" template; teams adding new templates should land the
+// alias in the same change.
+var templateKindAliases = map[string]string{
+	"code-review": "review",
+}
+
+// TaskKindForTask returns the constitution scope kind for a task,
+// given the template provenance and title. Implements the Phase-2
+// alias rule:
+//
+//  1. If task.Template is set AND has a registered alias
+//     (templateKindAliases), return that alias. This is the
+//     deterministic path — once a task carries a template id, the
+//     scope is decided structurally, not by re-classifying the title.
+//  2. If task.Template is empty (the "IS NULL" / pre-deploy case),
+//     fall back to TaskKindFromTitle. This protects pending tasks
+//     created before the Template column existed: they keep matching
+//     the title-based heuristic exactly as they did before Phase 2.
+//  3. If task.Template is set but unknown (e.g. a hypothetical
+//     "bug-investigation" template lands without an alias), return
+//     "" — the explicit template wins over the title heuristic. This
+//     prevents a future "bug investigation: review the logs" task
+//     from accidentally pulling in review checklists.
+//
+// Adding a new alias is a one-line addition to templateKindAliases;
+// landing a new alias in the same change as the new template id keeps
+// the "task with template X gets which constitution rules?" question
+// answerable from one file.
+func TaskKindForTask(template, title string) string {
+	if template == "" {
+		return TaskKindFromTitle(title)
+	}
+	if alias, ok := templateKindAliases[template]; ok {
+		return alias
+	}
+	return ""
+}
+
+// IsTemplateKindAlias reports whether s is the id of a known
+// task-templates template that has a constitution scope alias. Used
+// by `mcp-stringwork constitution doctor` to flag scope filters that
+// reference a template id directly (e.g. `task_kind: ["code-review"]`)
+// instead of the alias they should target (`task_kind: ["review"]`).
+// Such config is dead — a scope filter only matches the alias, never
+// the template id, so a typo here silently disables the source.
+func IsTemplateKindAlias(s string) bool {
+	_, ok := templateKindAliases[s]
+	return ok
+}

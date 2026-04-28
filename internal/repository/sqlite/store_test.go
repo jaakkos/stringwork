@@ -68,6 +68,69 @@ func TestStoreRoundtrip(t *testing.T) {
 	}
 }
 
+// TestStoreRoundtrip_TemplateAspect locks in Phase-2 persistence:
+// Template and Aspect must round-trip through Save/Load, AND a task
+// with Template/Aspect unset must come back as the empty string (the
+// documented "no template" signal at the Go layer). The two
+// behaviours share one test because the second assertion guards the
+// migration path — pre-Phase-2 rows backfilled with DEFAULT ” must
+// keep matching the empty-string check the alias rule depends on.
+func TestStoreRoundtrip_TemplateAspect(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "templates.sqlite")
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if c, ok := store.(*Store); ok {
+			_ = c.Close()
+		}
+	}()
+
+	state := domain.NewCollabState()
+	now := time.Now()
+	state.Tasks = append(state.Tasks,
+		domain.Task{
+			ID: 1, Title: "Pre-Phase-2 task", Status: "pending", AssignedTo: "any",
+			CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3,
+		},
+		domain.Task{
+			ID: 2, Title: "Code review aspect: security", Status: "pending", AssignedTo: "any",
+			CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3,
+			Template: "code-review", Aspect: "security",
+		},
+	)
+	state.NextTaskID = 3
+
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Tasks) != 2 {
+		t.Fatalf("len(Tasks) = %d, want 2", len(loaded.Tasks))
+	}
+
+	preTask := loaded.Tasks[0]
+	if preTask.Template != "" || preTask.Aspect != "" {
+		t.Errorf("pre-Phase-2 task: Template=%q Aspect=%q, want both empty",
+			preTask.Template, preTask.Aspect)
+	}
+
+	plannedTask := loaded.Tasks[1]
+	if plannedTask.Template != "code-review" {
+		t.Errorf("planned task Template = %q, want \"code-review\"", plannedTask.Template)
+	}
+	if plannedTask.Aspect != "security" {
+		t.Errorf("planned task Aspect = %q, want \"security\"", plannedTask.Aspect)
+	}
+}
+
 func TestStoreClose(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "closed.sqlite")

@@ -186,6 +186,99 @@ func TestGetWorkContext_MissingTaskContext_StillIncludesPreamble(t *testing.T) {
 	}
 }
 
+// TestClaimNext_ReviewScopedSource_TemplateAlias locks in the
+// Phase-2 alias rule end-to-end through claim_next: a task carrying
+// Template="code-review" must pull in a review-scoped source even
+// when the title would not match the legacy heuristic. This is the
+// path that lets driver-spawned aspects of a code-review plan
+// inherit the team's review checklists without a "review" word in
+// the title.
+func TestClaimNext_ReviewScopedSource_TemplateAlias(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "review-rules.md"),
+		[]byte("Always check for null safety."), 0o644); err != nil {
+		t.Fatalf("write review-rules.md: %v", err)
+	}
+
+	repo := newMockRepository()
+	pol := newMockPolicy()
+	pol.constitutionSources = []constitution.Source{
+		&constitution.DirSource{
+			SourceName: "review-rules",
+			Path:       dir,
+			Include:    []string{"*.md"},
+			Scope:      constitution.ScopeFilter{TaskKind: []string{"review"}},
+		},
+	}
+	logger := log.New(io.Discard, "", 0)
+	svc := app.NewCollabService(repo, pol, logger)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		// Title intentionally does NOT contain "review" — only the
+		// Template field qualifies this task for review-scoped rules.
+		{ID: 1, Title: "Audit auth flow", Status: "pending", AssignedTo: "claude-code", CreatedBy: "cursor", Priority: 3, Template: "code-review", Aspect: "security"},
+	}
+	repo.state.NextTaskID = 2
+
+	result, err := callTool(t, srv, "claim_next", map[string]any{
+		"agent": "claude-code",
+	})
+	if err != nil {
+		t.Fatalf("claim_next: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "review-rules.md") {
+		t.Errorf("template=code-review should pull review-scoped source even with a non-review title; got:\n%s", text)
+	}
+}
+
+// TestClaimNext_ReviewScopedSource_PreDeployTitleFallback covers the
+// other half of the alias rule: a pending task that pre-dates the
+// Template column (Template="") must still match a review-scoped
+// source via the legacy TaskKindFromTitle heuristic. This is the
+// "safe rollout" property — adding the Template column without
+// backfilling pending rows must not silently strand them.
+func TestClaimNext_ReviewScopedSource_PreDeployTitleFallback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "review-rules.md"),
+		[]byte("Always check for null safety."), 0o644); err != nil {
+		t.Fatalf("write review-rules.md: %v", err)
+	}
+
+	repo := newMockRepository()
+	pol := newMockPolicy()
+	pol.constitutionSources = []constitution.Source{
+		&constitution.DirSource{
+			SourceName: "review-rules",
+			Path:       dir,
+			Include:    []string{"*.md"},
+			Scope:      constitution.ScopeFilter{TaskKind: []string{"review"}},
+		},
+	}
+	logger := log.New(io.Discard, "", 0)
+	svc := app.NewCollabService(repo, pol, logger)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{
+		// No Template — the title heuristic must fire so the
+		// review-scoped source still attaches.
+		{ID: 1, Title: "Code review for PR #123", Status: "pending", AssignedTo: "claude-code", CreatedBy: "cursor", Priority: 3},
+	}
+	repo.state.NextTaskID = 2
+
+	result, err := callTool(t, srv, "claim_next", map[string]any{
+		"agent": "claude-code",
+	})
+	if err != nil {
+		t.Fatalf("claim_next: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "review-rules.md") {
+		t.Errorf("pre-Phase-2 review task (Template=\"\") should still match review-scoped source via title; got:\n%s", text)
+	}
+}
+
 func TestTaskKindFromTitle(t *testing.T) {
 	tests := []struct {
 		title string

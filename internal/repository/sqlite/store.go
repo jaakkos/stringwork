@@ -219,6 +219,14 @@ func runMigrations(db *sql.DB) error {
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN requires_review INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN review_status TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
+	// template / aspect carry the task-templates provenance for this
+	// row; see domain.Task.Template for the full contract. NOT NULL
+	// DEFAULT '' so pre-deploy rows back-fill as "" — the empty
+	// string is the documented "no template" signal at the Go layer
+	// (constitution.TaskKindForTask falls back to TaskKindFromTitle
+	// when Template == "").
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN template TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE tasks ADD COLUMN aspect TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(schemaAgentInstances)
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE agent_instances ADD COLUMN progress TEXT NOT NULL DEFAULT ''")
@@ -386,7 +394,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("messages iteration: %w", err)
 	}
 
-	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by FROM tasks ORDER BY id")
+	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect FROM tasks ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("tasks: %w", err)
 	}
@@ -394,7 +402,7 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		var t domain.Task
 		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt string
 		var requiresReview int
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy, &t.Template, &t.Aspect); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -811,8 +819,8 @@ func (s *Store) Save(state *domain.CollabState) error {
 		if t.RequiresReview {
 			requiresReview = 1
 		}
-		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy); err != nil {
+		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy, t.Template, t.Aspect); err != nil {
 			return err
 		}
 	}

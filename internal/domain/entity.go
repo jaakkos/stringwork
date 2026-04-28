@@ -91,6 +91,32 @@ type Task struct {
 	RequiresReview bool   `json:"requires_review,omitempty"`
 	ReviewStatus   string `json:"review_status,omitempty"` // pending, approved, rejected
 	ReviewedBy     string `json:"reviewed_by,omitempty"`
+	// Task-template provenance.
+	//
+	// Template is the id of the task-templates template (see
+	// internal/tasktemplates) that planned this task — e.g.
+	// "code-review". Empty string means "not produced by a template"
+	// (driver hand-crafted the task, or the task pre-dates Phase 2).
+	// Aspect is the per-template aspect id that this task represents
+	// — e.g. "security" inside the "code-review" template. Empty
+	// when the template ships a single-aspect task or the task is
+	// not template-produced.
+	//
+	// Both columns are stored as TEXT NOT NULL DEFAULT '' in sqlite
+	// (see runMigrations) so existing rows back-fill cleanly without
+	// a separate data migration. The "unset" signal at the Go layer
+	// is the empty string, NOT sql.NullString — the constitution
+	// alias rule (constitution.TaskKindForTask) and the list_tasks
+	// `template` filter both compare against the empty string, so
+	// keeping the column NOT NULL avoids an extra wrapping layer
+	// without changing semantics.
+	//
+	// These fields exist to (a) drive the constitution alias rule
+	// without re-deriving it from the title and (b) let `list_tasks
+	// --template code-review` or driver dashboards group / filter
+	// task-spawn output by template.
+	Template string `json:"template,omitempty"`
+	Aspect   string `json:"aspect,omitempty"`
 }
 
 // AuditEntry represents a single tool call recorded by the audit middleware.

@@ -55,14 +55,22 @@ func constitutionPreambleForScope(svc *app.CollabService, scope constitution.Sco
 // claim_next / get_work_context render path silently dropped the
 // role.
 //
-// Cheap and lock-friendly: the only fields read are task.Title (a
-// string) and the caller-supplied agentRole, so callers can invoke
-// this from inside CollabService Run/Query callbacks without any
-// I/O concern.
+// TaskKind is derived via constitution.TaskKindForTask, which
+// implements the Phase-2 alias rule: tasks with a known template id
+// (e.g. Template="code-review") map to the aliased scope ("review")
+// directly; tasks without a template fall back to the legacy
+// TaskKindFromTitle heuristic. Pre-Phase-2 pending tasks therefore
+// keep matching review-scoped sources exactly as they did before the
+// Template column existed.
+//
+// Cheap and lock-friendly: the only fields read are task.Template,
+// task.Title (both strings) and the caller-supplied agentRole, so
+// callers can invoke this from inside CollabService Run/Query
+// callbacks without any I/O concern.
 func scopeForTask(task *domain.Task, agentRole string) constitution.Scope {
 	scope := constitution.Scope{AgentRole: agentRole}
 	if task != nil {
-		scope.TaskKind = constitution.TaskKindFromTitle(task.Title)
+		scope.TaskKind = constitution.TaskKindForTask(task.Template, task.Title)
 	}
 	return scope
 }

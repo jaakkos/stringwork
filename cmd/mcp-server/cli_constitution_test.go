@@ -404,6 +404,62 @@ func TestDoctorGitSource_ReportsZeroResolvedFiles(t *testing.T) {
 	}
 }
 
+// TestDoctorScopeWarning covers the three reachable branches of the
+// Phase-2 doctor scope check:
+//
+//  1. Empty / always-applicable scope returns "" — no noise on the
+//     common case.
+//  2. Reachable kind ("review") returns "" — locks in that the
+//     classifier's emitted set wins over the warning's optimism.
+//  3. Unreachable kind that happens to be a known template id
+//     ("code-review") returns the WARN line AND the alias hint that
+//     points the operator at the right kind to use ("review").
+func TestDoctorScopeWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		scope    constitution.ScopeFilter
+		wantSub  []string
+		wantNone bool
+	}{
+		{
+			name:     "empty filter returns empty string",
+			scope:    constitution.ScopeFilter{},
+			wantNone: true,
+		},
+		{
+			name:     "reachable kind returns empty string",
+			scope:    constitution.ScopeFilter{TaskKind: []string{"review"}},
+			wantNone: true,
+		},
+		{
+			name:    "unreachable arbitrary kind warns without hint",
+			scope:   constitution.ScopeFilter{TaskKind: []string{"refactor"}},
+			wantSub: []string{"references unreachable kind(s)", "[review]"},
+		},
+		{
+			name:    "template id alias warns with hint pointing at the alias",
+			scope:   constitution.ScopeFilter{TaskKind: []string{"code-review"}},
+			wantSub: []string{"references unreachable kind(s)", "is a template id", "use task_kind \"review\""},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := doctorScopeWarning("test-source", tt.scope)
+			if tt.wantNone {
+				if got != "" {
+					t.Errorf("expected empty warning, got %q", got)
+				}
+				return
+			}
+			for _, sub := range tt.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("warning missing %q in:\n%s", sub, got)
+				}
+			}
+		})
+	}
+}
+
 // TestDoctorGitSource_ReportsListErrorFromBadGlob locks in the
 // containment side of SHOULD_FIX #5: a populated cache combined with
 // a malformed Include glob must surface as ERROR. Without doctor's

@@ -353,6 +353,7 @@ func (w *workerAPI) handleTaskList(rw http.ResponseWriter, r *http.Request) {
 		statusFilter = "all"
 	}
 	assignedFilter := r.URL.Query().Get("assigned_to")
+	templateFilter := r.URL.Query().Get("template")
 	agent := r.URL.Query().Get("agent")
 
 	var result string
@@ -365,7 +366,17 @@ func (w *workerAPI) handleTaskList(rw http.ResponseWriter, r *http.Request) {
 			if assignedFilter != "" && task.AssignedTo != assignedFilter && task.AssignedTo != "any" {
 				continue
 			}
+			if templateFilter != "" && task.Template != templateFilter {
+				continue
+			}
 			result += fmt.Sprintf("Task #%d [%s] - %s\n", task.ID, task.Status, task.Title)
+			if task.Template != "" {
+				if task.Aspect != "" {
+					result += fmt.Sprintf("  Template: %s (%s)\n", task.Template, task.Aspect)
+				} else {
+					result += fmt.Sprintf("  Template: %s\n", task.Template)
+				}
+			}
 			if task.Description != "" {
 				result += fmt.Sprintf("  Description: %s\n", task.Description)
 			}
