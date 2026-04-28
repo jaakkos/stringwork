@@ -271,7 +271,13 @@ func Resolve(id string, sources []Source) (Template, error) {
 
 	aspectIdx := map[string]int{}
 	for _, f := range matched {
-		// Title / description / inputs: first source wins outright.
+		// Title / Description / Inputs.Required / Inputs.Declarations:
+		// first source declaring a non-empty value wins; later sources
+		// can fill in fields the earlier source left unset (nil slice
+		// / nil map / "" string) but cannot overwrite a populated
+		// value. Same fill-in rule applies uniformly to all four.
+		// See the Resolve doc comment above for the user-facing
+		// contract and the rationale.
 		if merged.Title == "" {
 			merged.Title = f.Title
 		}

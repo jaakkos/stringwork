@@ -75,6 +75,13 @@ mcp-stringwork task-template doctor
 #   - routing rules referencing missing aspects
 #   - tags referenced by routing but never emitted by classifiers
 #   - duplicate ids within a single source
+#   - same id declared by multiple sources, all enabled (true conflict —
+#     at least one must declare disabled: true to be an override)
+#   - disabled rule / classifier whose id matches no enabled rule from
+#     any source (typo guard: catches "when-securty-tag" trying to
+#     override "when-security-tag")
+#   - classifier patterns with unsupported middle "**" segments
+#     (e.g. "src/**/*.go" — see "Pattern syntax" below)
 #   - oversized composed descriptions (4KB-per-aspect soft cap)
 ```
 
@@ -191,7 +198,7 @@ combines them with these rules:
 | `Classifier`         | Append; slice order preserved across sources (defaults first).                        |
 | `Checklist` per aspect | Concatenate in source declaration order, defaults first…                            |
 | ↳ `replace: true`    | …unless a checklist file declares `replace: true` in its YAML front-matter, in which case the accumulated content is dropped and only the replacing body is kept (later sources still concatenate after a replace). |
-| `InputDeclaration`   | First source wins outright. Teams that want to relax `required` keys must redeclare the inputs block. |
+| `Title` / `Description` / `Inputs.Required` / `Inputs.Declarations` | First source declaring a non-empty value wins; later sources can fill in fields the earlier source left unset (nil slice / nil map / `""`) but cannot overwrite a populated value. Same fill-in rule applies uniformly to all four. |
 
 Earlier-source-wins for aspects means the **defaults** define the canonical
 aspect ids — a team overlay declaring `id: correctness` does not replace
@@ -213,6 +220,36 @@ routing:
 
 The disabled rule stays on the merged template (so `doctor` can still
 report it) but `BuildPlan` filters it out.
+
+`doctor` flags two failure modes for `disabled:` declarations:
+
+- **Typo guard.** A disabled rule whose id matches no enabled rule
+  in any source is reported as ERROR — usually a typo
+  (`when-securty-tag` instead of `when-security-tag`) silently
+  doing nothing.
+- **Conflict guard.** Two enabled rules with the same id from
+  different sources is also an ERROR: both will fire at runtime,
+  which is almost always not what the author meant. Adding
+  `disabled: true` to one side resolves it.
+
+### Pattern syntax (classifiers)
+
+Classifier patterns use shell-glob style with one extension:
+
+| Pattern shape | Matches                                                       |
+|---------------|---------------------------------------------------------------|
+| `*.go`        | basename `foo.go` and full path `internal/foo.go`             |
+| `*secret*`    | any path containing `secret`                                  |
+| `**/X`        | any path whose basename or trailing sub-path is `X`           |
+| `X/**`        | any path that starts with `X/`                                |
+| `**/X/**`     | any path that has `X` as a path component or sub-path         |
+
+Middle-`**` constructions (e.g. `src/**/*.go`) are **not** supported
+and `task-template doctor` reports them as ERROR. They look intuitive
+but `filepath.Match` accepts them silently while the engine drops to
+"no match", so a classifier with such a pattern silently never fires.
+Rewrite as `**/*.go` (basename match) or expand to the explicit shape
+that matters (`**/src/**` for "anywhere under src").
 
 ### Replacing a checklist body
 
