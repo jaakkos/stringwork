@@ -1,0 +1,47 @@
+id: code-review
+title: Code Review
+description: |
+  Multi-aspect parallel code review. Spawns one worker per applicable aspect
+  (correctness, code-quality, security, observability, data-model,
+  performance) based on the file classifiers and routing rules.
+
+inputs:
+  required:
+    - files
+  declarations:
+    files: list
+    summary: string
+
+aspects:
+  - id: correctness
+    title: Correctness and Logic
+    description: |
+      Catches semantic bugs and regressions in the change. Null safety,
+      error propagation, race conditions, edge cases, contract drift.
+
+  - id: code-quality
+    title: Code Quality and Standards
+    description: |
+      Naming, structure, idiomatic patterns, test quality and coverage,
+      build/wiring consistency.
+
+  - id: security
+    title: Security
+    description: |
+      PII exposure, auth/authz, secret handling, attack surface.
+
+  - id: observability
+    title: Observability
+    description: |
+      Telemetry coverage on success/failure paths, instrumentation
+      correctness, no PII in logs or wide events.
+
+  - id: data-model
+    title: Data Model and Schema
+    description: |
+      Wire/schema compatibility, evolution safety, reader/writer parity.
+
+  - id: performance
+    title: Performance
+    description: |
+      Hot paths, query patterns, allocations, blocking calls.

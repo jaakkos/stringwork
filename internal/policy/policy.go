@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/jaakkos/stringwork/internal/constitution"
+	"github.com/jaakkos/stringwork/internal/tasktemplates"
 )
 
 // GlobalStateDir returns the default global state directory (~/.config/stringwork).
@@ -187,6 +188,15 @@ type Config struct {
 	// Sources are ordered: built-in global first, then profile (R4.c),
 	// then user-declared `sources`. Earlier files win on conflict.
 	Constitution *ConstitutionConfig `yaml:"constitution,omitempty"`
+
+	// TaskTemplates declares user- and team-level task-template
+	// overlay sources that extend the built-in defaults baked into
+	// the binary (see internal/tasktemplates/defaults). Sources are
+	// ordered: built-in defaults first, then profile, then
+	// user-declared `sources`. Earlier sources win on replace-by-id
+	// merge slots; append-style slots (routing, classifiers,
+	// checklists) preserve declaration order across sources.
+	TaskTemplates *TaskTemplateConfig `yaml:"task_templates,omitempty"`
 }
 
 // AuditConfig controls audit logging behavior.
@@ -717,6 +727,55 @@ func (p *Policy) ConstitutionSources() []constitution.Source {
 	p.consCacheKey = key
 	p.consCacheInit = true
 	return append([]constitution.Source(nil), out...)
+}
+
+// TaskTemplateSources returns the ordered list of task-template
+// sources to feed to tasktemplates.Resolve. The order is:
+//
+//  1. The built-in `stringwork-defaults` EmbedSource baked into the
+//     binary. Always included so a user with no config still gets
+//     the default code-review template.
+//  2. Sources loaded from the team profile file referenced by
+//     `task_templates.profile`, in declaration order. Profile sources
+//     win over user sources for replace-by-id merge slots.
+//  3. Sources declared via config.yaml's `task_templates.sources`
+//     block, preserved in declaration order.
+//
+// Bad source declarations are logged and skipped — a typo in one team
+// overlay must not nuke the worker's view of the other templates.
+//
+// No mtime cache here (yet): unlike the constitution path, task-template
+// resolution only fires inside `task_plan` calls (interactive driver
+// path), not on every claim. The YAML parse cost is once-per-call,
+// which is acceptable. If the planner moves to a hot path later, mirror
+// the consCache pattern from ConstitutionSources.
+func (p *Policy) TaskTemplateSources() []tasktemplates.Source {
+	p.mu.RLock()
+	var profile string
+	var sources []TaskTemplateSourceConfig
+	if p.config.TaskTemplates != nil {
+		profile = p.config.TaskTemplates.Profile
+		if len(p.config.TaskTemplates.Sources) > 0 {
+			sources = append([]TaskTemplateSourceConfig(nil), p.config.TaskTemplates.Sources...)
+		}
+	}
+	p.mu.RUnlock()
+
+	out := []tasktemplates.Source{tasktemplates.DefaultEmbeddedSource()}
+	if profile != "" {
+		out = append(out, taskTemplateProfileSources(profile)...)
+	}
+	for _, decl := range sources {
+		src, err := decl.toSource("")
+		if err != nil {
+			log.Printf("task templates: skipping source %q: %v", decl.Name, err)
+			continue
+		}
+		if src != nil {
+			out = append(out, src)
+		}
+	}
+	return out
 }
 
 // constitutionProfileMTime stat-probes the profile file and returns

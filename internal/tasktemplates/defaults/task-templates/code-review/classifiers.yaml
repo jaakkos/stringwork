@@ -1,0 +1,48 @@
+classifiers:
+  - id: secrets-files
+    pattern: "*secret*"
+    tag: SECURITY
+
+  - id: auth-files
+    pattern: "*auth*"
+    tag: SECURITY
+
+  - id: credential-files
+    pattern: "*credential*"
+    tag: SECURITY
+
+  - id: token-files
+    pattern: "*token*"
+    tag: SECURITY
+
+  - id: proto-files
+    pattern: "*.proto"
+    tag: PROTO
+
+  - id: migration-files-dir
+    pattern: "**/migration/**"
+    tag: MIGRATION
+
+  - id: migration-files-dir2
+    pattern: "**/migrations/**"
+    tag: MIGRATION
+
+  - id: sql-migration-files
+    pattern: "*.sql"
+    tag: MIGRATION
+
+  - id: telemetry-metrics
+    pattern: "*metrics*"
+    tag: OBSERVABILITY
+
+  - id: telemetry-tracing
+    pattern: "*tracing*"
+    tag: OBSERVABILITY
+
+  - id: telemetry-logger
+    pattern: "*logger*"
+    tag: OBSERVABILITY
+
+  - id: telemetry-logging
+    pattern: "*logging*"
+    tag: OBSERVABILITY

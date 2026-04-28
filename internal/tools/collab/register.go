@@ -151,6 +151,9 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerGetWorkContext(s, svc, logger)
 	registerUpdateWorkContext(s, svc, logger)
 
+	// Task template planner (1)
+	registerTaskPlan(s, svc, logger)
+
 	// Prompt templates (pair-respond, code-review, plan-feature)
 	registerPrompts(s)
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/policy"
+	"github.com/jaakkos/stringwork/internal/tasktemplates"
 )
 
 // Policy is the configuration port used by the application.
@@ -52,4 +53,10 @@ type Policy interface {
 	// constitution is configured (a no-op for users who haven't opted
 	// in).
 	ConstitutionSources() []constitution.Source
+
+	// TaskTemplateSources returns the ordered list of task-template
+	// overlay sources used by the task_plan MCP tool. Always includes
+	// the built-in defaults (one Source returning the embedded
+	// code-review template); team / user sources extend that.
+	TaskTemplateSources() []tasktemplates.Source
 }

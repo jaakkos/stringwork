@@ -18,6 +18,7 @@ import (
 	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
+	"github.com/jaakkos/stringwork/internal/tasktemplates"
 )
 
 // mockRepository implements app.StateRepository for tests. State is kept in memory.
@@ -56,6 +57,7 @@ func (m *mockRepository) Save(state *domain.CollabState) error {
 type mockPolicy struct {
 	workspaceRoot       string
 	constitutionSources []constitution.Source
+	taskTemplateSources []tasktemplates.Source
 }
 
 func newMockPolicy() *mockPolicy {
@@ -82,6 +84,9 @@ func (m *mockPolicy) RespawnGrace() time.Duration          { return 60 * time.Se
 func (m *mockPolicy) SpawnSweepGrace() time.Duration       { return 30 * time.Second }
 func (m *mockPolicy) ConstitutionSources() []constitution.Source {
 	return m.constitutionSources
+}
+func (m *mockPolicy) TaskTemplateSources() []tasktemplates.Source {
+	return m.taskTemplateSources
 }
 func (m *mockPolicy) Orchestration() *policy.OrchestrationConfig {
 	return &policy.OrchestrationConfig{

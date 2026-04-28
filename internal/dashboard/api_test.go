@@ -15,6 +15,7 @@ import (
 	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
+	"github.com/jaakkos/stringwork/internal/tasktemplates"
 )
 
 type mockRepo struct {
@@ -39,26 +40,27 @@ type mockPolicy struct {
 	workspaceRoot string
 }
 
-func (p *mockPolicy) MessageRetentionMax() int                   { return 1000 }
-func (p *mockPolicy) MessageRetentionDays() int                  { return 30 }
-func (p *mockPolicy) PresenceTTLSeconds() int                    { return 300 }
-func (p *mockPolicy) StateFile() string                          { return "" }
-func (p *mockPolicy) SignalFilePath() string                     { return "" }
-func (p *mockPolicy) WorkspaceRoot() string                      { return p.workspaceRoot }
-func (p *mockPolicy) SetWorkspaceRoot(root string)               { p.workspaceRoot = root }
-func (p *mockPolicy) IsToolEnabled(string) bool                  { return true }
-func (p *mockPolicy) ValidatePath(path string) (string, error)   { return path, nil }
-func (p *mockPolicy) Orchestration() *policy.OrchestrationConfig { return nil }
-func (p *mockPolicy) MaxTaskFailures() int                       { return 3 }
-func (p *mockPolicy) AuditEnabled() bool                         { return true }
-func (p *mockPolicy) AuditArgsMaxLen() int                       { return 1000 }
-func (p *mockPolicy) AuditRetentionDays() int                    { return 7 }
-func (p *mockPolicy) PresenceRetentionDays() int                 { return 7 }
-func (p *mockPolicy) InstanceRetentionDays() int                 { return 7 }
-func (p *mockPolicy) TaskBoundInstanceRetentionHours() int       { return 24 }
-func (p *mockPolicy) RespawnGrace() time.Duration                { return 60 * time.Second }
-func (p *mockPolicy) SpawnSweepGrace() time.Duration             { return 30 * time.Second }
-func (p *mockPolicy) ConstitutionSources() []constitution.Source { return nil }
+func (p *mockPolicy) MessageRetentionMax() int                    { return 1000 }
+func (p *mockPolicy) MessageRetentionDays() int                   { return 30 }
+func (p *mockPolicy) PresenceTTLSeconds() int                     { return 300 }
+func (p *mockPolicy) StateFile() string                           { return "" }
+func (p *mockPolicy) SignalFilePath() string                      { return "" }
+func (p *mockPolicy) WorkspaceRoot() string                       { return p.workspaceRoot }
+func (p *mockPolicy) SetWorkspaceRoot(root string)                { p.workspaceRoot = root }
+func (p *mockPolicy) IsToolEnabled(string) bool                   { return true }
+func (p *mockPolicy) ValidatePath(path string) (string, error)    { return path, nil }
+func (p *mockPolicy) Orchestration() *policy.OrchestrationConfig  { return nil }
+func (p *mockPolicy) MaxTaskFailures() int                        { return 3 }
+func (p *mockPolicy) AuditEnabled() bool                          { return true }
+func (p *mockPolicy) AuditArgsMaxLen() int                        { return 1000 }
+func (p *mockPolicy) AuditRetentionDays() int                     { return 7 }
+func (p *mockPolicy) PresenceRetentionDays() int                  { return 7 }
+func (p *mockPolicy) InstanceRetentionDays() int                  { return 7 }
+func (p *mockPolicy) TaskBoundInstanceRetentionHours() int        { return 24 }
+func (p *mockPolicy) RespawnGrace() time.Duration                 { return 60 * time.Second }
+func (p *mockPolicy) SpawnSweepGrace() time.Duration              { return 30 * time.Second }
+func (p *mockPolicy) ConstitutionSources() []constitution.Source  { return nil }
+func (p *mockPolicy) TaskTemplateSources() []tasktemplates.Source { return nil }
 
 func newTestService() (*app.CollabService, *mockRepo) {
 	repo := &mockRepo{state: domain.NewCollabState()}

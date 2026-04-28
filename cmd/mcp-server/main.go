@@ -79,6 +79,9 @@ func main() {
 		case "constitution":
 			runConstitutionCommand(os.Args[2:])
 			return
+		case "task-template":
+			runTaskTemplateCommand(os.Args[2:])
+			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
 			return

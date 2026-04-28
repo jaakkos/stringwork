@@ -1,0 +1,26 @@
+routing:
+  - id: always-correctness
+    when: always
+    spawn: correctness
+
+  - id: always-code-quality
+    when: always
+    spawn: code-quality
+
+  - id: when-security-tag
+    when_tags: [SECURITY]
+    spawn: security
+
+  - id: when-observability-tag
+    when_tags: [OBSERVABILITY]
+    spawn: observability
+
+  - id: when-data-model-tag
+    when_tags: [PROTO, MIGRATION]
+    spawn: data-model
+
+  # PERFORMANCE has no built-in classifier — teams that care about
+  # performance routing should add a classifier (e.g. for files in
+  # known hot paths) in their overlay AND a routing rule that fires
+  # off the resulting tag. Keeping a default rule here without a
+  # classifier would just emit a doctor WARN forever.
