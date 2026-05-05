@@ -274,10 +274,21 @@ func runReadCLI(args []string) {
 	if recipient == "" {
 		cliDie("--for is required (or set STRINGWORK_AGENT)")
 	}
+	// Optional --type lets pool-instance workers also drain messages
+	// addressed to their agent type (e.g. "claude-code"), which the
+	// per-instance reader otherwise leaves unread forever. Falls back
+	// to STRINGWORK_AGENT_TYPE so spawned workers pick it up automatically.
+	agentType := flagValue(args, "--type")
+	if agentType == "" {
+		agentType = os.Getenv("STRINGWORK_AGENT_TYPE")
+	}
 	limit := flagValue(args, "--limit")
 
 	qv := url.Values{}
 	qv.Set("for", recipient)
+	if agentType != "" && agentType != recipient {
+		qv.Set("type", agentType)
+	}
 	if limit != "" {
 		qv.Set("limit", limit)
 	}

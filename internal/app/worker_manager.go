@@ -1642,6 +1642,14 @@ func buildWorkerEnv(c WorkerSpawnConfig, workspaceDir string, socketPath string)
 	// wrong server.
 	base = setEnvVar(base, "STRINGWORK_AGENT", c.InstanceID)
 	base = setEnvVar(base, "STRINGWORK_WORKSPACE", workspaceDir)
+	// AgentType is the pool key (e.g. "claude-code") shared by all
+	// instances ("claude-code-1", "claude-code-2"). Workers forward it
+	// to `mcp-stringwork read --type` so type-level messages drain
+	// when any instance reads, instead of piling up unread because
+	// each instance only matches its own InstanceID.
+	if c.AgentType != "" && c.AgentType != c.InstanceID {
+		base = setEnvVar(base, "STRINGWORK_AGENT_TYPE", c.AgentType)
+	}
 
 	if c.Communication != "mcp" {
 		if socketPath == "" {

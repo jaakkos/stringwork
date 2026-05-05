@@ -405,6 +405,11 @@ func (w *workerAPI) handleMessages(rw http.ResponseWriter, r *http.Request) {
 		writeError(rw, "'for' is required")
 		return
 	}
+	// Optional pool agent type. When set, the read also drains messages
+	// addressed to the type (e.g. "claude-code") so a pool instance like
+	// "claude-code-1" actually marks them read, breaking the perpetual
+	// unread-driven spawn loop in WorkerManager.Check.
+	agentType := r.URL.Query().Get("type")
 	limit := 10
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -425,7 +430,8 @@ func (w *workerAPI) handleMessages(rw http.ResponseWriter, r *http.Request) {
 		collected := make([]domain.Message, 0, limit)
 		for i := len(state.Messages) - 1; i >= 0 && len(collected) < limit; i-- {
 			msg := state.Messages[i]
-			if msg.To == recipient || msg.To == "all" {
+			to := msg.To
+			if to == "all" || to == recipient || (agentType != "" && to == agentType) {
 				collected = append(collected, msg)
 				state.Messages[i].Read = true
 			}

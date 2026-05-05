@@ -330,3 +330,89 @@ func TestPingPong(t *testing.T) {
 		t.Errorf("expected 4 messages (2 ping, 2 pong), got %d", len(repo.state.Messages))
 	}
 }
+
+// TestReadMessages_AlsoDrainsAgentType — when a pool worker passes its
+// agent_type alongside its instance ID, read_messages must include and
+// mark-read messages addressed to the type ("claude-code") in addition
+// to messages addressed to the specific instance ("claude-code-1") or
+// "all". Without this, type-level messages pile up unread forever
+// because each instance only matches its own InstanceID, fueling the
+// perpetual unread-driven spawn loop in WorkerManager.Check.
+func TestReadMessages_AlsoDrainsAgentType(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	// Seed both the pool instance and a sender so ValidateAgent passes.
+	repo.state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+	}
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+	}
+	repo.state.Messages = []domain.Message{
+		{ID: 1, From: "cursor", To: "claude-code", Content: "type-level-msg", Timestamp: time.Now()},
+		{ID: 2, From: "cursor", To: "claude-code-1", Content: "instance-level-msg", Timestamp: time.Now()},
+		{ID: 3, From: "cursor", To: "codex", Content: "other-type-msg", Timestamp: time.Now()},
+	}
+	repo.state.NextMsgID = 4
+
+	result, err := callTool(t, srv, "read_messages", map[string]any{
+		"for":        "claude-code-1",
+		"agent_type": "claude-code",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "type-level-msg") {
+		t.Errorf("type-level message must be returned when agent_type is set: %s", text)
+	}
+	if !strings.Contains(text, "instance-level-msg") {
+		t.Errorf("instance-level message must still be returned: %s", text)
+	}
+	if strings.Contains(text, "other-type-msg") {
+		t.Errorf("messages addressed to a different type must not leak: %s", text)
+	}
+
+	// Both type-level and instance-level messages must be marked read so
+	// the perpetual spawn loop actually drains.
+	if !repo.state.Messages[0].Read {
+		t.Error("type-level message should be marked read after pool instance reads with agent_type set")
+	}
+	if !repo.state.Messages[1].Read {
+		t.Error("instance-level message should be marked read")
+	}
+	if repo.state.Messages[2].Read {
+		t.Error("other-type message must remain unread")
+	}
+}
+
+// TestReadMessages_WithoutAgentTypeIgnoresTypeMessages — sanity guard
+// for the previous broken behavior. Without agent_type, a pool instance
+// reading its own inbox does NOT mark type-level messages read. (This is
+// the bug the agent_type filter exists to work around.)
+func TestReadMessages_WithoutAgentTypeIgnoresTypeMessages(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+	}
+	repo.state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+	}
+	repo.state.Messages = []domain.Message{
+		{ID: 1, From: "cursor", To: "claude-code", Content: "type-level-msg", Timestamp: time.Now()},
+	}
+	repo.state.NextMsgID = 2
+
+	_, err := callTool(t, srv, "read_messages", map[string]any{"for": "claude-code-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.state.Messages[0].Read {
+		t.Error("type-level message must remain unread when only instance-level read is requested (this is the bug agent_type addresses)")
+	}
+}

@@ -84,7 +84,8 @@ func registerReadMessages(s *server.MCPServer, svc *app.CollabService, logger *l
 	s.AddTool(
 		mcp.NewTool("read_messages",
 			mcp.WithDescription("Read messages sent to you from other AI agents. Check this regularly to see if your pair has sent you anything."),
-			mcp.WithString("for", mcp.Required(), mcp.Description("Read messages for this recipient (e.g., 'cursor', 'claude-code')")),
+			mcp.WithString("for", mcp.Required(), mcp.Description("Read messages for this recipient (e.g., 'cursor', 'claude-code-1')")),
+			mcp.WithString("agent_type", mcp.Description("Optional: also include messages addressed to this agent type (e.g. 'claude-code'). Pool worker instances pass their type so type-level messages drain when the first instance reads them, instead of perpetually piling up because each instance only matches its own InstanceID.")),
 			mcp.WithBoolean("unread_only", mcp.Description("Only show unread messages (default: false)")),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of messages to return (default: 10)")),
 			mcp.WithBoolean("mark_read", mcp.Description("Mark returned messages as read (default: true)")),
@@ -95,6 +96,7 @@ func registerReadMessages(s *server.MCPServer, svc *app.CollabService, logger *l
 			if recipient == "" {
 				return nil, fmt.Errorf("'for' is required")
 			}
+			agentType, _ := args["agent_type"].(string)
 
 			unreadOnly := false
 			if v, ok := args["unread_only"].(bool); ok {
@@ -126,14 +128,15 @@ func registerReadMessages(s *server.MCPServer, svc *app.CollabService, logger *l
 				collected := make([]domain.Message, 0, limit)
 				for i := len(state.Messages) - 1; i >= 0 && len(collected) < limit; i-- {
 					msg := state.Messages[i]
-					if msg.To == recipient || msg.To == "all" {
-						if unreadOnly && msg.Read {
-							continue
-						}
-						collected = append(collected, msg)
-						if markRead {
-							state.Messages[i].Read = true
-						}
+					if !messageAddressedTo(msg.To, recipient, agentType) {
+						continue
+					}
+					if unreadOnly && msg.Read {
+						continue
+					}
+					collected = append(collected, msg)
+					if markRead {
+						state.Messages[i].Read = true
 					}
 				}
 				messages = collected
@@ -172,8 +175,31 @@ func registerReadMessages(s *server.MCPServer, svc *app.CollabService, logger *l
 					msg.ID, msg.From, msg.Timestamp.Format("2006-01-02 15:04:05"), msg.Content)
 			}
 
-			logger.Printf("Read %d messages for %s", len(messages), recipient)
+			if agentType != "" {
+				logger.Printf("Read %d messages for %s (incl. type %s)", len(messages), recipient, agentType)
+			} else {
+				logger.Printf("Read %d messages for %s", len(messages), recipient)
+			}
 			return mcp.NewToolResultText(result), nil
 		},
 	)
+}
+
+// messageAddressedTo reports whether a message's To field matches a
+// reader. The reader matches if the message is broadcast ("all"), if To
+// equals the reader's instance ID (recipient), or — when agentType is
+// non-empty — if To equals the reader's pool agent type. Pool worker
+// instances pass agentType so type-level messages drain when ANY
+// instance reads. Without that, messages addressed to e.g. "claude-code"
+// pile up forever because each instance only matches its own
+// "claude-code-N" InstanceID, fueling a perpetual unread-driven spawn
+// loop in WorkerManager.Check.
+func messageAddressedTo(to, recipient, agentType string) bool {
+	if to == "all" || to == recipient {
+		return true
+	}
+	if agentType != "" && to == agentType {
+		return true
+	}
+	return false
 }
