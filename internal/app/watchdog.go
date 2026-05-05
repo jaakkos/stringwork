@@ -21,6 +21,16 @@ const (
 	// before an agent is considered dead.
 	defaultHeartbeatStaleThreshold = 5 * time.Minute
 
+	// reconcileSuppressionWindow bounds the goroutine-race window between a
+	// worker exiting and reconcileAfterExit acquiring the state lock. When
+	// the watchdog ticker arrives in that window it sees in_progress + dead
+	// instance and would bump FailureCount on top of the reconciler's own
+	// recovery. The window is intentionally short (5s) — the race is
+	// scheduler-bounded, and a longer window would silently swallow real
+	// watchdog catches of failed SUBSEQUENT spawn attempts (orchestrator
+	// re-spawns after a reconcile and the new worker never heartbeats).
+	reconcileSuppressionWindow = 5 * time.Second
+
 	// defaultTaskStuckThreshold is how long a task can stay in_progress
 	// without its agent heartbeating before it is considered stuck.
 	defaultTaskStuckThreshold = 10 * time.Minute
@@ -89,6 +99,14 @@ type SpawnDriver interface {
 	// (queued behind capacity/backoff) or running (task-bound child process
 	// alive). When true, the watchdog must not call SpawnForTask again.
 	IsSpawnQueued(taskID int) bool
+	// DrainAllQueues replays every per-type spawn queue, spawning the next
+	// queued task wherever a slot is now available. The event-driven drain
+	// (the trailing call inside spawn goroutines) covers the happy path,
+	// but if a queued task got enqueued during a transient backoff that
+	// has since cleared, or after the last running spawn already exited,
+	// no event will fire to drain it. Calling this from the watchdog cycle
+	// guarantees pending spawns get re-evaluated at least once per tick.
+	DrainAllQueues() int
 }
 
 // Watchdog monitors agent liveness and recovers from stuck states.
@@ -574,8 +592,41 @@ func (w *Watchdog) check() {
 			}
 
 			reason := "agent heartbeat stale"
+			reasonCode := RecoveryReasonAgentHeartbeatStale
 			if !agentDead && taskStuck {
 				reason = fmt.Sprintf("no progress for %s and agent unresponsive", w.taskStuckThresh)
+				reasonCode = RecoveryReasonTaskProgressStuck
+			}
+
+			// Suppression window: protects against the goroutine race where
+			// the watchdog ticker acquires the state lock between a worker
+			// exiting and reconcileAfterExit running. In that window the
+			// watchdog would see in_progress + dead instance and bump
+			// FailureCount, while reconcileAfterExit ALSO wants to handle
+			// the same incident — counting it twice. The race window is
+			// bounded by goroutine scheduling (usually milliseconds), so a
+			// short fixed window is the right shape. Critically NOT scaled
+			// off heartbeatStaleThresh: that's measured in minutes and would
+			// silently swallow legitimate watchdog catches of FAILED
+			// SUBSEQUENT spawn attempts (orchestrator picks up the
+			// reconciled-pending task → new worker spawn fails →
+			// heartbeat stale → real failure that should DLQ).
+			//
+			// The breadcrumb below makes the suppression visible in the
+			// structured event log so a debugging operator can see "the
+			// watchdog wanted to act but reconciler just did".
+			if !t.LastReconciledAt.IsZero() && now.Sub(t.LastReconciledAt) < reconcileSuppressionWindow {
+				w.logger.Printf("Watchdog: task #%d recovery suppressed — reconciled %s ago (within %s window)",
+					t.ID, now.Sub(t.LastReconciledAt).Round(time.Millisecond), reconcileSuppressionWindow)
+				AppendRecoveryEvent(t, domain.RecoveryEvent{
+					At:     now,
+					Source: RecoverySourceWatchdog,
+					Reason: RecoveryReasonSuppressedPostReconcile,
+					Summary: fmt.Sprintf(
+						"Watchdog observed stale heartbeat (%s) but reconciler already handled it %s ago — failure count not incremented",
+						reason, now.Sub(t.LastReconciledAt).Round(time.Millisecond)),
+				})
+				continue
 			}
 
 			w.logger.Printf("Watchdog: recovering stuck task #%d (%s) assigned to %s — %s",
@@ -590,15 +641,25 @@ func (w *Watchdog) check() {
 			if t.FailureCount >= w.maxTaskFailures {
 				t.Status = "blocked"
 				t.BlockedBy = fmt.Sprintf("Watchdog: auto-blocked after %d failures. Last reason: %s", t.FailureCount, reason)
-				if t.ResultSummary == "" {
-					t.ResultSummary = t.BlockedBy
-				}
 				w.logger.Printf("Watchdog: task #%d auto-blocked after %d failures", t.ID, t.FailureCount)
+				AppendRecoveryEvent(t, domain.RecoveryEvent{
+					At:     now,
+					Source: RecoverySourceWatchdog,
+					Reason: RecoveryReasonAutoBlockedAtMaxFailures,
+					Summary: fmt.Sprintf(
+						"Watchdog: auto-blocked after %d/%d failures (last reason: %s)",
+						t.FailureCount, w.maxTaskFailures, reason),
+				})
 			} else {
 				t.Status = "pending"
-				if t.ResultSummary == "" {
-					t.ResultSummary = fmt.Sprintf("Watchdog: reset to pending (failure %d/%d) — %s", t.FailureCount, w.maxTaskFailures, reason)
-				}
+				AppendRecoveryEvent(t, domain.RecoveryEvent{
+					At:     now,
+					Source: RecoverySourceWatchdog,
+					Reason: reasonCode,
+					Summary: fmt.Sprintf(
+						"Watchdog: reset to pending (failure %d/%d) — %s",
+						t.FailureCount, w.maxTaskFailures, reason),
+				})
 			}
 
 			// Clean up the agent instance's task list
@@ -926,9 +987,22 @@ func (w *Watchdog) check() {
 	// gated by spawnSweepGrace and IsSpawnQueued.
 	driven := w.driveSpawns()
 
-	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 || prunedPresence > 0 || prunedInstances > 0 || driven > 0 {
-		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s), %d presence row(s), %d instance row(s), drove %d spawn(s)",
-			recoveredTasks, recoveredAgents, prunedSessions, prunedPresence, prunedInstances, driven)
+	// Phase 6: re-drive every per-type pendingSpawn queue. driveSpawns
+	// only handles tasks the orchestrator never enqueued (IsSpawnQueued
+	// short-circuits anything already in pendingSpawns), so a task that
+	// got enqueued during a transient backoff or while pool slots were
+	// saturated by message-driven spawns can sit forever — the only
+	// other drainQueue call lives at the tail of each spawn goroutine,
+	// and those won't fire if the pool stops spawning. One DrainAllQueues
+	// per cycle bounds the worst-case wait to one watchdog interval.
+	drainedTypes := 0
+	if w.spawnDriver != nil {
+		drainedTypes = w.spawnDriver.DrainAllQueues()
+	}
+
+	if recoveredTasks > 0 || recoveredAgents > 0 || prunedSessions > 0 || prunedPresence > 0 || prunedInstances > 0 || driven > 0 || drainedTypes > 0 {
+		w.logger.Printf("Watchdog: cycle complete — recovered %d task(s), %d agent(s), pruned %d session(s), %d presence row(s), %d instance row(s), drove %d spawn(s), drained %d queue(s)",
+			recoveredTasks, recoveredAgents, prunedSessions, prunedPresence, prunedInstances, driven, drainedTypes)
 	}
 }
 

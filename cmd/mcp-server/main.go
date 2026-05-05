@@ -392,6 +392,15 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		wm.SetSessionChecker(func(instanceOrType string) bool {
 			return registry.HasActiveSession(instanceOrType)
 		})
+		// Drop the synthetic "cli-<instance>" session created by
+		// touchCLISession the moment a worker process exits. Without
+		// this, Check()'s active-session gate stays closed against
+		// the same instance for ~5 minutes (until the watchdog's
+		// stale-session prune fires), starving message-driven and
+		// task-driven respawns alike.
+		wm.SetSessionRemover(func(instanceID string) {
+			registry.RemoveSession("cli-" + instanceID)
+		})
 		// Route CLI-mode workers to THIS daemon's socket (not whatever the
 		// global default happens to be on the machine). Without this, a
 		// developer running two daemons — e.g. their personal one plus a

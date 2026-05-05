@@ -2604,8 +2604,10 @@ func (m *mockTriggerable) Trigger() {
 // SpawnForTask call (so tests can assert which tasks were re-driven) and lets
 // each test stub IsSpawnQueued without setting up a full WorkerManager.
 type fakeSpawnDriver struct {
-	queued  map[int]bool
-	spawned []int
+	queued      map[int]bool
+	spawned     []int
+	drainCalls  int
+	drainResult int // value DrainAllQueues returns; 0 by default
 }
 
 func (f *fakeSpawnDriver) SpawnForTask(taskID int, _ string) {
@@ -2613,6 +2615,11 @@ func (f *fakeSpawnDriver) SpawnForTask(taskID int, _ string) {
 }
 
 func (f *fakeSpawnDriver) IsSpawnQueued(taskID int) bool { return f.queued[taskID] }
+
+func (f *fakeSpawnDriver) DrainAllQueues() int {
+	f.drainCalls++
+	return f.drainResult
+}
 
 // newFakeSpawnDriver returns a driver that pre-marks the given task IDs as
 // already-queued (so the watchdog will skip them).
@@ -2857,4 +2864,210 @@ func TestWatchdog_DriveSpawnsDisabledByZeroGrace(t *testing.T) {
 	if len(driver.spawned) != 0 {
 		t.Errorf("zero spawnSweepGrace must disable driveSpawns, spawned=%v", driver.spawned)
 	}
+}
+
+// TestWatchdog_SuppressesFailureIncrementWithinReconcileWindow guards the
+// goroutine race described at watchdog.go:reconcileSuppressionWindow. When
+// reconcileAfterExit just stamped LastReconciledAt within the suppression
+// window, the watchdog must NOT bump FailureCount on top of the
+// reconciler's own recovery — that would double-count one incident toward
+// the DLQ threshold.
+func TestWatchdog_SuppressesFailureIncrementWithinReconcileWindow(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Just reconciled", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+		// Within the (5s) suppression window — reconciler just ran.
+		LastReconciledAt: now.Add(-1 * time.Second),
+	})
+	state.NextTaskID = 2
+
+	svc := testService(state)
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(3),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 0 {
+			t.Errorf("FailureCount = %d, want 0 (must NOT bump within suppression window)", task.FailureCount)
+		}
+		if task.Status != "in_progress" {
+			t.Errorf("Status = %q, want in_progress (suppression skips the recovery branch)", task.Status)
+		}
+		// One breadcrumb event recorded so operators can see the suppression.
+		if len(task.RecoveryEvents) != 1 {
+			t.Fatalf("RecoveryEvents len = %d, want 1 suppression breadcrumb", len(task.RecoveryEvents))
+		}
+		ev := task.RecoveryEvents[0]
+		if ev.Source != RecoverySourceWatchdog || ev.Reason != RecoveryReasonSuppressedPostReconcile {
+			t.Errorf("event = {Source: %q, Reason: %q}, want {watchdog, suppressed_post_reconcile}", ev.Source, ev.Reason)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_IncrementsFailureCountAfterSuppressionWindow — outside the
+// suppression window the watchdog bumps normally. Critical regression
+// guard: if the suppression window were measured in heartbeat-staleness
+// units (minutes), a legitimate failure of a SUBSEQUENT spawn attempt
+// would be silently swallowed. This test pins the window to its small,
+// race-only size.
+func TestWatchdog_IncrementsFailureCountAfterSuppressionWindow(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Reconcile too long ago", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+		// Well outside the (5s) suppression window — different incident.
+		LastReconciledAt: now.Add(-1 * time.Hour),
+	})
+	state.NextTaskID = 2
+
+	svc := testService(state)
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(3),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 1 {
+			t.Errorf("FailureCount = %d, want 1 (legitimate watchdog catch outside suppression window)", task.FailureCount)
+		}
+		if task.Status != "pending" {
+			t.Errorf("Status = %q, want pending", task.Status)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_NoSuppressionWhenLastReconciledAtZero — a task that was
+// never touched by the reconciler must increment normally on a real
+// failure. Regression guard: an `if !LastReconciledAt.IsZero()` check
+// without the IsZero clause would silently suppress every first-time
+// failure (since zero-time is "before any window").
+func TestWatchdog_NoSuppressionWhenLastReconciledAtZero(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	staleTime := now.Add(-15 * time.Minute)
+
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code"] = &domain.AgentInstance{
+		InstanceID: "claude-code", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "busy", CurrentTasks: []int{1}, LastHeartbeat: staleTime,
+	}
+	state.DriverID = "cursor"
+
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "Never reconciled", Status: "in_progress",
+		AssignedTo: "claude-code", UpdatedAt: staleTime,
+		FailureCount: 0,
+		// LastReconciledAt left zero — task has never been touched by reconciler.
+	})
+	state.NextTaskID = 2
+
+	svc := testService(state)
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithHeartbeatThreshold(1*time.Minute),
+		WithMaxTaskFailures(3),
+	)
+	wd.CheckOnce()
+
+	_ = svc.Query(func(s *domain.CollabState) error {
+		task := s.Tasks[0]
+		if task.FailureCount != 1 {
+			t.Errorf("FailureCount = %d, want 1 (zero LastReconciledAt must NOT suppress)", task.FailureCount)
+		}
+		return nil
+	})
+}
+
+// TestWatchdog_DrainAllQueuesEachCycle — every watchdog tick must call
+// SpawnDriver.DrainAllQueues so queued task spawns get re-evaluated even
+// when the event-driven drain (the trailing call inside spawn goroutines)
+// missed them. This is the key safety net behind the spawn-starvation
+// fix: without it, a task enqueued during a transient backoff or while
+// pool slots were saturated by message-driven spawns would sit in
+// pendingSpawns until the next external SpawnForTask call.
+func TestWatchdog_DrainAllQueuesEachCycle(t *testing.T) {
+	state := domain.NewCollabState()
+	now := time.Now()
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+
+	svc := testService(state)
+	driver := newFakeSpawnDriver()
+	driver.drainResult = 2 // pretend two types had work to drain
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0),
+		WithSpawnDriver(driver),
+		WithSpawnSweepGrace(30*time.Second),
+	)
+
+	wd.CheckOnce()
+
+	if driver.drainCalls != 1 {
+		t.Errorf("DrainAllQueues called %d times in one cycle, want 1", driver.drainCalls)
+	}
+	if len(driver.spawned) != 0 {
+		t.Errorf("no orphan tasks present, expected zero SpawnForTask calls, got %v", driver.spawned)
+	}
+}
+
+// TestWatchdog_DrainAllQueuesNoOpWhenSpawnDriverNil — a watchdog wired
+// without a SpawnDriver (legacy / single-process tests) must not panic
+// and must still complete a normal cycle.
+func TestWatchdog_DrainAllQueuesNoOpWhenSpawnDriverNil(t *testing.T) {
+	state := domain.NewCollabState()
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: time.Now(),
+	}
+
+	svc := testService(state)
+	wd := NewWatchdog(svc, NewSessionRegistry(), log.New(os.Stderr, "[test] ", 0))
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("watchdog cycle with nil SpawnDriver panicked: %v", r)
+		}
+	}()
+	wd.CheckOnce()
 }

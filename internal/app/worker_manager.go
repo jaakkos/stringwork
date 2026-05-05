@@ -81,6 +81,14 @@ type WorkerManager struct {
 	lastSpawn      map[string]time.Time          // instanceID -> last successful spawn
 	runningWorkers map[string]context.CancelFunc // instanceID -> cancel func for spawned process
 	sessionChecker func(instanceOrType string) bool
+	// sessionRemover clears the synthetic CLI session for an instance once
+	// its worker process has exited. Without this, the session lingers
+	// until the watchdog's pruneStaleSessions sweep (defaultSessionStaleThreshold,
+	// 5 minutes) — leaving the active-session gate in Check() falsely
+	// blocked, so a queued message-respond worker can't spawn for several
+	// minutes after the previous one finished. Optional; when nil the
+	// watchdog prune still cleans up eventually.
+	sessionRemover func(instanceID string)
 	// mcpServerURL when set (HTTP mode): used to register MCP server with worker CLIs.
 	mcpServerURL string
 	// mcpServers are additional MCP servers to auto-register with worker CLIs.
@@ -117,6 +125,15 @@ type WorkerManager struct {
 	// (running, in cooldown, in backoff) floods the log every Check() tick.
 	// Key: "<instanceID>|<reason>". Value: last-logged time.
 	spawnSkipLogged map[string]time.Time
+	// failureAcks coalesces sendFailureAck output into a single rolling
+	// message per instance. Pre-fix the orchestrator could produce 30+
+	// near-identical "❌ X failed" messages for one stuck task before its
+	// failureBackoffMaxCount circuit breaker tripped — driver inboxes
+	// hit the thousands. With this map the first failure appends a
+	// message and the message ID is remembered; subsequent failures
+	// within failureAckCoalesceWindow update that message in place
+	// (and re-mark it unread). Key: instanceID.
+	failureAcks map[string]*failureAckState
 	// constitutionSourcesFn returns the layered guidance sources to
 	// inline into worker spawn prompts. Optional; when nil the worker
 	// is spawned with no constitution preamble. Set by the daemon /
@@ -130,6 +147,29 @@ type WorkerManager struct {
 // pool with persistent skip conditions logs at most one line per minute per
 // pair — enough to know "this is still happening" without drowning the log.
 const spawnSkipLogWindow = 1 * time.Minute
+
+// failureAckCoalesceWindow is how long after the last failure ack a fresh
+// failure for the same instance updates the existing message instead of
+// appending a new one. 5 minutes matches the practical "burst of retries
+// for one stuck task" timescale: failureBackoffMaxCount cycles with
+// exponential backoff (capped at 2 min/retry) typically completes inside
+// this window, so one rolling message captures the whole burst. After
+// 5 min of quiet, a fresh failure starts a new message — operators
+// notice that as a distinct event in the inbox.
+const failureAckCoalesceWindow = 5 * time.Minute
+
+// failureAckState records the per-instance coalesce state for sendFailureAck.
+// firstAt / lastAt / count produce the rolling message text; messageID is
+// the s.Messages entry to update in place. messageID == 0 means we have no
+// active message yet (either the first failure, or the previous message was
+// pruned).
+type failureAckState struct {
+	firstAt   time.Time
+	lastAt    time.Time
+	count     int
+	lastErr   string
+	messageID int
+}
 
 // ProcessInfo holds runtime process metadata for a worker instance.
 type ProcessInfo struct {
@@ -221,12 +261,22 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		pendingSpawns:       make(map[string][]pendingSpawn),
 		lastSessionID:       make(map[string]string),
 		spawnSkipLogged:     make(map[string]time.Time),
+		failureAcks:         make(map[string]*failureAckState),
 	}
 }
 
 // SetSessionChecker sets a function that returns true if an instance/agent has an active MCP session.
 func (m *WorkerManager) SetSessionChecker(fn func(string) bool) {
 	m.sessionChecker = fn
+}
+
+// SetSessionRemover sets a function called from spawn() once a worker
+// process exits, so the daemon can drop any synthetic CLI session
+// registered for that instance. Pairing this with SetSessionChecker
+// closes the gap where Check() would otherwise treat a freshly-exited
+// worker as still active for up to defaultSessionStaleThreshold.
+func (m *WorkerManager) SetSessionRemover(fn func(string)) {
+	m.sessionRemover = fn
 }
 
 // SetWorkerSessionID records the CLI session/conversation ID for a worker instance.
@@ -982,7 +1032,18 @@ func (m *WorkerManager) Check() {
 		m.logger.Printf("WorkerManager: spawning %s (%d unread message(s), workspace=%s)", c.InstanceID, unread, spawnDir)
 		m.MarkInstanceSpawning(c.InstanceID, c.AgentType)
 		m.sendAck(c.InstanceID, connected, unread, 0)
-		go m.spawn(c, spawnDir)
+		// Drain the per-type spawn queue when this pool worker exits.
+		// Without this, queued task spawns (SpawnForTask → enqueueSpawn)
+		// can starve indefinitely when the pool slots are repeatedly
+		// consumed by message-driven spawns: the only other call to
+		// drainQueue lives at the tail of spawnTaskWorker's goroutine,
+		// so a perpetual unread-message loop never frees a slot for
+		// queued tasks. Mirroring that pattern here makes every spawn
+		// path responsible for replaying its own queue on exit.
+		go func() {
+			m.spawn(c, spawnDir)
+			m.drainQueue(c.AgentType)
+		}()
 	}
 }
 
@@ -1044,6 +1105,7 @@ func (m *WorkerManager) RestartWorkers() []string {
 	m.consecutiveFailures = make(map[string]int)
 	m.lastFailure = make(map[string]time.Time)
 	m.backoffUntil = make(map[string]time.Time)
+	m.failureAcks = make(map[string]*failureAckState)
 	m.mu.Unlock()
 
 	// Brief pause for processes to exit before respawning
@@ -1365,6 +1427,15 @@ func (m *WorkerManager) resolveWorkspace(state *domain.CollabState) string {
 
 func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 	defer m.releaseLock(c.InstanceID)
+	// Defer session cleanup so every exit path (success, terminal error,
+	// exhausted retries) runs it. Avoids the 5-minute pruneStaleSessions
+	// wait that would otherwise hold the active-session gate in Check()
+	// closed against a respawn for this instance.
+	defer func() {
+		if m.sessionRemover != nil {
+			m.sessionRemover(c.InstanceID)
+		}
+	}()
 	retryDelay := c.RetryDelay
 	var lastResult runResult
 	attempts := 0
@@ -1385,6 +1456,7 @@ func (m *WorkerManager) spawn(c WorkerSpawnConfig, workspaceDir string) {
 			m.consecutiveFailures[c.InstanceID] = 0
 			delete(m.lastFailure, c.InstanceID)
 			delete(m.backoffUntil, c.InstanceID)
+			delete(m.failureAcks, c.InstanceID)
 			if c.AgentType != "" && c.AgentType != c.InstanceID {
 				m.consecutiveFailures[c.AgentType] = 0
 				delete(m.lastFailure, c.AgentType)
@@ -2381,6 +2453,17 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 // Captures the worker's recent output and stores it in the task's WorkContext so
 // a replacement worker receives the previous attempt's context.
 // Also cleans up worktrees if the strategy is "on_exit".
+//
+// Ownership rule (REGFIN: see plan stringwork orphan reconcile fixes Phase 1):
+// only touch tasks where this exiting worker is the actual owner — either it
+// appears in inst.CurrentTasks (authoritative under the post-CurrentTasks
+// semantics, see findOwnerInstanceForTask in watchdog.go) OR the task is
+// instance-level assigned to this exact InstanceID. Type-level matches
+// (t.AssignedTo == c.AgentType) used to be a fallback here, but they swept
+// unrelated sibling tasks owned by no one (or by a still-live sibling
+// instance). The watchdog handles type-level orphans correctly via
+// findOwnerInstanceForTask + heartbeat liveness, so this path leaves them
+// alone now.
 func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 	capturedOutput := m.GetRecentOutput(c.InstanceID)
 
@@ -2401,14 +2484,31 @@ func (m *WorkerManager) reconcileAfterExit(c WorkerSpawnConfig) {
 			if t.Status != "in_progress" {
 				continue
 			}
-			if t.AssignedTo != c.InstanceID && t.AssignedTo != c.AgentType {
+			owner := findOwnerInstanceForTask(s, t)
+			isOwner := owner != nil && owner.InstanceID == c.InstanceID
+			isInstanceAssignment := t.AssignedTo == c.InstanceID
+			if !isOwner && !isInstanceAssignment {
 				continue
 			}
+			now := time.Now()
 			t.Status = "pending"
-			t.UpdatedAt = time.Now()
-			if t.ResultSummary == "" {
-				t.ResultSummary = fmt.Sprintf("Worker %s exited without updating status. Check worker log for details.", c.InstanceID)
+			t.UpdatedAt = now
+			t.LastReconciledAt = now
+			var reason, summary string
+			if isOwner {
+				reason = RecoveryReasonWorkerExitWithOwnedTask
+				summary = fmt.Sprintf("Worker %s exited while task in_progress (work context preserved; run `get_work_context task_id=%d` for previous attempt output).", c.InstanceID, t.ID)
+			} else {
+				reason = RecoveryReasonWorkerExitUnclaimedAssignment
+				summary = fmt.Sprintf("Worker %s exited before claiming this instance-assigned task; reassigning.", c.InstanceID)
 			}
+			AppendRecoveryEvent(t, domain.RecoveryEvent{
+				At:         now,
+				Source:     RecoverySourceReconciler,
+				Reason:     reason,
+				Summary:    summary,
+				InstanceID: c.InstanceID,
+			})
 
 			SaveOutputToWorkContext(s, t.ID, capturedOutput, c.InstanceID, t.ProgressDescription, m.logger)
 
@@ -2839,6 +2939,34 @@ func (m *WorkerManager) PendingSpawnCount(agentType string) int {
 	return len(m.pendingSpawns[agentType])
 }
 
+// DrainAllQueues iterates every per-type pending spawn queue and calls
+// drainQueue once per type. Implements app.SpawnDriver so the watchdog can
+// re-fire queued spawns the event-driven path (drainQueue at the tail of
+// each spawn goroutine) missed.
+//
+// Returns the number of types with non-empty queues at entry, purely for
+// log accounting. Each drainQueue call is a single pop attempt; if the
+// queue still has more entries they get drained on subsequent watchdog
+// ticks (or the next event-driven drain). This avoids blasting the
+// orchestrator with N parallel spawn attempts in one cycle when capacity
+// would only accept one anyway.
+func (m *WorkerManager) DrainAllQueues() int {
+	m.mu.Lock()
+	types := make([]string, 0, len(m.pendingSpawns))
+	for agentType, queue := range m.pendingSpawns {
+		if len(queue) == 0 {
+			continue
+		}
+		types = append(types, agentType)
+	}
+	m.mu.Unlock()
+
+	for _, agentType := range types {
+		m.drainQueue(agentType)
+	}
+	return len(types)
+}
+
 // IsSpawnQueued reports whether a spawn is already in flight or queued for the
 // given task ID. Implements app.SpawnDriver so the watchdog's driveSpawns()
 // sweep can avoid double-spawning tasks the immediate create_task →
@@ -2943,11 +3071,50 @@ func (m *WorkerManager) sendAck(instanceID, recipient string, unread, pending in
 	})
 }
 
+// sendFailureAck records a spawn failure for instanceID and either appends
+// a new system message or updates the existing rolling message in place.
+//
+// Coalescing: when a previous failure for the same instanceID landed
+// within failureAckCoalesceWindow AND its message is still in
+// state.Messages, the existing message's Content is rewritten to a
+// "failed N time(s)" form and re-marked unread. After the coalesce
+// window elapses, the next failure starts a fresh message — operators
+// see that as a distinct burst in the inbox.
+//
+// Pre-fix this function appended one message per spawn-attempt cycle, so
+// a single stuck task producing failureBackoffMaxCount retries would
+// flood the driver inbox with 30+ near-identical entries. This is the
+// fix for the inbox-flood part of the orphan-reconcile incident — the
+// per-instance circuit breaker (failureBackoffMaxCount) already bounds
+// the number of attempts; coalescing bounds the number of messages.
 func (m *WorkerManager) sendFailureAck(instanceID string, lastErr error, attempts int) {
 	if m.stateMutator == nil {
 		return
 	}
-	content := fmt.Sprintf("❌ **%s** failed to respond after %d attempt(s): %v", instanceID, attempts, lastErr)
+	now := time.Now()
+	errStr := ""
+	if lastErr != nil {
+		errStr = lastErr.Error()
+	}
+
+	m.mu.Lock()
+	if m.failureAcks == nil {
+		m.failureAcks = make(map[string]*failureAckState)
+	}
+	st, exists := m.failureAcks[instanceID]
+	if !exists || st == nil || now.Sub(st.lastAt) > failureAckCoalesceWindow {
+		st = &failureAckState{firstAt: now}
+		m.failureAcks[instanceID] = st
+	}
+	st.lastAt = now
+	st.count += attempts
+	if attempts <= 0 {
+		st.count++ // defensive: caller should pass attempts >= 1
+	}
+	st.lastErr = errStr
+	prevMessageID := st.messageID
+	m.mu.Unlock()
+
 	_ = m.stateMutator(func(s *domain.CollabState) error {
 		recipient := ""
 		for i := len(s.Messages) - 1; i >= 0; i-- {
@@ -2960,16 +3127,69 @@ func (m *WorkerManager) sendFailureAck(instanceID string, lastErr error, attempt
 		if recipient == "" {
 			recipient = ConfiguredDriver(s)
 		}
+
+		content := formatFailureAckMessage(instanceID, st)
+
+		// Try to update the existing message in place. The message may have
+		// been pruned out of state.Messages since we last touched it; in
+		// that case we fall through to appending a new one and remember
+		// the new ID for the next coalesce.
+		if prevMessageID != 0 {
+			for i := range s.Messages {
+				if s.Messages[i].ID == prevMessageID {
+					s.Messages[i].Content = content
+					s.Messages[i].Timestamp = now
+					s.Messages[i].Read = false
+					return nil
+				}
+			}
+		}
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,
 			From:      "system",
 			To:        recipient,
 			Content:   content,
-			Timestamp: time.Now(),
+			Timestamp: now,
 		})
+		newID := s.NextMsgID
 		s.NextMsgID++
+		m.mu.Lock()
+		if m.failureAcks == nil {
+			m.failureAcks = make(map[string]*failureAckState)
+		}
+		if cur, ok := m.failureAcks[instanceID]; ok && cur != nil {
+			cur.messageID = newID
+		}
+		m.mu.Unlock()
 		return nil
 	})
+}
+
+// formatFailureAckMessage produces the user-facing text. Kept separate so
+// the unit tests can assert on it without faking the whole stateMutator
+// callback.
+func formatFailureAckMessage(instanceID string, st *failureAckState) string {
+	if st == nil {
+		return fmt.Sprintf("❌ **%s** failed (no state)", instanceID)
+	}
+	if st.count <= 1 {
+		return fmt.Sprintf("❌ **%s** failed to respond after %d attempt(s): %s",
+			instanceID, st.count, st.lastErr)
+	}
+	span := st.lastAt.Sub(st.firstAt).Round(time.Second)
+	return fmt.Sprintf(
+		"❌ **%s** has failed %d time(s) over %s (first: %s); last error: %s",
+		instanceID, st.count, span, st.firstAt.Format(time.RFC3339), st.lastErr)
+}
+
+// resetFailureAck drops the coalesce state for instanceID. Called from the
+// runOnce success path and from RestartWorkers so the next failure for
+// this instance starts a fresh message rather than tacking onto a
+// long-stale rolling message.
+func (m *WorkerManager) resetFailureAck(instanceID string) {
+	m.mu.Lock()
+	delete(m.failureAcks, instanceID)
+	m.mu.Unlock()
 }
 
 func (m *WorkerManager) lockfilePath(instanceID string) string {
