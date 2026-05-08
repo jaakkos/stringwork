@@ -33,6 +33,9 @@ presence_ttl_seconds: 300
 #                                          Shorter window: task-bound rows should be reaped on terminal
 #                                          task transition by update_task / cancel_agent — this is the
 #                                          GC safety net for cases where the in-event reap was missed.
+#                                          Operators with active worker churn typically override this to
+#                                          4-8 hours so worker_status doesn't display day-old corpses
+#                                          that can mislead skills into thinking the pool is dead.
 
 # --- Audit Logging ---
 # Records every tool call with agent, tool name, args summary, duration, and errors.

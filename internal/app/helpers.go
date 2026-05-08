@@ -576,67 +576,112 @@ func OrchestrationAgentTypes(orch *policy.OrchestrationConfig) []string {
 	return agents
 }
 
-// EnsureAgentInstances seeds state.AgentInstances from orchestration config or built-in defaults.
-// Idempotent: if AgentInstances already populated, does nothing.
+// EnsureAgentInstances seeds state.AgentInstances from orchestration config.
+//
+// Per-type idempotent: gaps are filled, existing rows are never overwritten.
+//
+//   - First call against an empty state: seeds the driver row and the static
+//     pool for every configured worker type.
+//   - Subsequent calls (non-empty state): for each configured worker type with
+//     zero matching AgentInstance rows (neither InstanceID nor AgentType match),
+//     the static pool for that type is re-seeded. This closes the soft-
+//     deregister failure mode where a long-idle worker type's rows age out via
+//     `instance_retention_days` and ValidateAgent then rejects
+//     `create_task assigned_to='<type>'` despite the type still being in the
+//     config — the watchdog never gets a chance to spawn because the create
+//     itself fails. Re-seeding inside the per-Run/Query call path means the
+//     next service call after the GC sweep restores the type without
+//     requiring a daemon restart.
+//
+// The driver row and any populated worker rows (including task-bound
+// instances like `codex-task-7`) are left untouched on every call; only
+// genuinely missing rows get created.
 func EnsureAgentInstances(state *domain.CollabState, orch *policy.OrchestrationConfig) {
 	if state == nil {
 		return
 	}
-	if len(state.AgentInstances) > 0 {
+	if orch == nil {
+		// No orchestration: defaults applied in LoadConfig; nothing to seed here.
 		return
 	}
 	now := time.Now()
-	if orch != nil {
+
+	// Driver: set DriverID once on a fresh state, then create the driver
+	// row only when it's missing. Do NOT overwrite an existing driver row —
+	// that would clobber runtime state (CurrentTasks, LastHeartbeat) on
+	// every Run/Query call now that this function runs every time.
+	if state.DriverID == "" {
 		state.DriverID = orch.Driver
-		// Driver row deliberately leaves LastSpawnedAt zero. Drivers
-		// are protected from stale STOP banners by the DaemonStartedAt
-		// fallback in BuildBanner — a non-zero per-instance cutoff
-		// here would over-suppress for unit tests that drive cursor
-		// through orchestration without DaemonStartedAt set.
-		state.AgentInstances[orch.Driver] = &domain.AgentInstance{
-			InstanceID:    orch.Driver,
-			AgentType:     orch.Driver,
-			Role:          domain.RoleDriver,
-			Capabilities:  []string{"orchestrate", "code-edit", "code-review", "search", "terminal"},
-			MaxTasks:      0,
-			Status:        "idle",
-			LastHeartbeat: now,
-		}
-		for _, w := range orch.Workers {
-			n := w.Instances
-			if n <= 0 {
-				n = 1
-			}
-			maxTasks := w.MaxConcurrentTasks
-			if maxTasks <= 0 {
-				maxTasks = 1
-			}
-			for i := 0; i < n; i++ {
-				instanceID := w.Type
-				if n > 1 {
-					instanceID = fmt.Sprintf("%s-%d", w.Type, i+1)
-				}
-				// Worker pool rows leave LastSpawnedAt zero on bootstrap.
-				// MarkInstanceSpawning sets it when the WorkerManager
-				// actually starts a process; until then there is no
-				// real spawn to anchor a STOP-banner cutoff to. A
-				// premature non-zero would suppress legitimate STOPs
-				// emitted between daemon boot and first spawn.
-				state.AgentInstances[instanceID] = &domain.AgentInstance{
-					InstanceID:    instanceID,
-					AgentType:     w.Type,
-					Role:          domain.RoleWorker,
-					Capabilities:  w.Capabilities,
-					MaxTasks:      maxTasks,
-					Status:        "offline",
-					CurrentTasks:  []int{},
-					LastHeartbeat: now,
-				}
-			}
-		}
-		return
 	}
-	// No orchestration: use default (driver only) is applied in LoadConfig; nothing extra to seed here
+	if orch.Driver != "" {
+		if _, ok := state.AgentInstances[orch.Driver]; !ok {
+			// Driver row deliberately leaves LastSpawnedAt zero. Drivers
+			// are protected from stale STOP banners by the DaemonStartedAt
+			// fallback in BuildBanner — a non-zero per-instance cutoff
+			// here would over-suppress for unit tests that drive cursor
+			// through orchestration without DaemonStartedAt set.
+			state.AgentInstances[orch.Driver] = &domain.AgentInstance{
+				InstanceID:    orch.Driver,
+				AgentType:     orch.Driver,
+				Role:          domain.RoleDriver,
+				Capabilities:  []string{"orchestrate", "code-edit", "code-review", "search", "terminal"},
+				MaxTasks:      0,
+				Status:        "idle",
+				LastHeartbeat: now,
+			}
+		}
+	}
+
+	// Workers: for each configured type, re-seed the static pool when no
+	// AgentInstance row of that type exists. Task-bound rows count toward
+	// "type exists" (their AgentType matches), so we only re-seed when the
+	// type is genuinely absent — not when it's just busy with task-bound
+	// work.
+	for _, w := range orch.Workers {
+		if w.Type == "" {
+			continue
+		}
+		hasAny := false
+		for _, inst := range state.AgentInstances {
+			if inst != nil && inst.AgentType == w.Type {
+				hasAny = true
+				break
+			}
+		}
+		if hasAny {
+			continue
+		}
+		n := w.Instances
+		if n <= 0 {
+			n = 1
+		}
+		maxTasks := w.MaxConcurrentTasks
+		if maxTasks <= 0 {
+			maxTasks = 1
+		}
+		for i := 0; i < n; i++ {
+			instanceID := w.Type
+			if n > 1 {
+				instanceID = fmt.Sprintf("%s-%d", w.Type, i+1)
+			}
+			// Worker pool rows leave LastSpawnedAt zero on bootstrap.
+			// MarkInstanceSpawning sets it when the WorkerManager
+			// actually starts a process; until then there is no
+			// real spawn to anchor a STOP-banner cutoff to. A
+			// premature non-zero would suppress legitimate STOPs
+			// emitted between daemon boot and first spawn.
+			state.AgentInstances[instanceID] = &domain.AgentInstance{
+				InstanceID:    instanceID,
+				AgentType:     w.Type,
+				Role:          domain.RoleWorker,
+				Capabilities:  w.Capabilities,
+				MaxTasks:      maxTasks,
+				Status:        "offline",
+				CurrentTasks:  []int{},
+				LastHeartbeat: now,
+			}
+		}
+	}
 }
 
 // RefreshHeartbeatsOnStartup resets LastHeartbeat for all agent instances to "now"

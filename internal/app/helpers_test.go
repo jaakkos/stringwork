@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
@@ -300,6 +301,137 @@ func TestEnsureAgentInstances_ClaudeCodeDriver(t *testing.T) {
 	}
 	if state.AgentInstances["codex"].Role != domain.RoleWorker {
 		t.Errorf("codex role = %q, want worker", state.AgentInstances["codex"].Role)
+	}
+}
+
+// TestEnsureAgentInstances_ReseedsMissingWorkerType is the regression test
+// for the soft-deregister bug: a configured worker type whose static-pool
+// rows have been GC'd via instance_retention_days must be re-seeded on the
+// next service Run/Query so that ValidateAgent and create_task can target
+// it again without a daemon restart.
+func TestEnsureAgentInstances_ReseedsMissingWorkerType(t *testing.T) {
+	now := time.Now()
+	state := domain.NewCollabState()
+	state.DriverID = "cursor"
+	// Driver and one worker type already populated; codex rows have been
+	// GC'd (configured but absent — the failure mode this test guards).
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	state.AgentInstances["claude-code-1"] = &domain.AgentInstance{
+		InstanceID: "claude-code-1", AgentType: "claude-code", Role: domain.RoleWorker,
+		Status: "offline", LastHeartbeat: now.Add(-25 * time.Hour),
+	}
+
+	orch := &policy.OrchestrationConfig{
+		Driver: "cursor",
+		Workers: []policy.WorkerConfig{
+			{Type: "claude-code", Instances: 2},
+			{Type: "codex", Instances: 2},
+		},
+	}
+
+	EnsureAgentInstances(state, orch)
+
+	// codex static pool must be re-seeded (both instances) so that
+	// ValidateAgent("codex", ...) succeeds again.
+	if state.AgentInstances["codex-1"] == nil {
+		t.Error("expected codex-1 to be re-seeded after GC")
+	}
+	if state.AgentInstances["codex-2"] == nil {
+		t.Error("expected codex-2 to be re-seeded after GC")
+	}
+	if got := state.AgentInstances["codex-1"]; got != nil && got.AgentType != "codex" {
+		t.Errorf("codex-1.AgentType = %q, want \"codex\"", got.AgentType)
+	}
+
+	// Existing rows must not be clobbered. claude-code-1's stale heartbeat
+	// is meaningful (it shows the static-pool worker is offline) — wiping
+	// it would mask the real liveness state from worker_status.
+	if got := state.AgentInstances["claude-code-1"]; got == nil {
+		t.Fatal("claude-code-1 should not have been removed")
+	} else if !got.LastHeartbeat.Equal(now.Add(-25 * time.Hour)) {
+		t.Errorf("claude-code-1.LastHeartbeat was overwritten")
+	}
+
+	// We should not have re-seeded claude-code-2 either, because the type
+	// is already represented (claude-code-1 exists). EnsureAgentInstances
+	// only fills in completely-missing types, not partial pools.
+	if state.AgentInstances["claude-code-2"] != nil {
+		t.Error("claude-code-2 should not have been seeded — type already had a row")
+	}
+}
+
+// TestEnsureAgentInstances_TaskBoundRowSatisfies covers the case where the
+// static-pool rows are gone but a task-bound instance is still around: the
+// type is registered (ValidateAgent matches by AgentType), so no re-seed
+// should fire. Re-seeding here would create a phantom static-pool row
+// while the task-bound worker is still alive and confuse the watchdog.
+func TestEnsureAgentInstances_TaskBoundRowSatisfies(t *testing.T) {
+	now := time.Now()
+	state := domain.NewCollabState()
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID: "cursor", AgentType: "cursor", Role: domain.RoleDriver,
+		Status: "idle", LastHeartbeat: now,
+	}
+	// Only a task-bound row for codex — no static pool rows.
+	state.AgentInstances["codex-task-3"] = &domain.AgentInstance{
+		InstanceID: "codex-task-3", AgentType: "codex", Role: domain.RoleWorker,
+		Status: "idle", LastHeartbeat: now,
+	}
+
+	orch := &policy.OrchestrationConfig{
+		Driver: "cursor",
+		Workers: []policy.WorkerConfig{
+			{Type: "codex", Instances: 2},
+		},
+	}
+
+	EnsureAgentInstances(state, orch)
+
+	if state.AgentInstances["codex-1"] != nil || state.AgentInstances["codex-2"] != nil {
+		t.Errorf("static pool was re-seeded despite task-bound row satisfying type presence")
+	}
+	if state.AgentInstances["codex-task-3"] == nil {
+		t.Error("codex-task-3 was removed by EnsureAgentInstances")
+	}
+}
+
+// TestEnsureAgentInstances_PreservesExistingDriverRow ensures that re-running
+// EnsureAgentInstances on a populated state does not overwrite the driver
+// row. With this function now running on every service Run/Query, a naive
+// unconditional write would clobber CurrentTasks / LastHeartbeat every call.
+func TestEnsureAgentInstances_PreservesExistingDriverRow(t *testing.T) {
+	now := time.Now()
+	state := domain.NewCollabState()
+	state.DriverID = "cursor"
+	state.AgentInstances["cursor"] = &domain.AgentInstance{
+		InstanceID:    "cursor",
+		AgentType:     "cursor",
+		Role:          domain.RoleDriver,
+		Status:        "working",
+		CurrentTasks:  []int{42},
+		LastHeartbeat: now.Add(-30 * time.Second),
+	}
+
+	orch := &policy.OrchestrationConfig{Driver: "cursor"}
+
+	EnsureAgentInstances(state, orch)
+
+	got := state.AgentInstances["cursor"]
+	if got == nil {
+		t.Fatal("cursor row was removed")
+	}
+	if got.Status != "working" {
+		t.Errorf("Status = %q, want \"working\" (was clobbered)", got.Status)
+	}
+	if len(got.CurrentTasks) != 1 || got.CurrentTasks[0] != 42 {
+		t.Errorf("CurrentTasks = %v, want [42] (was clobbered)", got.CurrentTasks)
+	}
+	if !got.LastHeartbeat.Equal(now.Add(-30 * time.Second)) {
+		t.Errorf("LastHeartbeat was overwritten to %v", got.LastHeartbeat)
 	}
 }
 
