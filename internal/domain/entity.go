@@ -87,6 +87,19 @@ type Task struct {
 	FailureCount  int       `json:"failure_count,omitempty"`
 	LastFailure   time.Time `json:"last_failure_at,omitempty"`
 	FailureReason string    `json:"failure_reason,omitempty"`
+	// RecoveryEvents is an append-only log of reconciler / watchdog actions
+	// taken on this task. Newest last, capped at app.recoveryEventLogCap
+	// entries (older entries dropped). ResultSummary is kept in sync with
+	// the most recent event.Summary for backward compatibility with
+	// existing UI / MCP / chrome-extension consumers that read the single
+	// string field.
+	RecoveryEvents []RecoveryEvent `json:"recovery_events,omitempty"`
+	// LastReconciledAt is set by reconcileAfterExit when it resets a task
+	// to pending. The watchdog uses it to suppress its own FailureCount
+	// increment when it sees the same incident propagate within
+	// 2*heartbeatStaleThresh — otherwise a single worker exit would burn
+	// two of the MaxTaskFailures (default 3) DLQ slots.
+	LastReconciledAt time.Time `json:"last_reconciled_at,omitempty"`
 	// Review gates
 	RequiresReview bool   `json:"requires_review,omitempty"`
 	ReviewStatus   string `json:"review_status,omitempty"` // pending, approved, rejected
@@ -117,6 +130,25 @@ type Task struct {
 	// task-spawn output by template.
 	Template string `json:"template,omitempty"`
 	Aspect   string `json:"aspect,omitempty"`
+}
+
+// RecoveryEvent is one entry in Task.RecoveryEvents. Together they form a
+// short timeline of automated recovery actions on a task — replaces the
+// old "first writer wins" ResultSummary shape where the reconciler and the
+// watchdog would silently overwrite each other and the user could not
+// reconstruct the order of events.
+//
+// Source identifies the subsystem that wrote the entry ("reconciler",
+// "watchdog", "auto_cancel"). Reason is a short machine-readable code (see
+// app/recovery_events.go for the canonical list) so dashboards can render
+// distinct icons / colors. Summary is the human-readable one-liner that
+// also gets mirrored into Task.ResultSummary for backward compatibility.
+type RecoveryEvent struct {
+	At         time.Time `json:"at"`
+	Source     string    `json:"source"`
+	Reason     string    `json:"reason"`
+	Summary    string    `json:"summary"`
+	InstanceID string    `json:"instance_id,omitempty"`
 }
 
 // AuditEntry represents a single tool call recorded by the audit middleware.

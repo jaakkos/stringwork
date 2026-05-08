@@ -131,6 +131,129 @@ func TestStoreRoundtrip_TemplateAspect(t *testing.T) {
 	}
 }
 
+// TestStoreRoundtrip_RecoveryEvents locks in that the structured recovery
+// event log and the LastReconciledAt timestamp survive Save/Load. Pre-fix
+// the only on-disk recovery signal was a single ResultSummary string and
+// a FailureReason string overwriting each other; this guards the
+// migration that fixes that.
+func TestStoreRoundtrip_RecoveryEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recovery.sqlite")
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if c, ok := store.(*Store); ok {
+			_ = c.Close()
+		}
+	}()
+
+	state := domain.NewCollabState()
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "task with events", Status: "pending", AssignedTo: "claude-code",
+		CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3,
+		ResultSummary:    "Watchdog: reset to pending (failure 1/3) — agent heartbeat stale",
+		LastReconciledAt: now.Add(-30 * time.Second),
+		RecoveryEvents: []domain.RecoveryEvent{
+			{
+				At:         now.Add(-60 * time.Second),
+				Source:     "reconciler",
+				Reason:     "worker_exit_with_owned_task",
+				Summary:    "Worker claude-code-task-1 exited while task in_progress",
+				InstanceID: "claude-code-task-1",
+			},
+			{
+				At:      now.Add(-10 * time.Second),
+				Source:  "watchdog",
+				Reason:  "agent_heartbeat_stale",
+				Summary: "Watchdog: reset to pending (failure 1/3) — agent heartbeat stale",
+			},
+		},
+	})
+	state.NextTaskID = 2
+
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Tasks) != 1 {
+		t.Fatalf("len(Tasks) = %d, want 1", len(loaded.Tasks))
+	}
+	got := loaded.Tasks[0]
+	if got.LastReconciledAt.IsZero() {
+		t.Error("LastReconciledAt should round-trip non-zero")
+	}
+	if !got.LastReconciledAt.Equal(now.Add(-30 * time.Second)) {
+		t.Errorf("LastReconciledAt = %v, want %v", got.LastReconciledAt, now.Add(-30*time.Second))
+	}
+	if len(got.RecoveryEvents) != 2 {
+		t.Fatalf("RecoveryEvents len = %d, want 2", len(got.RecoveryEvents))
+	}
+	first := got.RecoveryEvents[0]
+	if first.Source != "reconciler" || first.Reason != "worker_exit_with_owned_task" {
+		t.Errorf("first event = {Source: %q, Reason: %q}, want {reconciler, worker_exit_with_owned_task}", first.Source, first.Reason)
+	}
+	if first.InstanceID != "claude-code-task-1" {
+		t.Errorf("first event InstanceID = %q, want claude-code-task-1", first.InstanceID)
+	}
+	if !first.At.Equal(now.Add(-60 * time.Second)) {
+		t.Errorf("first event At = %v, want %v", first.At, now.Add(-60*time.Second))
+	}
+	second := got.RecoveryEvents[1]
+	if second.Source != "watchdog" || second.Reason != "agent_heartbeat_stale" {
+		t.Errorf("second event = {Source: %q, Reason: %q}, want {watchdog, agent_heartbeat_stale}", second.Source, second.Reason)
+	}
+}
+
+// TestStoreRoundtrip_TaskWithoutRecoveryEvents guards the migration: a
+// pre-existing row with no recovery events / no LastReconciledAt must
+// load cleanly and present empty / zero values, NOT cause Load to fail.
+func TestStoreRoundtrip_TaskWithoutRecoveryEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_events.sqlite")
+
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if c, ok := store.(*Store); ok {
+			_ = c.Close()
+		}
+	}()
+
+	state := domain.NewCollabState()
+	now := time.Now()
+	state.Tasks = append(state.Tasks, domain.Task{
+		ID: 1, Title: "no events", Status: "pending", AssignedTo: "any",
+		CreatedBy: "cursor", CreatedAt: now, UpdatedAt: now, Priority: 3,
+	})
+
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Tasks) != 1 {
+		t.Fatalf("len(Tasks) = %d, want 1", len(loaded.Tasks))
+	}
+	if len(loaded.Tasks[0].RecoveryEvents) != 0 {
+		t.Errorf("RecoveryEvents = %v, want empty for a task that never recorded any", loaded.Tasks[0].RecoveryEvents)
+	}
+	if !loaded.Tasks[0].LastReconciledAt.IsZero() {
+		t.Errorf("LastReconciledAt = %v, want zero", loaded.Tasks[0].LastReconciledAt)
+	}
+}
+
 func TestStoreClose(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "closed.sqlite")

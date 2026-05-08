@@ -321,6 +321,85 @@ func TestAPIState_SLAOver(t *testing.T) {
 	}
 }
 
+// TestAPIState_RecoveryEvents pins the dashboard JSON contract for the
+// new structured timeline. The HTML row renderer in page.go consumes the
+// same shape; if this test breaks, the dashboard breaks too.
+func TestAPIState_RecoveryEvents(t *testing.T) {
+	svc, repo := newTestService()
+	registry := app.NewSessionRegistry()
+	h := NewHandler(svc, registry)
+
+	now := time.Now()
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 1, Title: "Reconciled task", Status: "pending", AssignedTo: "claude-code",
+			CreatedBy: "cursor", CreatedAt: now.Add(-2 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Second), Priority: 3,
+			ResultSummary: "Worker claude-code-task-1 exited while task in_progress",
+			RecoveryEvents: []domain.RecoveryEvent{
+				{
+					At:         now.Add(-60 * time.Second),
+					Source:     "reconciler",
+					Reason:     "worker_exit_with_owned_task",
+					Summary:    "Worker claude-code-task-1 exited while task in_progress",
+					InstanceID: "claude-code-task-1",
+				},
+				{
+					At:      now.Add(-10 * time.Second),
+					Source:  "watchdog",
+					Reason:  "suppressed_post_reconcile",
+					Summary: "Watchdog observed stale heartbeat but reconciler already handled it",
+				},
+			},
+		},
+	}
+	repo.state.NextTaskID = 2
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/api/state", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var snap StateSnapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("json decode: %v", err)
+	}
+	if len(snap.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(snap.Tasks))
+	}
+	got := snap.Tasks[0]
+	if len(got.RecoveryEvents) != 2 {
+		t.Fatalf("RecoveryEvents len = %d, want 2", len(got.RecoveryEvents))
+	}
+	if got.RecoveryEvents[0].Source != "reconciler" {
+		t.Errorf("first event Source = %q, want reconciler", got.RecoveryEvents[0].Source)
+	}
+	if got.RecoveryEvents[0].Reason != "worker_exit_with_owned_task" {
+		t.Errorf("first event Reason = %q, want worker_exit_with_owned_task", got.RecoveryEvents[0].Reason)
+	}
+	if got.RecoveryEvents[0].InstanceID != "claude-code-task-1" {
+		t.Errorf("first event InstanceID = %q, want claude-code-task-1", got.RecoveryEvents[0].InstanceID)
+	}
+	if got.RecoveryEvents[0].Age == "" {
+		t.Error("first event Age must be a non-empty relative-time string")
+	}
+	if got.RecoveryEvents[1].Source != "watchdog" {
+		t.Errorf("second event Source = %q, want watchdog", got.RecoveryEvents[1].Source)
+	}
+	// The JSON over the wire uses snake_case field names — page.js reads
+	// `t.recovery_events`, `ev.instance_id`, etc. Re-marshal the snapshot
+	// and pin the keys so a future struct rename doesn't silently break
+	// the dashboard renderer.
+	body := w.Body.String()
+	for _, key := range []string{`"recovery_events"`, `"source"`, `"reason"`, `"summary"`, `"age"`, `"instance_id"`} {
+		if !strings.Contains(body, key) {
+			t.Errorf("response body missing JSON key %s", key)
+		}
+	}
+}
+
 func TestAPIReset_ClearsState(t *testing.T) {
 	svc, repo := newTestService()
 	registry := app.NewSessionRegistry()

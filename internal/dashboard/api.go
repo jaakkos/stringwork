@@ -80,19 +80,32 @@ type AgentSnapshot struct {
 
 // TaskSnapshot is a per-task summary.
 type TaskSnapshot struct {
-	ID                  int    `json:"id"`
-	Title               string `json:"title"`
-	Status              string `json:"status"`
-	AssignedTo          string `json:"assigned_to"`
-	CreatedBy           string `json:"created_by"`
-	Priority            int    `json:"priority"`
-	Age                 string `json:"age"`
-	ResultSummary       string `json:"result_summary,omitempty"`
-	ProgressDescription string `json:"progress_description,omitempty"`
-	ProgressPercent     int    `json:"progress_percent,omitempty"`
-	LastProgressAge     string `json:"last_progress_age,omitempty"`
-	ExpectedDurationSec int    `json:"expected_duration_sec,omitempty"`
-	SLAStatus           string `json:"sla_status,omitempty"`
+	ID                  int                     `json:"id"`
+	Title               string                  `json:"title"`
+	Status              string                  `json:"status"`
+	AssignedTo          string                  `json:"assigned_to"`
+	CreatedBy           string                  `json:"created_by"`
+	Priority            int                     `json:"priority"`
+	Age                 string                  `json:"age"`
+	ResultSummary       string                  `json:"result_summary,omitempty"`
+	ProgressDescription string                  `json:"progress_description,omitempty"`
+	ProgressPercent     int                     `json:"progress_percent,omitempty"`
+	LastProgressAge     string                  `json:"last_progress_age,omitempty"`
+	ExpectedDurationSec int                     `json:"expected_duration_sec,omitempty"`
+	SLAStatus           string                  `json:"sla_status,omitempty"`
+	RecoveryEvents      []RecoveryEventSnapshot `json:"recovery_events,omitempty"`
+}
+
+// RecoveryEventSnapshot mirrors domain.RecoveryEvent for the dashboard
+// API. Renders the timestamp as a relative "5 min ago" string the same
+// way the rest of the dashboard formats ages, so consumers don't need to
+// re-derive locale-aware formatting.
+type RecoveryEventSnapshot struct {
+	Age        string `json:"age"`
+	Source     string `json:"source"`
+	Reason     string `json:"reason"`
+	Summary    string `json:"summary"`
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // MessageSnapshot is a per-message summary.
@@ -604,6 +617,18 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 			}
 			if !t.LastProgressAt.IsZero() {
 				ts.LastProgressAge = relTime(t.LastProgressAt, now)
+			}
+			if len(t.RecoveryEvents) > 0 {
+				ts.RecoveryEvents = make([]RecoveryEventSnapshot, 0, len(t.RecoveryEvents))
+				for _, ev := range t.RecoveryEvents {
+					ts.RecoveryEvents = append(ts.RecoveryEvents, RecoveryEventSnapshot{
+						Age:        relTime(ev.At, now),
+						Source:     ev.Source,
+						Reason:     ev.Reason,
+						Summary:    truncate(ev.Summary, 200),
+						InstanceID: ev.InstanceID,
+					})
+				}
 			}
 			if t.ExpectedDurationSec > 0 && t.Status == "in_progress" {
 				expected := time.Duration(t.ExpectedDurationSec) * time.Second

@@ -223,6 +223,50 @@ const dashboardHTML = `<!DOCTYPE html>
   .sla-over { color: var(--red); font-weight: 600; }
   .sla-ok { color: var(--green); }
 
+  /* Recovery event timeline (reconciler / watchdog actions on a task).
+     Rendered as a <details> block so the row stays compact by default
+     and operators can expand to see the full sequence. */
+  .recovery-events { margin-top: 4px; }
+  .recovery-events summary {
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+  .recovery-events summary::-webkit-details-marker { display: none; }
+  .recovery-events summary::before {
+    content: '▸';
+    display: inline-block;
+    margin-right: 4px;
+    transition: transform 0.1s;
+  }
+  .recovery-events[open] summary::before { transform: rotate(90deg); }
+  .recovery-events ol {
+    margin: 4px 0 0 0;
+    padding: 0 0 0 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    list-style: none;
+    border-left: 1px solid var(--border);
+  }
+  .recovery-events li {
+    padding: 2px 0 2px 6px;
+    line-height: 1.4;
+  }
+  .recovery-events .ev-source {
+    display: inline-block;
+    min-width: 70px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+  }
+  .recovery-events .ev-source.reconciler { color: var(--accent); }
+  .recovery-events .ev-source.watchdog { color: var(--orange); }
+  .recovery-events .ev-source.auto_cancel { color: var(--red); }
+  .recovery-events .ev-age { color: var(--text-dim); margin-left: 4px; }
+
   /* Messages */
   .msg-list { max-height: 600px; overflow-y: auto; }
   .msg {
@@ -983,6 +1027,9 @@ function renderTasks(tasks, total) {
     } else if ((t.status === 'pending' || t.status === 'blocked') && t.result_summary) {
       progressCol = '<span style="font-size:11px;color:var(--orange)">' + esc(t.result_summary) + '</span>';
     }
+    if (t.recovery_events && t.recovery_events.length > 0) {
+      progressCol += renderRecoveryEvents(t.recovery_events);
+    }
 
     html += '<tr>' +
       '<td>#' + t.id + '</td>' +
@@ -1122,6 +1169,34 @@ function esc(s) {
 function escAttr(s) {
   if (!s) return '';
   return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// renderRecoveryEvents renders a Task.recovery_events array as a small
+// expandable timeline. Default-collapsed so the task list stays scannable;
+// the latest event summary is already shown via t.result_summary in the
+// row's progress column. Expanded form gives operators the order events
+// arrived (reconciler vs watchdog), the worker that triggered each one,
+// and how long ago each happened — recreates the timeline that the old
+// "first writer wins" ResultSummary destroyed.
+function renderRecoveryEvents(events) {
+  if (!events || events.length === 0) return '';
+  const summaryLabel = events.length === 1
+    ? '1 recovery event'
+    : events.length + ' recovery events';
+  let html = '<details class="recovery-events"><summary>' + esc(summaryLabel) + '</summary><ol>';
+  events.forEach(ev => {
+    const sourceClass = ev.source ? esc(ev.source) : '';
+    const reasonTitle = ev.reason ? ' title="' + escAttr(ev.reason) + '"' : '';
+    const instance = ev.instance_id ? ' <span class="ev-age">[' + esc(ev.instance_id) + ']</span>' : '';
+    html += '<li' + reasonTitle + '>' +
+      '<span class="ev-source ' + sourceClass + '">' + esc(ev.source || '?') + '</span> ' +
+      esc(ev.summary || '') +
+      '<span class="ev-age"> · ' + esc(ev.age || '') + '</span>' +
+      instance +
+      '</li>';
+  });
+  html += '</ol></details>';
+  return html;
 }
 
 // latestState caches the most recent /api/state response so action handlers

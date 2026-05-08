@@ -238,6 +238,13 @@ func runMigrations(db *sql.DB) error {
 		// to TaskKindFromTitle when Template == "").
 		"ALTER TABLE tasks ADD COLUMN template TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE tasks ADD COLUMN aspect TEXT NOT NULL DEFAULT ''",
+		// recovery_events / last_reconciled_at back the structured
+		// RecoveryEvents log on domain.Task. JSON-encoded list, default
+		// '[]' so old rows back-fill cleanly. last_reconciled_at uses ''
+		// (not '0001-01-01T...') as the zero sentinel for consistency
+		// with last_failure_at / last_progress_at above.
+		"ALTER TABLE tasks ADD COLUMN recovery_events TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE tasks ADD COLUMN last_reconciled_at TEXT NOT NULL DEFAULT ''",
 	}
 	for _, ddl := range migrations {
 		if err := addColumn(db, ddl); err != nil {
@@ -470,15 +477,15 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("messages iteration: %w", err)
 	}
 
-	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect FROM tasks ORDER BY id")
+	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, COALESCE(recovery_events, '[]'), COALESCE(last_reconciled_at, '') FROM tasks ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("tasks: %w", err)
 	}
 	for rows.Next() {
 		var t domain.Task
-		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt string
+		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt, recoveryEvents, lastReconciledAt string
 		var requiresReview int
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy, &t.Template, &t.Aspect); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy, &t.Template, &t.Aspect, &recoveryEvents, &lastReconciledAt); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -506,12 +513,20 @@ func (s *Store) Load() (*domain.CollabState, error) {
 				t.LastFailure = time.Time{}
 			}
 		}
+		if lastReconciledAt != "" {
+			if t.LastReconciledAt, err = parseTime(lastReconciledAt, "tasks last_reconciled_at"); err != nil {
+				t.LastReconciledAt = time.Time{}
+			}
+		}
 		if err := parseJSON([]byte(deps), &t.Dependencies, "tasks dependencies"); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
 		if caps != "" && caps != "[]" {
 			_ = parseJSON([]byte(caps), &t.Capabilities, "tasks capabilities")
+		}
+		if recoveryEvents != "" && recoveryEvents != "[]" {
+			_ = parseJSON([]byte(recoveryEvents), &t.RecoveryEvents, "tasks recovery_events")
 		}
 		state.Tasks = append(state.Tasks, t)
 	}
@@ -883,6 +898,10 @@ func (s *Store) Save(state *domain.CollabState) error {
 	for _, t := range state.Tasks {
 		deps, _ := json.Marshal(t.Dependencies)
 		caps, _ := json.Marshal(t.Capabilities)
+		recoveryEvents, _ := json.Marshal(t.RecoveryEvents)
+		if len(t.RecoveryEvents) == 0 {
+			recoveryEvents = []byte("[]")
+		}
 		lastProgressAt := ""
 		if !t.LastProgressAt.IsZero() {
 			lastProgressAt = t.LastProgressAt.Format(time.RFC3339Nano)
@@ -891,12 +910,16 @@ func (s *Store) Save(state *domain.CollabState) error {
 		if !t.LastFailure.IsZero() {
 			lastFailureAt = t.LastFailure.Format(time.RFC3339Nano)
 		}
+		lastReconciledAt := ""
+		if !t.LastReconciledAt.IsZero() {
+			lastReconciledAt = t.LastReconciledAt.Format(time.RFC3339Nano)
+		}
 		requiresReview := 0
 		if t.RequiresReview {
 			requiresReview = 1
 		}
-		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy, t.Template, t.Aspect); err != nil {
+		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, recovery_events, last_reconciled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy, t.Template, t.Aspect, string(recoveryEvents), lastReconciledAt); err != nil {
 			return err
 		}
 	}
