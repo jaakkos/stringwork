@@ -48,9 +48,9 @@ ACTION: Call BOTH of these MCP tools at the specified intervals:
    Example: report_progress agent='claude-code' task_id=5 description='Auth done. Writing tests (8/15).' percent_complete=50 eta_seconds=120
 
 Consequence of NOT reporting:
-- 3 min silence → WARNING alert sent to driver
-- 5 min silence → CRITICAL alert sent to driver
-- 10 min silence → Task auto-recovered, you may be CANCELLED
+- 4 min silence → WARNING alert sent to driver
+- 7 min silence → CRITICAL alert sent to driver
+- 14 min silence → Task auto-recovered, you may be CANCELLED
 
 ### Communication — REQUIRED before finishing
 

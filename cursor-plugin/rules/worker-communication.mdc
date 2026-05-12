@@ -36,5 +36,5 @@ Use `request_review` for lightweight reviews, or `create_task` for deep reviews 
 The server sends system messages for:
 - Worker spawn/connect/disconnect events
 - Failure acks with error classification (quota, auth, not-found, transient)
-- Progress alerts (WARNING at 3 min, CRITICAL at 5 min)
+- Progress alerts (WARNING at 4 min, CRITICAL at 7 min)
 - Watchdog recovery events (stale agents marked offline)

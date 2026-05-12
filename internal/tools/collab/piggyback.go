@@ -19,12 +19,16 @@ const (
 	autoHeartbeatDebounce = 30 * time.Second
 
 	// progressNudgeThreshold is how long without report_progress before
-	// a soft reminder is appended to the piggyback banner.
-	progressNudgeThreshold = 90 * time.Second
+	// a soft reminder is appended to the piggyback banner. Bumped from
+	// 90s in Q2/2026 alongside the watchdog progress thresholds so the
+	// nudge ladder (nudge → urgent → WARNING → CRITICAL) stays ordered.
+	progressNudgeThreshold = 120 * time.Second
 
 	// progressUrgentThreshold is how long without report_progress before
-	// an urgent warning is appended to the piggyback banner.
-	progressUrgentThreshold = 180 * time.Second
+	// an urgent warning is appended to the piggyback banner. Bumped from
+	// 180s in Q2/2026 to keep the urgent banner ahead of the watchdog
+	// WARNING (now 4 min) by ~1 minute.
+	progressUrgentThreshold = 240 * time.Second
 
 	// stopTombstoneTTL is how long a cancelled-task tombstone keeps
 	// counting toward the STOP banner. Cancelled tasks linger in

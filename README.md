@@ -49,7 +49,7 @@ The server provides only coordination tools. Each agent uses its own native capa
 - **Task management** -- create, assign, track, and auto-notify on task lifecycle events
 - **Messaging** -- inter-agent messages with urgency, piggyback notifications on every tool call
 - **Shared planning** -- collaborative plans with items, acceptance criteria, and progress tracking
-- **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (3 min warning, 5 min critical, 10 min auto-recovery)
+- **Progress monitoring** -- mandatory heartbeats and progress reports; escalating alerts (4 min warning, 7 min critical, 14 min auto-recovery)
 - **Session continuation** -- workers report CLI session IDs via heartbeat; restarted workers resume their previous CLI conversation context automatically
 - **File locks** -- prevent simultaneous edits across agents
 - **Web dashboard** -- real-time view of tasks, workers, messages, and plans (URL logged on startup)

@@ -134,9 +134,9 @@ The server actively monitors your progress. **Failure to report triggers escalat
 
 | Time without `report_progress` | What happens |
 |-------------------------------|-------------|
-| 3 minutes | ⚠️ WARNING sent to driver |
-| 5 minutes | 🔴 CRITICAL alert sent to driver |
-| 10 minutes (no activity) | 🔧 Task auto-recovered, you may be cancelled |
+| 4 minutes | ⚠️ WARNING sent to driver |
+| 7 minutes | 🔴 CRITICAL alert sent to driver |
+| 14 minutes (no activity) | 🔧 Task auto-recovered, you may be cancelled |
 
 **You MUST call these tools while working:**
 
@@ -199,7 +199,7 @@ When asked to review code:
 When the server is configured with `orchestration` (in `mcp/config.yaml`), one agent is the **driver** and others are **workers**.
 
 - **Driver** (e.g. cursor or claude-code): Creates tasks with `assigned_to='any'` so the server auto-assigns to workers. Use `worker_status` to see real-time progress, process activity, and SLA status. Set `expected_duration_seconds` on tasks for SLA monitoring. Use `cancel_agent` to stop stuck workers. Can also do work (hybrid).
-- **Workers** (e.g. claude-code-1, codex, gemini): Use `claim_next` to get tasks, `heartbeat` every 60-90 seconds with progress info, `report_progress` every 2-3 minutes. **The server monitors these — missing reports trigger escalating alerts to the driver (3 min warning, 5 min critical, 10 min auto-recovery).** Report to the driver via `send_message`. **Obey STOP signals immediately.**
+- **Workers** (e.g. claude-code-1, codex, gemini): Use `claim_next` to get tasks, `heartbeat` every 60-90 seconds with progress info, `report_progress` every 2-3 minutes. **The server monitors these — missing reports trigger escalating alerts to the driver (4 min warning, 7 min critical, 14 min auto-recovery).** Report to the driver via `send_message`. **Obey STOP signals immediately.**
 
 If no orchestration is configured, all agents are peers (legacy mode).
 
@@ -301,8 +301,8 @@ Use list_tasks with assigned_to='claude-code'
 
 ### ❌ DON'T: Work silently for a long time
 ```
-# Bad: No heartbeat or report_progress for 3+ minutes
-# The server will send WARNING (3 min), CRITICAL (5 min), and auto-recover your task (10 min)
+# Bad: No heartbeat or report_progress for 4+ minutes
+# The server will send WARNING (4 min), CRITICAL (7 min), and auto-recover your task (14 min)
 ```
 
 ### ✅ DO: Report progress continuously while working

@@ -23,7 +23,7 @@ func registerHeartbeat(s *server.MCPServer, svc *app.CollabService, logger *log.
 			mcp.WithDescription(
 				"Signal liveness and report progress. MANDATORY: call this every 60-90 seconds while working — no exceptions. "+
 					"You MUST include progress details on every call. "+
-					"Workers that fail to heartbeat are auto-cancelled after 5 minutes and their tasks are reassigned. "+
+					"Workers that fail to heartbeat are auto-cancelled after 7 minutes and their tasks are reassigned. "+
 					"This is not optional — the server enforces these rules and will terminate non-compliant workers."),
 			mcp.WithString("agent", mcp.Required(), mcp.Description("Your agent or instance ID (e.g. claude-code-1, codex)")),
 			mcp.WithString("progress", mcp.Description("MANDATORY: What you're currently doing (e.g. 'writing unit tests for auth middleware'). Must be provided on every heartbeat.")),

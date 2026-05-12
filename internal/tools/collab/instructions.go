@@ -102,9 +102,9 @@ func InstructionsText() string {
 
 ### Progress reporting (MANDATORY — enforced by server)
     The server monitors your progress. Failure to report causes escalating alerts:
-    - 3 min without report_progress → WARNING sent to driver
-    - 5 min without report_progress → CRITICAL alert sent to driver
-    - 10 min without any activity  → Task auto-recovered, you may be cancelled
+    - 4 min without report_progress → WARNING sent to driver
+    - 7 min without report_progress → CRITICAL alert sent to driver
+    - 14 min without any activity  → Task auto-recovered, you may be cancelled
 
     Use BOTH of these tools while working:
     1. heartbeat agent='<you>' progress='what I am doing now' — every 60-90 seconds
@@ -237,9 +237,9 @@ However, tasks MAY include constraints via get_work_context. When present, you M
 
 ## Progress Reporting (MANDATORY — server-enforced, violation = cancellation)
 The server monitors your tool calls. Silence triggers escalating consequences:
-- 3 min without report_progress → WARNING to driver
-- 5 min → CRITICAL alert
-- 10 min → Task auto-recovered, you may be CANCELLED
+- 4 min without report_progress → WARNING to driver
+- 7 min → CRITICAL alert
+- 14 min → Task auto-recovered, you may be CANCELLED
 
 TRIGGER: You are working on any task.
 ACTION: Call BOTH at the required intervals:
@@ -285,9 +285,9 @@ func DynamicInstructionsForClient(clientName string) string {
 
 ### Progress reporting (MANDATORY — server-enforced, violation = cancellation)
     The server monitors your tool calls. If you stop reporting, consequences escalate:
-    - 3 min without report_progress → WARNING sent to driver
-    - 5 min without report_progress → CRITICAL alert sent to driver
-    - 10 min without any activity  → Task auto-recovered, you may be CANCELLED
+    - 4 min without report_progress → WARNING sent to driver
+    - 7 min without report_progress → CRITICAL alert sent to driver
+    - 14 min without any activity  → Task auto-recovered, you may be CANCELLED
 
     TRIGGER: You are working on any task.
     ACTION: Call BOTH of these at the required intervals:
@@ -391,7 +391,7 @@ func registerPrompts(s *server.MCPServer) {
 4. WHILE WORKING on any task, you MUST do BOTH (server-enforced, non-negotiable):
    - TRIGGER: Every 60-90 seconds → ACTION: Call heartbeat agent='<you>' progress='<what you are doing>'
    - TRIGGER: Every 2-3 minutes → ACTION: Call report_progress agent='<you>' task_id=X description='<status>' percent_complete=N
-   Consequence of NOT reporting: WARNING at 3 min, CRITICAL at 5 min, CANCELLED at 10 min.
+   Consequence of NOT reporting: WARNING at 4 min, CRITICAL at 7 min, CANCELLED at 14 min.
 5. BEFORE FINISHING: Call send_message from='<you>' to='<pair>' with detailed summary (changes made, files, test results).
 6. Update task statuses with update_task.`,
 						},

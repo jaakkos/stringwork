@@ -18,8 +18,10 @@ const (
 	defaultWatchdogInterval = 60 * time.Second
 
 	// defaultHeartbeatStaleThreshold is how long since the last heartbeat
-	// before an agent is considered dead.
-	defaultHeartbeatStaleThreshold = 5 * time.Minute
+	// before an agent is considered dead. Bumped from 5 min in Q2/2026 after
+	// real workers (review-style tasks, large refactors) consistently tripped
+	// the prior limit despite still making progress.
+	defaultHeartbeatStaleThreshold = 7 * time.Minute
 
 	// reconcileSuppressionWindow bounds the goroutine-race window between a
 	// worker exiting and reconcileAfterExit acquiring the state lock. When
@@ -33,19 +35,28 @@ const (
 
 	// defaultTaskStuckThreshold is how long a task can stay in_progress
 	// without its agent heartbeating before it is considered stuck.
-	defaultTaskStuckThreshold = 10 * time.Minute
+	// Bumped from 10 min in Q2/2026 alongside the heartbeat threshold so
+	// the 2× headroom between "agent dead" and "auto-recover task" is
+	// preserved.
+	defaultTaskStuckThreshold = 14 * time.Minute
 
 	// defaultSessionStaleThreshold is how long a session can exist without
 	// its agent heartbeating before it is considered stale and removed.
-	defaultSessionStaleThreshold = 5 * time.Minute
+	// Kept in lockstep with the heartbeat threshold.
+	defaultSessionStaleThreshold = 7 * time.Minute
 
 	// defaultProgressWarningThreshold is how long a task can go without a
-	// progress report before a warning is sent to the driver.
-	defaultProgressWarningThreshold = 3 * time.Minute
+	// progress report before a warning is sent to the driver. Bumped from
+	// 3 min in Q2/2026 — workers reporting at the recommended 2-3 min
+	// cadence were tripping the prior limit on tasks that legitimately
+	// need an extra cycle (large file reads, slow tool calls).
+	defaultProgressWarningThreshold = 4 * time.Minute
 
 	// defaultProgressCriticalThreshold is how long without progress before
-	// a critical alert is sent to the driver.
-	defaultProgressCriticalThreshold = 5 * time.Minute
+	// a critical alert is sent to the driver. Bumped from 5 min in Q2/2026
+	// to give workers a real buffer between WARNING and CRITICAL (the prior
+	// 2-min gap was often consumed by a single slow tool call).
+	defaultProgressCriticalThreshold = 7 * time.Minute
 
 	// defaultMaxTaskFailures is the number of watchdog-detected failures
 	// before a task is auto-blocked (DLQ behavior).
@@ -54,13 +65,18 @@ const (
 	// defaultRespawnGrace is how long after WorkerManager records a spawn
 	// (AgentInstance.LastSpawnedAt) the watchdog leaves the row alone, so a
 	// brand-new worker isn't flipped back to "offline" before its first
-	// real heartbeat lands. Tuned to be > typical CLI startup time.
-	defaultRespawnGrace = 60 * time.Second
+	// real heartbeat lands. Tuned to be > typical CLI startup time;
+	// bumped from 60s in Q2/2026 because claude-code/codex cold starts
+	// (especially with worktrees) routinely take 70-80s before the first
+	// heartbeat lands.
+	defaultRespawnGrace = 90 * time.Second
 
 	// defaultSpawnSweepGrace is how old a pending task must be before the
 	// watchdog re-drives an assignment for it. Lets the normal create_task
 	// → SpawnForTask path complete first; the sweep is the safety net.
-	defaultSpawnSweepGrace = 30 * time.Second
+	// Bumped from 30s in Q2/2026 to leave more room for the happy path
+	// before the safety net engages.
+	defaultSpawnSweepGrace = 45 * time.Second
 )
 
 // ProcessActivityProvider gives the watchdog access to live process metadata
@@ -765,7 +781,7 @@ func (w *Watchdog) check() {
 			// Check both the parent type and the conventional task-bound
 			// ID so either sender wins the grace.
 			recentlySent := false
-			const recentSendGrace = 90 * time.Second
+			const recentSendGrace = 120 * time.Second
 			if state.LastSendByAgent != nil {
 				candidates := []string{t.AssignedTo, fmt.Sprintf("%s-task-%d", t.AssignedTo, t.ID)}
 				for _, c := range candidates {

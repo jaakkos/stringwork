@@ -241,7 +241,7 @@ Parameters:
 - `step` / `total_steps` (optional) — Current step number and total steps
 - `session_id` (optional) — Your CLI session/conversation ID. Report on first heartbeat so the server can resume your session if you get restarted.
 
-Missing heartbeats trigger: 3 min warning, 5 min critical alert, 10 min auto-recovery.
+Missing heartbeats trigger: 4 min warning, 7 min critical alert, 14 min auto-recovery.
 
 **Session continuation:** When a stuck worker is cancelled and respawned, the server injects `--resume` (Claude/Gemini) or `--session` (Codex) with the stored session ID, so the new process continues the previous conversation context.
 

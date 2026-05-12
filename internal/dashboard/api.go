@@ -26,7 +26,8 @@ const recoveredMessagePrefix = "⚠️ Auto-recovered output (worker did not sen
 // (internal/app/watchdog.go). When the most recent send_message from an
 // agent is within this window, the snapshot reports the agent as in
 // "delivery grace" so the dashboard can de-emphasise its silence.
-const recentSendGraceWindow = 90 * time.Second
+// Bumped from 90s in Q2/2026 alongside the watchdog grace.
+const recentSendGraceWindow = 120 * time.Second
 
 // StateSnapshot is the JSON response from /api/state.
 //
@@ -55,7 +56,7 @@ type StateSnapshot struct {
 // AgentSnapshot is a per-agent summary.
 //
 // LastSendAge / InDeliveryGrace mirror the watchdog's recent-send grace
-// window (90s by default) so the dashboard can soft-tint agents that are
+// window (120s by default) so the dashboard can soft-tint agents that are
 // briefly silent because they just sent a deliverable, distinguishing them
 // from agents that are silent for unexplained reasons.
 type AgentSnapshot struct {
@@ -229,7 +230,7 @@ type Handler struct {
 	registry           *app.SessionRegistry
 	workers            WorkerController // optional; nil when no orchestration configured
 	gcStats            GCStatsProvider  // optional; nil when no watchdog configured
-	heartbeatThreshold time.Duration    // max age for heartbeat to be "reachable"; 0 = 5min default
+	heartbeatThreshold time.Duration    // max age for heartbeat to be "reachable"; 0 = 7min default (matches watchdog)
 	logger             *log.Logger      // optional; nil → no-op logging
 }
 
@@ -281,7 +282,7 @@ func (h *Handler) heartbeatReachableThreshold() time.Duration {
 	if h.heartbeatThreshold > 0 {
 		return h.heartbeatThreshold
 	}
-	return 5 * time.Minute
+	return 7 * time.Minute
 }
 
 // RegisterRoutes adds dashboard routes to the given mux.

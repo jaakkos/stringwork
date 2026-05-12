@@ -42,13 +42,13 @@ orchestration:
   driver: claude-code
   assignment_strategy: least_loaded
   heartbeat_interval_seconds: 30
-  worker_timeout_seconds: 120
+  worker_timeout_seconds: 180
   max_task_failures: 3
 
   workers:
     - type: codex
       instances: 1
-      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS. On first call include session_id=YOUR_SESSION_ID so the server can resume your session on restart.\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      command: ["codex", "exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS. On first call include session_id=YOUR_SESSION_ID so the server can resume your session on restart.\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 4min=WARNING, 7min=CRITICAL, 14min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15
@@ -60,7 +60,7 @@ orchestration:
 
     - type: gemini
       instances: 1
-      command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS. On first call include session_id=YOUR_SESSION_ID so the server can resume your session on restart.\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 3min=WARNING, 5min=CRITICAL, 10min=CANCELLED"]
+      command: ["gemini", "--yolo", "--prompt", "You are {agent}, a worker in the Stringwork pair programming system. Workspace: {workspace}.\nYou have full capabilities: edit files, run commands, write code. Use them.\n\nMANDATORY RULES (server-enforced, violation = cancellation):\n- Call heartbeat agent='{agent}' progress='<status>' EVERY 60-90 SECONDS. On first call include session_id=YOUR_SESSION_ID so the server can resume your session on restart.\n- Call report_progress agent='{agent}' task_id=X description='<status>' percent_complete=N EVERY 2-3 MINUTES\n- Call send_message from='{agent}' to='{driver}' with DETAILED findings BEFORE finishing\n- If you see a STOP banner: stop immediately, call read_messages, exit\n- Obey task constraints when present (read-only, scoped files)\n\nConsequences of silence: 4min=WARNING, 7min=CRITICAL, 14min=CANCELLED"]
       cooldown_seconds: 30
       max_retries: 2
       retry_delay_seconds: 15

@@ -233,13 +233,23 @@ func DefaultConfig() *Config {
 }
 
 // DefaultOrchestration returns a minimal default (driver only, no workers) when config has none.
+//
+// WorkerTimeoutSeconds is the single knob that overrides the watchdog's
+// heartbeat/session/task-stuck thresholds (see watchdog.go: when set, it
+// becomes heartbeatStaleThresh and taskStuckThresh=2×). Bumped from 120s
+// in Q2/2026 — at 120s, the override drove heartbeat staleness down to
+// 2 min, well below the progress-warning threshold (now 4 min), which
+// could mark a still-working worker offline before the progress alerts
+// even fired. 180s keeps the override under the new heartbeat default
+// (7 min) so the watchdog uses the override exactly as intended:
+// admin-tunable but no longer punitively short.
 func DefaultOrchestration() *OrchestrationConfig {
 	return &OrchestrationConfig{
 		Driver:                   "cursor",
 		Workers:                  nil,
 		AssignmentStrategy:       "least_loaded",
 		HeartbeatIntervalSeconds: 30,
-		WorkerTimeoutSeconds:     120,
+		WorkerTimeoutSeconds:     180,
 	}
 }
 

@@ -102,9 +102,9 @@ report_progress agent='claude-code' task_id=5 description='Auth middleware done,
 
 | Silence duration | Consequence |
 |------------------|-------------|
-| 3 minutes | Warning sent to driver |
-| 5 minutes | Critical alert sent to driver, auto-cancellation imminent |
-| 10 minutes (no heartbeat) | Worker auto-cancelled, output captured, task reset to pending |
+| 4 minutes | Warning sent to driver |
+| 7 minutes | Critical alert sent to driver, auto-cancellation imminent |
+| 14 minutes (no heartbeat) | Worker auto-cancelled, output captured, task reset to pending |
 
 ### 5. Worker reports findings
 

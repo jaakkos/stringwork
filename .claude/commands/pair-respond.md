@@ -25,7 +25,7 @@ For each unread message or pending task:
 - Call `heartbeat agent='claude-code' progress='<what you are doing>'` every 60-90 seconds
 - Call `report_progress agent='claude-code' task_id=X description='<status>' percent_complete=N` every 2-3 minutes
 
-Failure to report: WARNING at 3 min, CRITICAL at 5 min, CANCELLED at 10 min.
+Failure to report: WARNING at 4 min, CRITICAL at 7 min, CANCELLED at 14 min.
 
 ## Step 4: Report back BEFORE finishing
 - Call `send_message from='claude-code' to='cursor'` with a detailed summary:

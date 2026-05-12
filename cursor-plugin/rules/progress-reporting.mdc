@@ -16,9 +16,9 @@ When working on a Stringwork task, you MUST report progress using these tools at
 
 The server monitors all agents. Missing `report_progress` calls trigger escalating alerts:
 
-- **3 minutes** without report_progress: WARNING sent to the driver
-- **5 minutes** without report_progress: CRITICAL alert sent to the driver
-- **10 minutes** without any activity: task auto-recovered, agent may be cancelled
+- **4 minutes** without report_progress: WARNING sent to the driver
+- **7 minutes** without report_progress: CRITICAL alert sent to the driver
+- **14 minutes** without any activity: task auto-recovered, agent may be cancelled
 
 ## As the Driver
 

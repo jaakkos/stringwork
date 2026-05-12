@@ -24,7 +24,7 @@ You are the **driver** in a Stringwork pair programming session. You orchestrate
 
 - `worker_status` — real-time progress, last heartbeat, SLA compliance for all workers
 - `cancel_agent` — stop a stuck or unneeded worker
-- System messages alert on: spawn failures, progress warnings (3/5/10 min), quota and auth issues
+- System messages alert on: spawn failures, progress warnings (4/7/14 min), quota and auth issues
 
 ## Advanced Workflows
 

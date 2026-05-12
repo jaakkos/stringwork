@@ -384,22 +384,23 @@ func TestBuildBanner_ProgressNudge_RecentProgress(t *testing.T) {
 			UpdatedAt: now.Add(-60 * time.Second), LastProgressAt: now.Add(-30 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
-	// 30s since last progress — below 90s threshold, no nudge.
+	// 30s since last progress — below progressNudgeThreshold (120s), no nudge.
 	if strings.Contains(banner, "report_progress") {
-		t.Errorf("should not nudge within 90s, got %q", banner)
+		t.Errorf("should not nudge within progressNudgeThreshold, got %q", banner)
 	}
 }
 
 func TestBuildBanner_ProgressNudge_SoftReminder(t *testing.T) {
 	svc, repo := newPiggybackTestService()
 	now := time.Now()
+	// 150s: above progressNudgeThreshold (120s) but below progressUrgentThreshold (240s).
 	repo.state.Tasks = []domain.Task{
 		{ID: 5, Title: "Active", AssignedTo: "claude-code", Status: "in_progress",
-			UpdatedAt: now.Add(-120 * time.Second), LastProgressAt: now.Add(-100 * time.Second)},
+			UpdatedAt: now.Add(-150 * time.Second), LastProgressAt: now.Add(-150 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
 	if !strings.Contains(banner, "⚠️") {
-		t.Errorf("expected REQUIRED nudge (⚠️) at 100s, got %q", banner)
+		t.Errorf("expected REQUIRED nudge (⚠️) at 150s, got %q", banner)
 	}
 	if !strings.Contains(banner, "Task #5") {
 		t.Errorf("expected task ID in nudge, got %q", banner)
@@ -412,20 +413,21 @@ func TestBuildBanner_ProgressNudge_SoftReminder(t *testing.T) {
 	}
 	// Should NOT have the critical-level marker yet.
 	if strings.Contains(banner, "⛔") {
-		t.Errorf("should not be critical-level at 100s, got %q", banner)
+		t.Errorf("should not be critical-level at 150s, got %q", banner)
 	}
 }
 
 func TestBuildBanner_ProgressNudge_UrgentReminder(t *testing.T) {
 	svc, repo := newPiggybackTestService()
 	now := time.Now()
+	// 250s: above progressUrgentThreshold (240s).
 	repo.state.Tasks = []domain.Task{
 		{ID: 7, Title: "Slow", AssignedTo: "claude-code", Status: "in_progress",
-			UpdatedAt: now.Add(-200 * time.Second), LastProgressAt: now.Add(-200 * time.Second)},
+			UpdatedAt: now.Add(-250 * time.Second), LastProgressAt: now.Add(-250 * time.Second)},
 	}
 	banner := BuildBanner(svc, "claude-code", "some_tool")
 	if !strings.Contains(banner, "⛔") {
-		t.Errorf("expected MANDATORY nudge (⛔) at 200s, got %q", banner)
+		t.Errorf("expected MANDATORY nudge (⛔) at 250s, got %q", banner)
 	}
 	if !strings.Contains(banner, "Task #7") {
 		t.Errorf("expected task ID in nudge, got %q", banner)
