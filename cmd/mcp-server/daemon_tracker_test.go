@@ -12,19 +12,21 @@ func testTrackerLogger() interface{ Printf(string, ...any) } {
 	return log.New(os.Stderr, "[tracker-test] ", 0)
 }
 
-// TestDriverTracker_UnixConnection_StartsAndStopsGrace confirms the original
-// contract: opening a unix-socket driver connection cancels any grace period,
-// closing it starts one.
+// TestDriverTracker_UnixConnection_StartsAndStopsGrace confirms that once an
+// MCP session has connected, closing the last unix proxy connection starts
+// grace shutdown when no MCP sessions remain.
 func TestDriverTracker_UnixConnection_StartsAndStopsGrace(t *testing.T) {
 	tr := newDriverTracker(50*time.Millisecond, testTrackerLogger())
 
+	tr.mcpSessionConnected()
+	tr.mcpSessionDisconnected()
 	tr.driverConnected()
 	tr.driverDisconnected()
 
 	select {
 	case <-tr.done():
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected grace period to fire after unix driver disconnected")
+		t.Fatal("expected grace period to fire after last unix driver disconnected")
 	}
 }
 
@@ -105,6 +107,24 @@ func TestDriverTracker_MixedDriversCoalesce(t *testing.T) {
 	case <-tr.done():
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected grace period to fire after last driver (unix+MCP) dropped to zero")
+	}
+}
+
+// TestDriverTracker_UnixProbeBeforeFirstMCP_DoesNotShutDown is the regression
+// for the post-dev-install failure mode: startDaemonProcess's waitForSocket
+// dials the unix socket (unix 0→1→0) before the Cursor proxy has finished
+// MCP initialize. Without hadMCPSession gating, that lone disconnect started
+// the grace timer and the daemon exited before the driver connected.
+func TestDriverTracker_UnixProbeBeforeFirstMCP_DoesNotShutDown(t *testing.T) {
+	tr := newDriverTracker(50*time.Millisecond, testTrackerLogger())
+
+	tr.driverConnected()
+	tr.driverDisconnected()
+
+	select {
+	case <-tr.done():
+		t.Fatal("unix probe before any MCP session must not start grace shutdown")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

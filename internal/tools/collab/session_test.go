@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
 )
 
@@ -79,6 +80,70 @@ func TestGetSessionContext_StaleAgentRendersAsOffline(t *testing.T) {
 	}
 	if strings.Contains(line, "/Users/me/proj") {
 		t.Errorf("did not expect workspace path in stale agent line, got: %q", line)
+	}
+}
+
+// TestGetSessionContext_AutoDriverPromotesHumanClient verifies driver:auto
+// promotes a direct MCP client (parent type) to runtime driver.
+func TestGetSessionContext_AutoDriverPromotesHumanClient(t *testing.T) {
+	pol := newMockPolicy()
+	pol.orch.Driver = app.DriverAuto
+	repo := newMockRepository()
+	repo.state.DriverID = "cursor"
+	svc := newTestServiceWith(repo, pol, log.New(io.Discard, "", 0))
+
+	srv := testServer(svc, log.New(io.Discard, "", 0))
+	result, err := callTool(t, srv, "get_session_context", map[string]any{"for": "claude-code"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Orchestration Role: DRIVER") {
+		t.Errorf("expected DRIVER after auto promote, got:\n%s", text)
+	}
+	if repo.state.DriverID != "claude-code" {
+		t.Errorf("DriverID = %q, want claude-code", repo.state.DriverID)
+	}
+}
+
+// TestGetSessionContext_IncludesDriverRoleSection verifies orchestration role
+// is surfaced at the top of session context for the configured driver.
+func TestGetSessionContext_IncludesDriverRoleSection(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	repo.state.DriverID = "claude-code"
+
+	srv := testServer(svc, logger)
+	result, err := callTool(t, srv, "get_session_context", map[string]any{"for": "claude-code"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Orchestration Role: DRIVER") {
+		t.Errorf("expected DRIVER role section, got:\n%s", text)
+	}
+	if !strings.Contains(text, "worker_status") {
+		t.Errorf("expected driver duties to mention worker_status, got:\n%s", text)
+	}
+}
+
+// TestGetSessionContext_IncludesWorkerRoleSection verifies workers see driver-directed duties.
+func TestGetSessionContext_IncludesWorkerRoleSection(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	repo.state.DriverID = "claude-code"
+
+	srv := testServer(svc, logger)
+	result, err := callTool(t, srv, "get_session_context", map[string]any{"for": "codex"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Orchestration Role: WORKER") {
+		t.Errorf("expected WORKER role section, got:\n%s", text)
+	}
+	if !strings.Contains(text, "report_progress every 2-3 min") {
+		t.Errorf("expected worker progress duties, got:\n%s", text)
 	}
 }
 

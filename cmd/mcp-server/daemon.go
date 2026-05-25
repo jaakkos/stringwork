@@ -143,16 +143,17 @@ func (c *trackedConn) Close() error {
 // tripped the grace timer, silently shutting the daemon down out from under
 // the still-connected MCP client.
 type driverTracker struct {
-	unixCount  atomic.Int64
-	mcpCount   atomic.Int64
-	grace      time.Duration
-	logger     interface{ Printf(string, ...any) }
-	ctx        context.Context
-	cancel     context.CancelFunc
-	doneCh     chan struct{}
-	doneOnce   sync.Once
-	graceTimer *time.Timer
-	mu         sync.Mutex
+	unixCount     atomic.Int64
+	mcpCount      atomic.Int64
+	hadMCPSession atomic.Bool // at least one MCP session has connected since boot
+	grace         time.Duration
+	logger        interface{ Printf(string, ...any) }
+	ctx           context.Context
+	cancel        context.CancelFunc
+	doneCh        chan struct{}
+	doneOnce      sync.Once
+	graceTimer    *time.Timer
+	mu            sync.Mutex
 }
 
 func newDriverTracker(grace time.Duration, logger interface{ Printf(string, ...any) }) *driverTracker {
@@ -182,6 +183,7 @@ func (dt *driverTracker) driverDisconnected() {
 // session has been registered. Call this from the mcp-go BeforeInitialize
 // hook.
 func (dt *driverTracker) mcpSessionConnected() {
+	dt.hadMCPSession.Store(true)
 	n := dt.mcpCount.Add(1)
 	dt.logger.Printf("Daemon: MCP session opened (unix=%d, mcp=%d)", dt.unixCount.Load(), n)
 	dt.cancelGraceLocked("mcp session connected")
@@ -211,7 +213,14 @@ func (dt *driverTracker) cancelGraceLocked(reason string) {
 // zero and no timer is currently scheduled. It tolerates being called after
 // a spurious extra "disconnected" (which would push a counter negative) by
 // gating on <=0 rather than ==0.
+//
+// Until the first MCP session connects, unix-only probes (from isDaemonRunning
+// / waitForSocket while a proxy is starting the daemon) must not start the
+// grace timer — otherwise the daemon exits before Cursor finishes initialize.
 func (dt *driverTracker) maybeStartGrace() {
+	if !dt.hadMCPSession.Load() {
+		return
+	}
 	if dt.unixCount.Load() > 0 || dt.mcpCount.Load() > 0 {
 		return
 	}

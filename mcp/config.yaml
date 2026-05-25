@@ -161,7 +161,9 @@ http_port: 0
 #                  Set to ["none"] for a clean environment.
 orchestration:
   # Which agent is the driver. Worker prompts use {driver} to address this agent.
-  # Can be any agent name, e.g. "cursor" or "claude-code".
+  # - Fixed name (cursor, claude-code, codex): that agent is always driver in MCP instructions.
+  # - auto: whichever human MCP client connects (parent type) becomes runtime driver;
+  #   Stringwork-spawned instances (claude-code-task-N, codex-1, …) stay workers.
   # See docs/examples/config-claude-code-driver.yaml for a Claude Code driver setup.
   driver: cursor
   assignment_strategy: least_loaded    # or capability_match

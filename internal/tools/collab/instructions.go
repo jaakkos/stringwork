@@ -8,6 +8,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/domain"
+	"github.com/jaakkos/stringwork/internal/policy"
 )
 
 // AgentNameForClient maps MCP client names to stringwork agent identifiers.
@@ -32,34 +36,51 @@ func AgentNameForClient(clientName string) string {
 	}
 }
 
-// configuredDriverID holds the configured driver agent name.
-// Set via SetDriverID during server initialization, before any MCP
-// client connections are accepted. Stored as atomic.Value to prevent
-// data races — writes happen at startup, reads at any time.
+// configuredDriverID holds orchestration.driver from policy (may be "auto").
+// runtimeDriverID holds the promoted human driver when driver is "auto".
 var configuredDriverID atomic.Value // stores string
+var runtimeDriverID atomic.Value    // stores string
 
-// SetDriverID sets the configured driver agent name used by pairForAgent
-// and DynamicInstructionsForClient. Must be called once during server
-// startup before serving begins. Safe for concurrent use.
+// SetDriverID sets orchestration.driver used by pairForAgent and dynamic instructions.
 func SetDriverID(id string) {
 	configuredDriverID.Store(id)
 }
 
-// getDriverID returns the configured driver agent name, or "" if unset.
-func getDriverID() string {
+// SetRuntimeDriverID sets the active human driver when orchestration.driver is "auto".
+func SetRuntimeDriverID(id string) {
+	if id != "" {
+		runtimeDriverID.Store(id)
+	}
+}
+
+func getConfiguredDriverID() string {
 	if v := configuredDriverID.Load(); v != nil {
 		return v.(string)
 	}
 	return ""
 }
 
+// getEffectiveDriverID returns the driver agent type for pairing and messaging.
+func getEffectiveDriverID() string {
+	configured := getConfiguredDriverID()
+	if app.IsAutoDriver(configured) {
+		if v := runtimeDriverID.Load(); v != nil {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+		return "cursor"
+	}
+	if configured != "" {
+		return configured
+	}
+	return "cursor"
+}
+
 // pairForAgent returns the default pair partner name.
 // The driver pairs with the first known worker type; workers pair with the driver.
 func pairForAgent(agent string) string {
-	driver := getDriverID()
-	if driver == "" {
-		driver = "cursor"
-	}
+	driver := getEffectiveDriverID()
 	if agent == driver {
 		// Driver pairs with the first known worker type.
 		// These are hardcoded defaults; the orchestration config may define
@@ -186,10 +207,114 @@ However, tasks MAY include constraints via get_work_context. When present, const
 - State is global at ~/.config/stringwork/state.sqlite (shared across all agents)`
 }
 
+// InstructionsForMCPClient returns role-aware MCP server instructions for a connecting client.
+// configuredDriver is orchestration.driver from policy (empty when orchestration is disabled).
+func InstructionsForMCPClient(clientName, configuredDriver string) string {
+	return InstructionsForConnectedAgent(AgentNameForClient(clientName), configuredDriver, "", false)
+}
+
+// InstructionsForConnectedAgent returns driver or worker MCP instructions.
+// When isSpawned is true the agent is a Stringwork-spawned worker; otherwise the
+// human-facing client is treated as driver (especially when configuredDriver is "auto").
+func InstructionsForConnectedAgent(agent, configuredDriver, effectiveDriverID string, isSpawned bool) string {
+	if configuredDriver == "" && !isSpawned {
+		return InstructionsText()
+	}
+	driverID := effectiveDriverID
+	if driverID == "" {
+		driverID = configuredDriver
+	}
+	if app.IsAutoDriver(configuredDriver) && !isSpawned && agent != "" {
+		driverID = agent
+	}
+	if isSpawned {
+		if driverID == "" {
+			driverID = "cursor"
+		}
+		return InstructionsForRole(agent, driverID)
+	}
+	if driverID == "" {
+		driverID = agent
+	}
+	return InstructionsForRole(agent, driverID)
+}
+
+// AgentIsDriverForSession reports whether agent is the human driver for this session.
+// Spawned worker identifiers are never drivers.
+func AgentIsDriverForSession(
+	state *domain.CollabState,
+	agent string,
+	orch *policy.OrchestrationConfig,
+	isProcessRunning func(instanceID string) bool,
+) bool {
+	if agent == "" || orch == nil {
+		return false
+	}
+	if app.IsSpawnedWorkerAgent(state, agent, app.WorkerTypesFromOrch(orch), isProcessRunning) {
+		return false
+	}
+	driverID := app.EffectiveDriverID(state, orch.Driver)
+	return agent == driverID || app.ResolveParentAgentType(state, agent) == driverID
+}
+
+// RoleContextSection returns a short role summary for get_session_context output.
+// Mutates state when driver:auto and agent is a human-facing client.
+func RoleContextSection(
+	state *domain.CollabState,
+	agent string,
+	orch *policy.OrchestrationConfig,
+	isProcessRunning func(instanceID string) bool,
+) string {
+	if orch == nil {
+		return "Orchestration: legacy peer mode (no configured driver/worker split).\n\n"
+	}
+	spawned := app.IsSpawnedWorkerAgent(state, agent, app.WorkerTypesFromOrch(orch), isProcessRunning)
+	if !spawned {
+		app.PromoteHumanDriver(state, agent, orch)
+	}
+	driverID := app.EffectiveDriverID(state, orch.Driver)
+	if app.IsAutoDriver(orch.Driver) {
+		SetRuntimeDriverID(driverID)
+	}
+	if spawned {
+		return roleContextWorker(driverID)
+	}
+	if AgentIsDriverForSession(state, agent, orch, isProcessRunning) {
+		return roleContextDriver(driverID)
+	}
+	return roleContextWorker(driverID)
+}
+
+func roleContextDriver(driverID string) string {
+	return fmt.Sprintf(`Orchestration Role: DRIVER (configured driver: %s)
+
+Driver duties:
+- Delegate: create_task with assigned_to='any' (include relevant_files, background, constraints)
+- Monitor: worker_status and read_messages — workers report findings TO you
+- Control: cancel_agent when a worker is stuck or no longer needed
+
+Do NOT act like a worker:
+- Do NOT send routine progress/status updates to workers via send_message — use worker_status instead
+- Do NOT call heartbeat or report_progress unless YOU own an in_progress task (hybrid mode only)
+
+`, driverID)
+}
+
+func roleContextWorker(driverID string) string {
+	return fmt.Sprintf(`Orchestration Role: WORKER (driver: %s)
+
+Worker duties:
+- claim_next or accept assigned tasks; get_work_context before starting
+- heartbeat every 60-90s and report_progress every 2-3 min while working (server-enforced)
+- send_message to '%s' with detailed findings before marking tasks completed
+
+`, driverID, driverID)
+}
+
 // InstructionsForRole returns role-specific instructions (driver vs worker). driverID is the current driver instance ID.
 func InstructionsForRole(agent string, driverID string) string {
-	if driverID != "" && agent == driverID {
-		return `You are the **driver** in the pair programming system. You orchestrate work and can assign tasks to workers.
+	if driverID != "" && (agent == driverID || app.ResolveParentAgentType(nil, agent) == driverID) {
+		return `You are the **driver** in the pair programming system. You orchestrate work and assign tasks to workers — you are NOT a worker reporting upward.
 
 ## Startup
 1. get_session_context for '` + agent + `'
@@ -201,6 +326,11 @@ func InstructionsForRole(agent string, driverID string) string {
 - handoff to a specific worker instance or to the driver for review
 - request_review to get code review from a worker
 - You can also claim and do tasks yourself (hybrid mode)
+
+## Do NOT act like a worker
+- Do NOT send routine progress/status updates to workers via send_message — monitor with worker_status
+- Do NOT call heartbeat or report_progress unless YOU are executing a task yourself (hybrid mode)
+- Workers send_message TO you with findings; you review, acknowledge, and update task status
 
 ## Cancelling Workers
 - If a worker is taking too long or you no longer need its work, use: cancel_agent agent='<worker>' cancelled_by='` + agent + `' reason='...'
@@ -381,8 +511,16 @@ func registerPrompts(s *server.MCPServer) {
 							Type: "text",
 							Text: `You have been invoked to respond to your pair programmer. Follow these steps:
 
-1. Call get_session_context to see your identity, unread messages, and pending tasks.
+1. Call get_session_context to see your identity, unread messages, pending tasks, and orchestration role.
 2. Call read_messages to read all unread messages.
+
+If get_session_context shows **Orchestration Role: DRIVER** — you orchestrate workers (do NOT use the worker loop):
+3. Call worker_status — monitor worker progress (do NOT send routine status updates to workers).
+4. For each worker message or completed task: acknowledge, review findings, update_task, create follow-up tasks via create_task(assigned_to='any') when needed.
+5. Do NOT call heartbeat or report_progress unless you own an in_progress task yourself (hybrid mode).
+6. Use cancel_agent only when a worker is stuck or no longer needed.
+
+If get_session_context shows **Orchestration Role: WORKER** (or legacy peer mode) — follow the worker loop:
 3. For each message or task:
    - If it's a question, research and answer it
    - If it's a task assignment, claim it and start working
@@ -392,7 +530,7 @@ func registerPrompts(s *server.MCPServer) {
    - TRIGGER: Every 60-90 seconds → ACTION: Call heartbeat agent='<you>' progress='<what you are doing>'
    - TRIGGER: Every 2-3 minutes → ACTION: Call report_progress agent='<you>' task_id=X description='<status>' percent_complete=N
    Consequence of NOT reporting: WARNING at 4 min, CRITICAL at 7 min, CANCELLED at 14 min.
-5. BEFORE FINISHING: Call send_message from='<you>' to='<pair>' with detailed summary (changes made, files, test results).
+5. BEFORE FINISHING: Call send_message from='<you>' to the driver with detailed summary (changes made, files, test results).
 6. Update task statuses with update_task.`,
 						},
 					},

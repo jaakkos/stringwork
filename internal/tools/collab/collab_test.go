@@ -58,11 +58,21 @@ type mockPolicy struct {
 	workspaceRoot       string
 	constitutionSources []constitution.Source
 	taskTemplateSources []tasktemplates.Source
+	orch                *policy.OrchestrationConfig
 }
 
 func newMockPolicy() *mockPolicy {
 	dir, _ := os.MkdirTemp("", "collab-test-*")
-	return &mockPolicy{workspaceRoot: dir}
+	return &mockPolicy{
+		workspaceRoot: dir,
+		orch: &policy.OrchestrationConfig{
+			Driver: "cursor",
+			Workers: []policy.WorkerConfig{
+				{Type: "claude-code", Instances: 1},
+				{Type: "codex", Instances: 1},
+			},
+		},
+	}
 }
 
 func (m *mockPolicy) MessageRetentionMax() int             { return 1000 }
@@ -89,13 +99,7 @@ func (m *mockPolicy) TaskTemplateSources() []tasktemplates.Source {
 	return m.taskTemplateSources
 }
 func (m *mockPolicy) Orchestration() *policy.OrchestrationConfig {
-	return &policy.OrchestrationConfig{
-		Driver: "cursor",
-		Workers: []policy.WorkerConfig{
-			{Type: "claude-code", Instances: 1},
-			{Type: "codex", Instances: 1},
-		},
-	}
+	return m.orch
 }
 
 func (m *mockPolicy) ValidatePath(path string) (string, error) {

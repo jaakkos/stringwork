@@ -15,7 +15,7 @@ import (
 )
 
 // registerGetSessionContext registers the get_session_context tool.
-func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, registry *app.SessionRegistry) {
+func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, registry *app.SessionRegistry, processProvider ProcessInfoProvider) {
 	s.AddTool(
 		mcp.NewTool("get_session_context",
 			mcp.WithDescription("Get the current pair programming session context including unread messages, pending tasks, presence, and session notes. Call this at the start of your turn."),
@@ -57,6 +57,11 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 
 				var buf strings.Builder
 				fmt.Fprintf(&buf, "=== Pair Programming Session Context for %s ===\n\n", agent)
+				var isRunning func(string) bool
+				if processProvider != nil {
+					isRunning = processProvider.IsWorkerRunning
+				}
+				buf.WriteString(RoleContextSection(state, agent, svc.Policy().Orchestration(), isRunning))
 				buf.WriteString("Pair Status:\n")
 				for _, p := range state.Presence {
 					if p == nil {

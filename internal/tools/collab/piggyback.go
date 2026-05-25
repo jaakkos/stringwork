@@ -336,7 +336,14 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 		}
 
 		if _, suppress := suppressNudgeTools[toolName]; !suppress {
-			nudgeText = progressNudgeText(stalestTaskID, stalestSince)
+			orch := svc.Policy().Orchestration()
+			if orch != nil && AgentIsDriverForSession(state, agent, orch, nil) && !driverHasOwnedInProgressTask(state, agent) {
+				// Orchestrating driver: in_progress tasks assigned to the parent
+				// type (e.g. "claude-code") are owned by worker instances via
+				// CurrentTasks — do not nudge the driver to report_progress.
+			} else {
+				nudgeText = progressNudgeText(stalestTaskID, stalestSince)
+			}
 		}
 		return nil
 	})
@@ -370,6 +377,44 @@ func BuildBanner(svc *app.CollabService, agent, toolName string) string {
 	}
 
 	return banner
+}
+
+// driverHasOwnedInProgressTask is true when the configured driver is doing
+// hybrid work. Ownership is CurrentTasks on the driver's instance, or an
+// in_progress task assigned to a concrete instance ID other than the parent
+// agent type (pool alias AssignedTo "claude-code" is worker-owned).
+func driverHasOwnedInProgressTask(state *domain.CollabState, agent string) bool {
+	if state == nil || agent == "" {
+		return false
+	}
+	inst := findAgentInstance(state, agent)
+	if inst == nil {
+		return false
+	}
+	for _, tid := range inst.CurrentTasks {
+		for i := range state.Tasks {
+			t := &state.Tasks[i]
+			if t.ID == tid && t.Status == "in_progress" {
+				return true
+			}
+		}
+	}
+	parentType := inst.AgentType
+	if parentType == "" {
+		parentType = app.ResolveParentAgentType(state, agent)
+	}
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		if t.Status != "in_progress" || t.AssignedTo != agent {
+			continue
+		}
+		// Parent-type pool assignment is not hybrid driver work.
+		if t.AssignedTo == parentType {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // progressNudgeText returns a progress reminder string for a stale task,

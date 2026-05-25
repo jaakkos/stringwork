@@ -606,28 +606,22 @@ func EnsureAgentInstances(state *domain.CollabState, orch *policy.OrchestrationC
 	}
 	now := time.Now()
 
-	// Driver: set DriverID once on a fresh state, then create the driver
-	// row only when it's missing. Do NOT overwrite an existing driver row —
-	// that would clobber runtime state (CurrentTasks, LastHeartbeat) on
-	// every Run/Query call now that this function runs every time.
-	if state.DriverID == "" {
-		state.DriverID = orch.Driver
-	}
-	if orch.Driver != "" {
-		if _, ok := state.AgentInstances[orch.Driver]; !ok {
-			// Driver row deliberately leaves LastSpawnedAt zero. Drivers
-			// are protected from stale STOP banners by the DaemonStartedAt
-			// fallback in BuildBanner — a non-zero per-instance cutoff
-			// here would over-suppress for unit tests that drive cursor
-			// through orchestration without DaemonStartedAt set.
-			state.AgentInstances[orch.Driver] = &domain.AgentInstance{
-				InstanceID:    orch.Driver,
-				AgentType:     orch.Driver,
-				Role:          domain.RoleDriver,
-				Capabilities:  []string{"orchestrate", "code-edit", "code-review", "search", "terminal"},
-				MaxTasks:      0,
-				Status:        "idle",
-				LastHeartbeat: now,
+	// Driver: fixed name in config, or "auto" (human MCP client promotes on connect).
+	if !IsAutoDriver(orch.Driver) {
+		if state.DriverID == "" {
+			state.DriverID = orch.Driver
+		}
+		if orch.Driver != "" {
+			if _, ok := state.AgentInstances[orch.Driver]; !ok {
+				state.AgentInstances[orch.Driver] = &domain.AgentInstance{
+					InstanceID:    orch.Driver,
+					AgentType:     orch.Driver,
+					Role:          domain.RoleDriver,
+					Capabilities:  []string{"orchestrate", "code-edit", "code-review", "search", "terminal"},
+					MaxTasks:      0,
+					Status:        "idle",
+					LastHeartbeat: now,
+				}
 			}
 		}
 	}

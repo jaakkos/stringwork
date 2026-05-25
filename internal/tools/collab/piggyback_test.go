@@ -390,6 +390,63 @@ func TestBuildBanner_ProgressNudge_RecentProgress(t *testing.T) {
 	}
 }
 
+// TestBuildBanner_DriverSkipsNudgeForWorkerOwnedInProgress verifies the
+// orchestrating driver is not told to report_progress for in_progress tasks
+// assigned to the parent type while a worker instance owns them in CurrentTasks.
+func TestBuildBanner_DriverSkipsNudgeForWorkerOwnedInProgress(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	now := time.Now().Add(-5 * time.Minute)
+	repo.state.DriverID = "claude-code"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code": {
+			InstanceID: "claude-code", AgentType: "claude-code",
+			Role: domain.RoleDriver, Status: "working",
+		},
+		"claude-code-1": {
+			InstanceID: "claude-code-1", AgentType: "claude-code",
+			Role: domain.RoleWorker, Status: "working",
+			CurrentTasks: []int{9},
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 9, Title: "worker task", AssignedTo: "claude-code", Status: "in_progress",
+			UpdatedAt: now, LastProgressAt: now,
+		},
+	}
+
+	banner := BuildBanner(svc, "claude-code", "create_task")
+	if strings.Contains(banner, "report_progress") {
+		t.Errorf("driver must not be nudged for worker-owned in_progress task; got %q", banner)
+	}
+}
+
+// TestBuildBanner_DriverNudgesHybridOwnedTask verifies hybrid drivers still
+// get progress nudges for tasks they own via CurrentTasks.
+func TestBuildBanner_DriverNudgesHybridOwnedTask(t *testing.T) {
+	svc, repo := newPiggybackTestService()
+	now := time.Now().Add(-5 * time.Minute)
+	repo.state.DriverID = "claude-code"
+	repo.state.AgentInstances = map[string]*domain.AgentInstance{
+		"claude-code": {
+			InstanceID: "claude-code", AgentType: "claude-code",
+			Role: domain.RoleDriver, Status: "working",
+			CurrentTasks: []int{3},
+		},
+	}
+	repo.state.Tasks = []domain.Task{
+		{
+			ID: 3, Title: "driver hybrid", AssignedTo: "claude-code", Status: "in_progress",
+			UpdatedAt: now, LastProgressAt: now,
+		},
+	}
+
+	banner := BuildBanner(svc, "claude-code", "some_tool")
+	if !strings.Contains(banner, "report_progress") {
+		t.Errorf("hybrid driver should be nudged for owned in_progress task; got %q", banner)
+	}
+}
+
 func TestBuildBanner_ProgressNudge_SoftReminder(t *testing.T) {
 	svc, repo := newPiggybackTestService()
 	now := time.Now()

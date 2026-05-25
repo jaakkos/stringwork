@@ -198,9 +198,26 @@ type taskProgressInfo struct {
 	SLAStatus     string
 }
 
-// livenessVerdict returns a short string like "ALIVE (heartbeat 30s ago)" or
-// "DEAD (no signal for 5m12s)" by checking the best available signal.
+// livenessVerdict returns a short string like "ALIVE (heartbeat 30s ago)",
+// "UNRESPONSIVE (no signal for 5m12s)", "IDLE — wake on demand" (dormant
+// pool slot that SpawnForTask will spawn when work arrives), or
+// "UNKNOWN — no signals" by checking the best available signal.
+//
+// The IDLE verdict exists so a worker pool that is operationally healthy
+// but currently has no running processes does not read as "the pool is
+// dead" to driver agents. A pool slot whose Status=="offline", Role==Worker,
+// has no CurrentTasks, no task-bound process tracked by the worker manager,
+// and no task-bound suffix on its InstanceID is a dormant slot — see
+// WorkerManager.SpawnForTask, which only checks countRunningByType (running
+// OS processes) and is happy to spawn into such a slot. Reporting it as
+// UNRESPONSIVE drove the regfin-review skill's Phase 3a Step 1 to fall back
+// to native subagents instead of creating the task and letting SpawnForTask
+// wake a fresh worker on demand.
 func livenessVerdict(id string, inst *domain.AgentInstance, now time.Time, pip ProcessInfoProvider) string {
+	if isDormantPoolSlot(id, inst, pip) {
+		return "[IDLE — wake on demand]"
+	}
+
 	type signal struct {
 		source string
 		age    time.Duration
@@ -234,4 +251,41 @@ func livenessVerdict(id string, inst *domain.AgentInstance, now time.Time, pip P
 		return fmt.Sprintf("[ALIVE — %s %s ago]", best.source, best.age.Round(time.Second))
 	}
 	return fmt.Sprintf("[UNRESPONSIVE — last signal: %s %s ago]", best.source, best.age.Round(time.Second))
+}
+
+// isDormantPoolSlot reports whether inst is a worker pool slot that is
+// currently dormant but will be spawned on demand when SpawnForTask is
+// called. The four required signals are:
+//
+//  1. Role is RoleWorker (drivers and other roles never spawn on demand).
+//  2. Status is "offline" — either bootstrap-default (helpers.go pool
+//     seeding) or watchdog-flipped after the previous process exited.
+//  3. No CurrentTasks — a pool slot that thinks it owns work is in a
+//     half-broken state and should keep showing UNRESPONSIVE so the
+//     driver investigates.
+//  4. No task-bound process is tracked for this InstanceID, AND the
+//     InstanceID itself is not a task-bound row. A pool slot whose
+//     process is still tracked is mid-spawn / mid-shutdown, not dormant;
+//     a task-bound row (<type>-task-N) is ephemeral and "offline + no
+//     process" means the worker died mid-task, not "dormant".
+func isDormantPoolSlot(id string, inst *domain.AgentInstance, pip ProcessInfoProvider) bool {
+	if inst == nil || inst.Role != domain.RoleWorker || inst.Status != "offline" {
+		return false
+	}
+	if len(inst.CurrentTasks) > 0 {
+		return false
+	}
+	if _, isTaskBound := app.StripTaskBoundSuffix(id); isTaskBound {
+		return false
+	}
+	if pip != nil {
+		procs := pip.GetProcessInfo()
+		prefix := id + "-"
+		for pid := range procs {
+			if pid == id || strings.HasPrefix(pid, prefix) {
+				return false
+			}
+		}
+	}
+	return true
 }

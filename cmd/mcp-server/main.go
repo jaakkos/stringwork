@@ -304,6 +304,42 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		}
 	})
 
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest, result *mcp.InitializeResult) {
+		if result == nil || message == nil {
+			return
+		}
+		agent := collab.AgentNameForClient(message.Params.ClientInfo.Name)
+		if session := server.ClientSessionFromContext(ctx); session != nil && agent != "" {
+			registry.SetAgent(session.SessionID(), agent)
+		}
+		orch := pol.Orchestration()
+		configuredDriver := ""
+		if orch != nil {
+			configuredDriver = orch.Driver
+		}
+		var isSpawned bool
+		effectiveDriver := configuredDriver
+		_ = svc.Run(func(state *domain.CollabState) error {
+			var isRunning func(string) bool
+			if bundle.wm != nil {
+				isRunning = bundle.wm.IsWorkerRunning
+			}
+			if orch != nil {
+				types := app.WorkerTypesFromOrch(orch)
+				isSpawned = app.IsSpawnedWorkerAgent(state, agent, types, isRunning)
+				if !isSpawned {
+					app.PromoteHumanDriver(state, agent, orch)
+				}
+				effectiveDriver = app.EffectiveDriverID(state, orch.Driver)
+			}
+			return nil
+		})
+		result.Instructions = collab.InstructionsForConnectedAgent(agent, configuredDriver, effectiveDriver, isSpawned)
+		if app.IsAutoDriver(configuredDriver) && effectiveDriver != "" {
+			collab.SetRuntimeDriverID(effectiveDriver)
+		}
+	})
+
 	livenessAdapter := &workerLivenessAdapter{}
 	mcpServer := server.NewMCPServer(
 		"mcp-stringwork",

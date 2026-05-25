@@ -122,7 +122,7 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerUpdatePlan(s, svc, logger)
 
 	// Session tools (3)
-	registerGetSessionContext(s, svc, logger, registry)
+	registerGetSessionContext(s, svc, logger, registry, o.processProvider)
 	registerSetPresence(s, svc, logger, registry)
 	registerAppendSessionNote(s, svc, logger)
 
