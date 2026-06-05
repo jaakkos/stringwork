@@ -119,6 +119,8 @@ type WorkerManager struct {
 	// back on. When empty, falls back to policy.DefaultSocketPath(). The
 	// daemon sets this explicitly so workers hit THIS daemon, not whichever
 	// one happens to own the default path on the machine.
+	// modelTiers maps tier names to CLI model names per worker type (from config).
+	modelTiers map[string]map[string]string
 	socketPath string
 	// spawnSkipLogged rate-limits the per-instance "skipped spawn for X
 	// reason" log lines emitted by Check(). Without this, a noisy worker
@@ -240,12 +242,22 @@ func NewWorkerManager(orch *policy.OrchestrationConfig, getAgent func() string, 
 		}
 	}
 	driverID := ""
+	var modelTiers map[string]map[string]string
 	if orch != nil {
 		driverID = orch.Driver
+		if len(orch.ModelTiers) > 0 {
+			modelTiers = orch.ModelTiers
+		}
+	}
+	if orch != nil {
+		for _, msg := range orch.ModelTierCoverageWarnings() {
+			logger.Printf("WorkerManager: %s", msg)
+		}
 	}
 	return &WorkerManager{
 		configs:             configs,
 		driverID:            driverID,
+		modelTiers:          modelTiers,
 		getAgent:            getAgent,
 		stateLoader:         stateLoader,
 		stateMutator:        stateMutator,
@@ -1383,6 +1395,21 @@ func (m *WorkerManager) KnownAgentTypes() []string {
 	return out
 }
 
+// ModelTierMap returns orchestration.model_tiers for driver visibility (worker_status).
+func (m *WorkerManager) ModelTierMap() map[string]map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.modelTiers) == 0 {
+		return nil
+	}
+	return m.modelTiers
+}
+
+// WorkerAgentTypes implements collab.ModelTierProvider.
+func (m *WorkerManager) WorkerAgentTypes() []string {
+	return m.KnownAgentTypes()
+}
+
 // BackoffInfoForType returns the backoff status for a specific agent type:
 // backed off (bool), remaining duration, and reason summary.
 func (m *WorkerManager) BackoffInfoForType(agentType string) (blocked bool, remaining time.Duration, reason string) {
@@ -1867,6 +1894,18 @@ func injectGeminiResume(args []string, sessionID string) []string {
 	out = append(out, args[0], "--resume", sessionID)
 	out = append(out, args[1:]...)
 	return out
+}
+
+// resolveModel picks the CLI --model value for a task spawn.
+// Precedence: task.Model > model_tiers[task.ModelTier][workerType] > workerDefault > "".
+func resolveModel(task *domain.Task, workerType string, tiers map[string]map[string]string, workerDefault string) string {
+	if task != nil && task.Model != "" {
+		return task.Model
+	}
+	if task != nil && task.ModelTier != "" && tiers != nil {
+		return policy.ResolveModelTier(tiers, task.ModelTier, workerType, workerDefault)
+	}
+	return workerDefault
 }
 
 // hasModelFlag reports whether args already contain a user-supplied --model flag.
@@ -2680,6 +2719,7 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 	instanceID := fmt.Sprintf("%s-task-%d", baseCfg.AgentType, taskID)
 	taskCfg := baseCfg
 	taskCfg.InstanceID = instanceID
+	taskCfg.Model = resolveModel(task, baseCfg.AgentType, m.modelTiers, baseCfg.Model)
 
 	constitutionInline := m.resolvedConstitution(constitution.Scope{
 		TaskKind:  constitution.TaskKindForTask(task.Template, task.Title),
@@ -2701,10 +2741,14 @@ func (m *WorkerManager) spawnTaskWorker(taskID int, baseCfg WorkerSpawnConfig) {
 		}
 	}
 
-	m.logger.Printf("WorkerManager: spawning %s for task #%d (workspace=%s)", instanceID, taskID, spawnDir)
+	if taskCfg.Model != "" {
+		m.logger.Printf("WorkerManager: spawning %s for task #%d (workspace=%s, model=%s)", instanceID, taskID, spawnDir, taskCfg.Model)
+	} else {
+		m.logger.Printf("WorkerManager: spawning %s for task #%d (workspace=%s)", instanceID, taskID, spawnDir)
+	}
 	m.MarkInstanceSpawning(instanceID, baseCfg.AgentType)
 	connected := m.getAgent()
-	m.sendTaskSpawnAck(instanceID, connected, taskID, task.Title)
+	m.sendTaskSpawnAck(instanceID, connected, taskID, task.Title, taskCfg.Model, task.ModelTier)
 	go func() {
 		m.spawn(taskCfg, spawnDir)
 		m.drainQueue(baseCfg.AgentType)
@@ -3016,11 +3060,18 @@ func (m *WorkerManager) IsSpawnQueued(taskID int) bool {
 	return false
 }
 
-func (m *WorkerManager) sendTaskSpawnAck(instanceID, recipient string, taskID int, title string) {
+func (m *WorkerManager) sendTaskSpawnAck(instanceID, recipient string, taskID int, title, resolvedModel, modelTier string) {
 	if recipient == "" || m.stateMutator == nil {
 		return
 	}
 	content := fmt.Sprintf("⚡ **%s** spawning for task #%d: %s", instanceID, taskID, title)
+	if resolvedModel != "" {
+		if modelTier != "" {
+			content += fmt.Sprintf(" (model=%s, tier=%s)", resolvedModel, modelTier)
+		} else {
+			content += fmt.Sprintf(" (model=%s)", resolvedModel)
+		}
+	}
 	_ = m.stateMutator(func(s *domain.CollabState) error {
 		s.Messages = append(s.Messages, domain.Message{
 			ID:        s.NextMsgID,

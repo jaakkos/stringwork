@@ -9,14 +9,16 @@ You are the **driver** in a Stringwork pair programming session. You orchestrate
 
 ## Session Start
 
-1. `get_session_context` — see unread messages, pending tasks, worker presence, and session notes
+1. `get_session_context` — see unread messages, pending tasks, worker presence, session notes, and **model selection guide**
 2. `set_presence` — set status to 'working' and workspace to the current project path
 3. `read_messages` — process any unread worker results or system notifications
 4. `list_tasks` — see what's in progress, pending, or blocked
+5. `list_model_options` — (optional) full tier → model map for claude-code, codex, gemini when not shown in session context
 
 ## Task Delegation
 
 - `create_task` with `assigned_to='any'` for auto-assignment to least-loaded worker
+- Set `model_tier` (`fast` | `standard` | `capable`) on each task — you decide per task; see model guide in session context
 - Include `relevant_files`, `background`, `constraints` for effective delegation
 - Set `expected_duration_seconds` for SLA monitoring
 

@@ -279,6 +279,51 @@ workers:
 >
 > Find your path with `which gemini` in a terminal where nvm is loaded.
 
+### Per-task model selection
+
+The **driver** chooses the worker model on each `create_task` via `model_tier` or `model`. Stringwork resolves the tier to a concrete `--model` flag at spawn time **per worker type** (`claude-code`, `codex`, `gemini`).
+
+Configure tier mappings in `~/.config/stringwork/config.yaml`:
+
+```yaml
+orchestration:
+  model_tiers:
+    fast:
+      claude-code: haiku
+      codex: o4-mini
+      gemini: gemini-2.5-flash
+    standard:
+      claude-code: sonnet
+      codex: gpt-5-codex
+      gemini: gemini-2.5-pro
+    capable:
+      claude-code: opus
+      codex: gpt-5-codex
+      gemini: gemini-2.5-pro
+  workers:
+    - type: claude-code
+      model: sonnet   # fallback when the driver omits model_tier
+    - type: codex
+      model: gpt-5-codex
+    - type: gemini
+      model: gemini-2.5-pro
+```
+
+Examples:
+
+```
+# Auto-assign — tier resolves to the correct model for whichever worker runs the task
+create_task title='Review README typos' model_tier='fast' assigned_to='any' created_by='cursor' ...
+
+# Pin provider + tier
+create_task title='Codex security review' model_tier='capable' assigned_to='codex' created_by='cursor' ...
+create_task title='Gemini style pass' model_tier='fast' assigned_to='gemini' created_by='cursor' ...
+```
+
+Resolution order at spawn: `task.model` → `model_tiers[tier][workerType]` → `workers[].model`.
+
+The daemon logs a warning at startup when a configured worker type is missing from any `model_tiers` entry. `worker_status` lists the configured tier map. Drivers also see the full guide in `get_session_context` and can call `list_model_options` anytime.
+
 ### Worker environment variables
 
 Workers inherit the server's environment by default. You can customize:

@@ -63,21 +63,27 @@ type WorkContext struct {
 
 // Task is a shared task.
 type Task struct {
-	ID            int       `json:"id"`
-	Title         string    `json:"title"`
-	Description   string    `json:"description"`
-	Status        string    `json:"status"` // pending, in_progress, completed, blocked, cancelled
-	AssignedTo    string    `json:"assigned_to"`
-	CreatedBy     string    `json:"created_by"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-	Priority      int       `json:"priority"`
-	Dependencies  []int     `json:"dependencies"`
-	BlockedBy     string    `json:"blocked_by"`
-	ContextID     string    `json:"context_id,omitempty"`
-	WorkerType    string    `json:"worker_type,omitempty"`
-	Capabilities  []string  `json:"capabilities,omitempty"`
-	ResultSummary string    `json:"result_summary,omitempty"`
+	ID           int       `json:"id"`
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	Status       string    `json:"status"` // pending, in_progress, completed, blocked, cancelled
+	AssignedTo   string    `json:"assigned_to"`
+	CreatedBy    string    `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Priority     int       `json:"priority"`
+	Dependencies []int     `json:"dependencies"`
+	BlockedBy    string    `json:"blocked_by"`
+	ContextID    string    `json:"context_id,omitempty"`
+	WorkerType   string    `json:"worker_type,omitempty"`
+	Capabilities []string  `json:"capabilities,omitempty"`
+	// Model is an explicit CLI model override set by the driver on create_task
+	// (e.g. "opus", "haiku"). Takes precedence over ModelTier at spawn.
+	Model string `json:"model,omitempty"`
+	// ModelTier is a named cost/capability tier (e.g. "fast", "standard",
+	// "capable") resolved via orchestration.model_tiers at spawn time.
+	ModelTier     string `json:"model_tier,omitempty"`
+	ResultSummary string `json:"result_summary,omitempty"`
 	// Progress monitoring fields
 	ExpectedDurationSec int       `json:"expected_duration_seconds,omitempty"` // SLA: expected task duration in seconds
 	ProgressDescription string    `json:"progress_description,omitempty"`      // latest progress report text

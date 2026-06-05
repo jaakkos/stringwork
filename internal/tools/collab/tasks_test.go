@@ -61,6 +61,81 @@ func TestCreateTask_Basic(t *testing.T) {
 	}
 }
 
+func TestCreateTask_ModelRouting(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	_, err := callTool(t, srv, "create_task", map[string]any{
+		"title":        "Review style nits",
+		"created_by":   "cursor",
+		"assigned_to":  "claude-code",
+		"model_tier":   "fast",
+		"model":        "haiku",
+		"worker_type":  "claude-code",
+		"capabilities": []any{"fast"},
+	})
+	if err != nil {
+		t.Fatalf("create_task: %v", err)
+	}
+	if len(repo.state.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(repo.state.Tasks))
+	}
+	task := repo.state.Tasks[0]
+	if task.ModelTier != "fast" {
+		t.Errorf("ModelTier = %q, want fast", task.ModelTier)
+	}
+	if task.Model != "haiku" {
+		t.Errorf("Model = %q, want haiku", task.Model)
+	}
+	if task.WorkerType != "claude-code" {
+		t.Errorf("WorkerType = %q, want claude-code", task.WorkerType)
+	}
+	if len(task.Capabilities) != 1 || task.Capabilities[0] != "fast" {
+		t.Errorf("Capabilities = %v, want [fast]", task.Capabilities)
+	}
+}
+
+func TestCreateTask_CodexModelTier(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	_, err := callTool(t, srv, "create_task", map[string]any{
+		"title":       "Codex fast review",
+		"created_by":  "cursor",
+		"assigned_to": "codex",
+		"model_tier":  "fast",
+	})
+	if err != nil {
+		t.Fatalf("create_task: %v", err)
+	}
+	task := repo.state.Tasks[0]
+	if task.ModelTier != "fast" || task.AssignedTo != "codex" {
+		t.Errorf("task = %+v, want assigned_to=codex model_tier=fast", task)
+	}
+}
+
+func TestListTasks_ShowsModelFields(t *testing.T) {
+	svc, repo := newTestService()
+	logger := log.New(io.Discard, "", 0)
+	srv := testServer(svc, logger)
+
+	repo.state.Tasks = []domain.Task{{
+		ID: 1, Title: "Cheap task", Status: "pending", AssignedTo: "claude-code",
+		CreatedBy: "cursor", Priority: 3, ModelTier: "fast",
+	}}
+
+	result, err := callTool(t, srv, "list_tasks", map[string]any{"status": "all"})
+	if err != nil {
+		t.Fatalf("list_tasks: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Model tier: fast") {
+		t.Errorf("expected model tier in listing; got:\n%s", text)
+	}
+}
+
 // TestCreateTask_TemplateAndAspect exercises Phase-2 task-template
 // provenance plumbing: create_task accepts `template` and `aspect`
 // args, persists them on domain.Task, and `aspect` is silently

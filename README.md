@@ -208,6 +208,7 @@ See [mcp/config.yaml](mcp/config.yaml) for a fully annotated example.
 | Tool | Description |
 |------|-------------|
 | `worker_status` | Live view of workers: progress, SLA status, process activity |
+| `list_model_options` | Configured model tiers, per-provider CLI models, and selection guidance for drivers |
 | `heartbeat` | Signal liveness every 60-90s with progress info. Include `session_id` on first call for session resume on restart |
 | `report_progress` | Structured progress: description, percent complete, ETA |
 | `cancel_agent` | Cancel a worker's tasks, send STOP signal, kill process |

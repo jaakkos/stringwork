@@ -245,6 +245,8 @@ func runMigrations(db *sql.DB) error {
 		// with last_failure_at / last_progress_at above.
 		"ALTER TABLE tasks ADD COLUMN recovery_events TEXT NOT NULL DEFAULT '[]'",
 		"ALTER TABLE tasks ADD COLUMN last_reconciled_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN model_tier TEXT NOT NULL DEFAULT ''",
 	}
 	for _, ddl := range migrations {
 		if err := addColumn(db, ddl); err != nil {
@@ -477,21 +479,23 @@ func (s *Store) Load() (*domain.CollabState, error) {
 		return nil, fmt.Errorf("messages iteration: %w", err)
 	}
 
-	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, COALESCE(recovery_events, '[]'), COALESCE(last_reconciled_at, '') FROM tasks ORDER BY id")
+	rows, err = tx.Query("SELECT id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, COALESCE(recovery_events, '[]'), COALESCE(last_reconciled_at, ''), model, model_tier FROM tasks ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("tasks: %w", err)
 	}
 	for rows.Next() {
 		var t domain.Task
-		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt, recoveryEvents, lastReconciledAt string
+		var ca, ua, deps, contextID, workerType, caps, resultSummary, progressDesc, lastProgressAt, lastFailureAt, recoveryEvents, lastReconciledAt, model, modelTier string
 		var requiresReview int
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy, &t.Template, &t.Aspect, &recoveryEvents, &lastReconciledAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.AssignedTo, &t.CreatedBy, &ca, &ua, &t.Priority, &t.BlockedBy, &deps, &contextID, &workerType, &caps, &resultSummary, &t.ExpectedDurationSec, &progressDesc, &t.ProgressPercent, &lastProgressAt, &t.FailureCount, &lastFailureAt, &t.FailureReason, &requiresReview, &t.ReviewStatus, &t.ReviewedBy, &t.Template, &t.Aspect, &recoveryEvents, &lastReconciledAt, &model, &modelTier); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
 		t.RequiresReview = requiresReview != 0
 		t.ContextID = contextID
 		t.WorkerType = workerType
+		t.Model = model
+		t.ModelTier = modelTier
 		t.ResultSummary = resultSummary
 		t.ProgressDescription = progressDesc
 		var err error
@@ -918,8 +922,8 @@ func (s *Store) Save(state *domain.CollabState) error {
 		if t.RequiresReview {
 			requiresReview = 1
 		}
-		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, recovery_events, last_reconciled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy, t.Template, t.Aspect, string(recoveryEvents), lastReconciledAt); err != nil {
+		if _, err := tx.Exec("INSERT INTO tasks (id, title, description, status, assigned_to, created_by, created_at, updated_at, priority, blocked_by, dependencies, context_id, worker_type, capabilities, result_summary, expected_duration_sec, progress_description, progress_percent, last_progress_at, failure_count, last_failure_at, failure_reason, requires_review, review_status, reviewed_by, template, aspect, recovery_events, last_reconciled_at, model, model_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			t.ID, t.Title, t.Description, t.Status, t.AssignedTo, t.CreatedBy, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.Priority, t.BlockedBy, string(deps), t.ContextID, t.WorkerType, string(caps), t.ResultSummary, t.ExpectedDurationSec, t.ProgressDescription, t.ProgressPercent, lastProgressAt, t.FailureCount, lastFailureAt, t.FailureReason, requiresReview, t.ReviewStatus, t.ReviewedBy, t.Template, t.Aspect, string(recoveryEvents), lastReconciledAt, t.Model, t.ModelTier); err != nil {
 			return err
 		}
 	}

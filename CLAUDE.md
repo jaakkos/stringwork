@@ -231,6 +231,7 @@ See [docs/examples/config-claude-code-driver.yaml](docs/examples/config-claude-c
 - `register_agent` - Register a custom agent for auto-discovery
 - `list_agents` - List all available agents (built-in and registered)
 - `worker_status` - (Driver) List workers with progress, process activity, SLA status
+- `list_model_options` - (Driver) Available worker model tiers and guidance for create_task model_tier
 - `heartbeat` - (Workers) Signal liveness with progress info; call every 60-90 seconds. Include `session_id` on first call for session resume on restart
 - `cancel_agent` - (Driver) Cancel a worker's tasks, send STOP signal, and kill its process
 - `get_work_context` - Get task context (relevant files, background, constraints, shared notes)

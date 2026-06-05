@@ -207,7 +207,7 @@ All agents work from the same plan.
 | Workflow | handoff, claim_next, request_review |
 | Files | lock_file |
 | Agents | register_agent, list_agents |
-| Workers | worker_status, heartbeat |
+| Workers | worker_status, heartbeat, list_model_options |
 | Work Context | get_work_context, update_work_context |
 
 ## Important Rules

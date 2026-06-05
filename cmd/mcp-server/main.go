@@ -500,6 +500,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		regOpts = append(regOpts, collab.WithTaskSpawner(wm))
 		regOpts = append(regOpts, collab.WithSessionIDRecorder(wm))
 		regOpts = append(regOpts, collab.WithBackoffProvider(wm))
+		regOpts = append(regOpts, collab.WithModelTierProvider(wm))
 	}
 	if wtManager != nil {
 		regOpts = append(regOpts, collab.WithWorktreeProvider(&worktreeAdapter{mgr: wtManager}))

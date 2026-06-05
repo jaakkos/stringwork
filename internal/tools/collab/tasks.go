@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -20,7 +21,9 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithDescription("Create a shared task for the pair programming session. Use this to coordinate work and track progress."),
 			mcp.WithString("title", mcp.Required(), mcp.Description("Short task title")),
 			mcp.WithString("description", mcp.Description("Detailed task description")),
-			mcp.WithString("assigned_to", mcp.Description("Who should work on this (e.g., 'cursor', 'claude-code', 'any')")),
+			mcp.WithString("model_tier", mcp.Description("Named model tier (fast, standard, capable). Resolved per worker CLI via orchestration.model_tiers — keys: claude-code, codex, gemini. Driver decides per task.")),
+			mcp.WithString("model", mcp.Description("Explicit CLI model override for the assigned worker (e.g. haiku/opus for claude-code, gpt-5-codex/o4-mini for codex, gemini-2.5-flash/pro for gemini). Takes precedence over model_tier.")),
+			mcp.WithString("assigned_to", mcp.Description("Who should work on this (e.g., 'cursor', 'claude-code', 'codex', 'gemini', 'any')")),
 			mcp.WithString("created_by", mcp.Required(), mcp.Description("Who created this task")),
 			mcp.WithNumber("priority", mcp.Description("Task priority: 1=critical, 2=high, 3=normal (default), 4=low")),
 			mcp.WithArray("relevant_files", mcp.Description("Files this task should focus on (for work context)")),
@@ -32,6 +35,8 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithBoolean("requires_review", mcp.Description("Whether this task requires manual review approval before it can be marked completed")),
 			mcp.WithString("template", mcp.Description("Task-templates template id this task was planned from (e.g. \"code-review\"). Drives the constitution alias rule and `list_tasks --template` filtering. Set automatically by the driver when iterating a task_plan response; rarely set by hand.")),
 			mcp.WithString("aspect", mcp.Description("Aspect id within the template (e.g. \"security\" inside \"code-review\"). Set alongside `template`; ignored when `template` is empty.")),
+			mcp.WithString("worker_type", mcp.Description("Pin assignment to a specific worker CLI type (e.g. \"claude-code\", \"codex\", \"gemini\"). Used with assigned_to='any' and capability_match strategy.")),
+			mcp.WithArray("capabilities", mcp.Description("Required worker capabilities for auto-assignment (e.g. [\"fast\"] for a cheap-model pool).")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -137,6 +142,10 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					// that no doctor will ever flag.
 					aspect = ""
 				}
+				workerType, _ := args["worker_type"].(string)
+				capabilities := stringArrayArg(args, "capabilities")
+				model, _ := args["model"].(string)
+				modelTier, _ := args["model_tier"].(string)
 				task := domain.Task{
 					ID:                  state.NextTaskID,
 					Title:               title,
@@ -153,6 +162,10 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 					ReviewStatus:        reviewStatus,
 					Template:            template,
 					Aspect:              aspect,
+					WorkerType:          workerType,
+					Capabilities:        capabilities,
+					Model:               model,
+					ModelTier:           modelTier,
 				}
 				state.Tasks = append(state.Tasks, task)
 				taskID = state.NextTaskID
@@ -195,8 +208,9 @@ func registerCreateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			}
 			priorityNames := map[int]string{1: "critical", 2: "high", 3: "normal", 4: "low"}
 			logger.Printf("Task #%d created by %s (priority: %s)", taskID, createdBy, priorityNames[priority])
-			return mcp.NewToolResultText(fmt.Sprintf("Task #%d created: %s (assigned to: %s, priority: %s%s)",
-				taskID, title, effectiveAssignee, priorityNames[priority], depInfo)), nil
+			modelInfo := taskModelSummary(args)
+			return mcp.NewToolResultText(fmt.Sprintf("Task #%d created: %s (assigned to: %s, priority: %s%s%s)",
+				taskID, title, effectiveAssignee, priorityNames[priority], depInfo, modelInfo)), nil
 		},
 	)
 }
@@ -278,6 +292,21 @@ func registerListTasks(s *server.MCPServer, svc *app.CollabService, logger *log.
 					if task.FailureCount > 0 {
 						result += fmt.Sprintf("  Failures: %d (last: %s)\n", task.FailureCount, task.FailureReason)
 					}
+					if task.Model != "" || task.ModelTier != "" {
+						if task.Model != "" && task.ModelTier != "" {
+							result += fmt.Sprintf("  Model: %s (tier: %s)\n", task.Model, task.ModelTier)
+						} else if task.Model != "" {
+							result += fmt.Sprintf("  Model: %s\n", task.Model)
+						} else {
+							result += fmt.Sprintf("  Model tier: %s\n", task.ModelTier)
+						}
+					}
+					if task.WorkerType != "" {
+						result += fmt.Sprintf("  Worker type: %s\n", task.WorkerType)
+					}
+					if len(task.Capabilities) > 0 {
+						result += fmt.Sprintf("  Capabilities: %s\n", strings.Join(task.Capabilities, ", "))
+					}
 					result += fmt.Sprintf("  Assigned to: %s, Created by: %s\n\n", task.AssignedTo, task.CreatedBy)
 					count++
 				}
@@ -352,6 +381,8 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 			mcp.WithString("blocked_by", mcp.Description("External blocker description (set to empty to clear)")),
 			mcp.WithBoolean("requires_review", mcp.Description("Whether this task requires manual review before completion")),
 			mcp.WithString("review_status", mcp.Description("New review status"), mcp.Enum("pending", "approved", "rejected")),
+			mcp.WithString("model_tier", mcp.Description("Model tier for pending tasks (e.g. fast, standard, capable). Only applied while task is pending.")),
+			mcp.WithString("model", mcp.Description("Explicit CLI model override. Only applied while task is pending.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -415,6 +446,14 @@ func registerUpdateTask(s *server.MCPServer, svc *app.CollabService, logger *log
 							return err
 						}
 						task.AssignedTo = v
+					}
+					if task.Status == "pending" {
+						if v, ok := args["model"].(string); ok {
+							task.Model = v
+						}
+						if v, ok := args["model_tier"].(string); ok {
+							task.ModelTier = v
+						}
 					}
 
 					// --- CurrentTasks maintenance ---
@@ -696,4 +735,33 @@ func revalidateSpawn(svc *app.CollabService, taskID int, expectedAssignee string
 		return nil
 	})
 	return ok
+}
+
+func stringArrayArg(args map[string]any, key string) []string {
+	raw, ok := args[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, x := range raw {
+		if s, ok := x.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func taskModelSummary(args map[string]any) string {
+	model, _ := args["model"].(string)
+	modelTier, _ := args["model_tier"].(string)
+	switch {
+	case model != "" && modelTier != "":
+		return fmt.Sprintf(", model: %s (tier: %s)", model, modelTier)
+	case model != "":
+		return fmt.Sprintf(", model: %s", model)
+	case modelTier != "":
+		return fmt.Sprintf(", model_tier: %s", modelTier)
+	default:
+		return ""
+	}
 }

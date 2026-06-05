@@ -111,6 +111,33 @@ func TestWorkerStatus_WithCurrentTasks(t *testing.T) {
 	}
 }
 
+func TestFormatModelTiers_MultiProvider(t *testing.T) {
+	mtp := stubModelTierProvider{
+		tiers: map[string]map[string]string{
+			"fast": {
+				"claude-code": "haiku",
+				"codex":       "o4-mini",
+				"gemini":      "gemini-2.5-flash",
+			},
+		},
+		workers: []string{"claude-code", "codex", "gemini"},
+	}
+	got := formatModelTiers(mtp)
+	for _, want := range []string{"claude-code=haiku", "codex=o4-mini", "gemini=gemini-2.5-flash", "fast:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatModelTiers missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+type stubModelTierProvider struct {
+	tiers   map[string]map[string]string
+	workers []string
+}
+
+func (s stubModelTierProvider) ModelTierMap() map[string]map[string]string { return s.tiers }
+func (s stubModelTierProvider) WorkerAgentTypes() []string                 { return s.workers }
+
 func TestWorkerStatus_NoWorkers(t *testing.T) {
 	// Custom mock policy with no workers
 	repo := newMockRepository()

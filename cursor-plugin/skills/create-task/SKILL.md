@@ -31,6 +31,74 @@ A well-structured task has:
 - **priority** — 1=critical, 2=high, 3=normal (default), 4=low
 - **expected_duration_seconds** — enables SLA monitoring; the server alerts you if this is exceeded
 - **depends_on** — array of task IDs this task depends on
+- **model_tier** — named tier for worker model selection (`fast`, `standard`, `capable`). Resolved via `orchestration.model_tiers` in config at spawn time. **You decide per task.**
+- **model** — explicit CLI model override (e.g. `haiku`, `opus`). Takes precedence over `model_tier`.
+- **worker_type** — pin to a worker CLI type when using `assigned_to='any'`
+- **capabilities** — required worker capabilities for auto-assignment (e.g. a cheap-model pool tagged `fast`)
+
+## Model selection (driver decides)
+
+Pick the model tier on every `create_task`. Stringwork injects `--model` when spawning the worker. **Each tier maps per provider** (`claude-code`, `codex`, `gemini`) — the same `model_tier='fast'` yields `haiku` for Claude, `o4-mini` for Codex, and `gemini-2.5-flash` for Gemini.
+
+| Task signal | Suggested tier |
+|-------------|----------------|
+| Docs, style, simple reads | `fast` |
+| Standard feature or fix | `standard` |
+| Security, auth, large diffs, unclear root cause | `capable` |
+
+| Provider | Worker type | Example fast | Example standard | Example capable |
+|----------|-------------|--------------|------------------|-----------------|
+| Claude Code | `claude-code` | `haiku` | `sonnet` | `opus` |
+| Codex | `codex` | `o4-mini` | `gpt-5-codex` | `gpt-5-codex` |
+| Gemini | `gemini` | `gemini-2.5-flash` | `gemini-2.5-pro` | `gemini-2.5-pro` |
+
+Configure tier → model mappings in `~/.config/stringwork/config.yaml`:
+
+```yaml
+orchestration:
+  model_tiers:
+    fast:
+      claude-code: haiku
+      codex: o4-mini
+      gemini: gemini-2.5-flash
+    standard:
+      claude-code: sonnet
+      codex: gpt-5-codex
+      gemini: gemini-2.5-pro
+    capable:
+      claude-code: opus
+      codex: gpt-5-codex
+      gemini: gemini-2.5-pro
+  workers:
+    - type: claude-code
+      model: sonnet
+    - type: codex
+      model: gpt-5-codex
+    - type: gemini
+      model: gemini-2.5-pro
+```
+
+Pin a provider explicitly:
+
+```
+create_task title='Codex review' assigned_to='codex' model_tier='fast' created_by='cursor' ...
+create_task title='Gemini docs pass' assigned_to='gemini' model_tier='fast' created_by='cursor' ...
+```
+
+Example (auto-assign — orchestrator picks worker, tier resolves per provider):
+
+```
+create_task
+  title='Fix typo in README'
+  assigned_to='any'
+  created_by='cursor'
+  model_tier='fast'
+  description='Single-file docs fix.'
+```
+
+Call `worker_status` to see configured tier mappings for all worker types.
+
+Call `list_model_options` at session start for the full tier → model map and selection guidance.
 
 ## Examples
 

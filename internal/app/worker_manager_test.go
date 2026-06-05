@@ -2619,6 +2619,89 @@ func TestInjectModelFlag_UserOverride(t *testing.T) {
 	}
 }
 
+func TestResolveModel(t *testing.T) {
+	tiers := policy.ExampleModelTiers
+
+	tests := []struct {
+		name          string
+		task          *domain.Task
+		workerType    string
+		workerDefault string
+		want          string
+	}{
+		{
+			name:          "explicit task model wins",
+			task:          &domain.Task{Model: "claude-opus-4-5"},
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "claude-opus-4-5",
+		},
+		{
+			name:          "claude-code fast tier",
+			task:          &domain.Task{ModelTier: "fast"},
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "haiku",
+		},
+		{
+			name:          "codex fast tier",
+			task:          &domain.Task{ModelTier: "fast"},
+			workerType:    "codex",
+			workerDefault: "gpt-5-codex",
+			want:          "o4-mini",
+		},
+		{
+			name:          "gemini standard tier",
+			task:          &domain.Task{ModelTier: "standard"},
+			workerType:    "gemini",
+			workerDefault: "gemini-2.5-flash",
+			want:          "gemini-2.5-pro",
+		},
+		{
+			name:          "tier overrides worker default",
+			task:          &domain.Task{ModelTier: "capable"},
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "opus",
+		},
+		{
+			name:          "unknown tier falls back to worker default",
+			task:          &domain.Task{ModelTier: "unknown"},
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "sonnet",
+		},
+		{
+			name:          "tier missing worker type falls back",
+			task:          &domain.Task{ModelTier: "capable"},
+			workerType:    "gemini",
+			workerDefault: "gemini-2.5-flash",
+			want:          "gemini-2.5-pro",
+		},
+		{
+			name:          "empty task uses worker default",
+			task:          &domain.Task{},
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "sonnet",
+		},
+		{
+			name:          "nil task uses worker default",
+			task:          nil,
+			workerType:    "claude-code",
+			workerDefault: "sonnet",
+			want:          "sonnet",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveModel(tc.task, tc.workerType, tiers, tc.workerDefault); got != tc.want {
+				t.Errorf("resolveModel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHasModelFlag(t *testing.T) {
 	tests := []struct {
 		name string

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jaakkos/stringwork/internal/app"
 	"github.com/jaakkos/stringwork/internal/domain"
+	"github.com/jaakkos/stringwork/internal/policy"
 )
 
 // registerGetSessionContext registers the get_session_context tool.
@@ -171,6 +172,14 @@ func registerGetSessionContext(s *server.MCPServer, svc *app.CollabService, logg
 				if dashURL := registry.DashboardURL(); dashURL != "" {
 					buf.WriteByte('\n')
 					fmt.Fprintf(&buf, "Dashboard: %s\n", dashURL)
+				}
+
+				if guide := policy.FormatModelSelectionGuide(svc.Policy().Orchestration()); guide != "" {
+					if AgentIsDriverForSession(state, agent, svc.Policy().Orchestration(), isRunning) {
+						buf.WriteByte('\n')
+						buf.WriteString(guide)
+						buf.WriteByte('\n')
+					}
 				}
 
 				result = buf.String()

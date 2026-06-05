@@ -118,6 +118,11 @@ type OrchestrationConfig struct {
 	// after a crash, or when the orchestrator's pool was empty). Default:
 	// 30 seconds. Set to 0 to disable the sweep.
 	SpawnSweepGraceSeconds int `yaml:"spawn_sweep_grace_seconds"`
+	// ModelTiers maps tier names to concrete CLI model names per worker type
+	// (claude-code, codex, gemini). The driver sets task.model_tier on
+	// create_task; spawn resolves it here.
+	// Example: fast: {claude-code: haiku, codex: o4-mini, gemini: gemini-2.5-flash}
+	ModelTiers map[string]map[string]string `yaml:"model_tiers"`
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with

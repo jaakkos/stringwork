@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 )
 
 // registerWorkerStatus registers the worker_status tool (driver-oriented: list workers and their status).
-func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, wtp WorktreeInfoProvider, pip ProcessInfoProvider, bip BackoffInfoProvider) {
+func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, wtp WorktreeInfoProvider, pip ProcessInfoProvider, bip BackoffInfoProvider, mtp ModelTierProvider) {
 	s.AddTool(
 		mcp.NewTool("worker_status",
 			mcp.WithDescription("List all worker instances with status, progress, process activity, and worktree info. Shows what each worker is doing, how long since their last progress report, and whether their process is producing output."),
@@ -28,6 +29,12 @@ func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *l
 				driverID := state.DriverID
 				if driverID != "" {
 					result += fmt.Sprintf("Driver: %s\n\n", driverID)
+				}
+
+				if mtp != nil {
+					if block := formatModelTiers(mtp); block != "" {
+						result += block + "\n"
+					}
 				}
 
 				// Collect in-progress task info for enriching worker output
@@ -196,6 +203,38 @@ type taskProgressInfo struct {
 	Percent       int
 	SinceProgress string
 	SLAStatus     string
+}
+
+func formatModelTiers(mtp ModelTierProvider) string {
+	tiers := mtp.ModelTierMap()
+	if len(tiers) == 0 {
+		return ""
+	}
+	workers := mtp.WorkerAgentTypes()
+	if len(workers) == 0 {
+		workers = []string{"claude-code", "codex", "gemini"}
+	}
+	tierNames := make([]string, 0, len(tiers))
+	for name := range tiers {
+		tierNames = append(tierNames, name)
+	}
+	sort.Strings(tierNames)
+
+	var b strings.Builder
+	b.WriteString("Model tiers (per worker type — set model_tier on create_task):\n")
+	for _, tier := range tierNames {
+		mapping := tiers[tier]
+		parts := make([]string, 0, len(workers))
+		for _, wt := range workers {
+			model := mapping[wt]
+			if model == "" {
+				model = "(unset)"
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", wt, model))
+		}
+		b.WriteString(fmt.Sprintf("  %s: %s\n", tier, strings.Join(parts, ", ")))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // livenessVerdict returns a short string like "ALIVE (heartbeat 30s ago)",

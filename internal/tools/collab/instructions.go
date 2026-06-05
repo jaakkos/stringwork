@@ -290,6 +290,7 @@ func roleContextDriver(driverID string) string {
 
 Driver duties:
 - Delegate: create_task with assigned_to='any' (include relevant_files, background, constraints)
+- Model: set model_tier (fast|standard|capable) or model on each create_task — see Model selection in session context or call list_model_options
 - Monitor: worker_status and read_messages — workers report findings TO you
 - Control: cancel_agent when a worker is stuck or no longer needed
 
@@ -323,6 +324,7 @@ func InstructionsForRole(agent string, driverID string) string {
 
 ## As Driver
 - create_task with assigned_to='any' to let the server assign to a worker (use relevant_files, background, constraints for scope)
+- Set model_tier on create_task for cost-aware delegation (fast|standard|capable) — call list_model_options or read Model selection in get_session_context
 - handoff to a specific worker instance or to the driver for review
 - request_review to get code review from a worker
 - You can also claim and do tasks yourself (hybrid mode)

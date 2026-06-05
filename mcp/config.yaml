@@ -184,6 +184,21 @@ orchestration:
   #                                      handles the happy case; the sweep is the safety net for tasks
   #                                      created when no live worker was available (post-crash, empty
   #                                      pool). Set to 0 (or any negative) to disable the sweep.
+  #
+  # Model tiers — the driver sets model_tier on each create_task; spawn resolves
+  # to a concrete --model per worker CLI. Omit model_tier to use workers[].model.
+  # model_tiers:
+  #   fast:
+  #     claude-code: haiku
+  #     codex: o4-mini
+  #     gemini: gemini-2.5-flash
+  #   standard:
+  #     claude-code: sonnet
+  #     codex: gpt-5-codex
+  #   capable:
+  #     claude-code: opus
+  #     codex: gpt-5-codex
+  #     gemini: gemini-2.5-pro
   # Git worktree isolation (optional): each worker gets its own checkout.
   # worktrees:
   #   enabled: true
