@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -401,17 +403,27 @@ orchestration:
 	var taskStatus, resultSummary, progressDesc string
 	var progressPercent int
 
-	waitFor(t, 30*time.Second, "task transitions to completed via spawned worker", func() (bool, string) {
-		db := openDB()
-		defer db.Close()
-		row := db.QueryRow(`SELECT id, status, result_summary, progress_description, progress_percent
-                              FROM tasks ORDER BY id DESC LIMIT 1`)
-		if err := row.Scan(&taskID, &taskStatus, &resultSummary, &progressDesc, &progressPercent); err != nil {
-			return false, "no task row yet: " + err.Error()
+	// Poll via MCP, not by opening state.sqlite. A read-only DB handle from the
+	// test process contends with the daemon's full-table Save() and flakes on
+	// slow CI runners (SQLITE_BUSY in the spawned worker's CLI calls).
+	listTaskRe := regexp.MustCompile(`(?m)^Task #(\d+) \[([a-z_]+)\]`)
+	waitFor(t, 60*time.Second, "task transitions to completed via spawned worker", func() (bool, string) {
+		out := cli.toolCall(t, 3, "list_tasks", map[string]any{"status": "all"})
+		m := listTaskRe.FindStringSubmatch(out)
+		if m == nil {
+			return false, "list_tasks returned no task rows yet"
 		}
-		return taskStatus == "completed", fmt.Sprintf("task #%d status=%s progress=%q (%d%%)",
-			taskID, taskStatus, progressDesc, progressPercent)
+		taskID, _ = strconv.Atoi(m[1])
+		taskStatus = m[2]
+		return taskStatus == "completed", fmt.Sprintf("task #%d status=%s", taskID, taskStatus)
 	})
+
+	db := openDB()
+	defer db.Close()
+	row := db.QueryRow(`SELECT result_summary, progress_description, progress_percent FROM tasks WHERE id = ?`, taskID)
+	if err := row.Scan(&resultSummary, &progressDesc, &progressPercent); err != nil {
+		t.Fatalf("read completed task row: %v", err)
+	}
 
 	if taskID == 0 {
 		t.Fatalf("expected exactly one task to exist after create_task")
@@ -425,9 +437,6 @@ orchestration:
 	if progressPercent != 50 {
 		t.Errorf("expected progress_percent=50 set by worker; got %d", progressPercent)
 	}
-
-	db := openDB()
-	defer db.Close()
 
 	rows, err := db.Query(`SELECT instance_id, agent_type, status FROM agent_instances`)
 	if err != nil {
@@ -470,9 +479,9 @@ orchestration:
 	}
 
 	var heartbeatTouched int
-	row := db.QueryRow(`SELECT COUNT(*) FROM agent_instances
+	hbRow := db.QueryRow(`SELECT COUNT(*) FROM agent_instances
                          WHERE instance_id LIKE 'e2e-fake-worker%'
                            AND last_heartbeat <> ''`)
-	_ = row.Scan(&heartbeatTouched)
+	_ = hbRow.Scan(&heartbeatTouched)
 	t.Logf("e2e-fake-worker rows with non-empty last_heartbeat: %d", heartbeatTouched)
 }
