@@ -514,6 +514,30 @@ func TestClassifyWorkerError_QuotaWithResetTime(t *testing.T) {
 	}
 }
 
+func TestClassifyWorkerError_MonthlySpendLimit(t *testing.T) {
+	output := `Error: You have reached your monthly spend limit for this organization.`
+	info := classifyWorkerError(output)
+	if info.Class != workerErrorQuotaExhausted {
+		t.Fatalf("expected quota_exhausted, got %s", info.Class)
+	}
+}
+
+func TestClassifyWorkerError_UsageCredits(t *testing.T) {
+	output := `billing error: usage-credits exhausted for this account`
+	info := classifyWorkerError(output)
+	if info.Class != workerErrorQuotaExhausted {
+		t.Fatalf("expected quota_exhausted, got %s", info.Class)
+	}
+}
+
+func TestClassifyWorkerError_APIErrorStatus429(t *testing.T) {
+	output := `{"type":"result","subtype":"error","is_error":true,"api_error_status":429,"result":"rate limited"}`
+	info := classifyWorkerError(output)
+	if info.Class != workerErrorQuotaExhausted {
+		t.Fatalf("expected quota_exhausted, got %s", info.Class)
+	}
+}
+
 func TestClassifyWorkerError_QuotaWithoutResetTime(t *testing.T) {
 	output := `Error: 429 Too many requests. You have exceeded your quota.`
 

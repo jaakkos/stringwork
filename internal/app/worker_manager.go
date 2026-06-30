@@ -22,6 +22,7 @@ import (
 	"github.com/jaakkos/stringwork/internal/constitution"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
+	"github.com/jaakkos/stringwork/internal/quota"
 	"github.com/jaakkos/stringwork/internal/worktree"
 )
 
@@ -142,6 +143,9 @@ type WorkerManager struct {
 	// standalone main wiring via SetConstitutionSources so the policy
 	// owns discovery and this manager stays free of policy types.
 	constitutionSourcesFn func() []constitution.Source
+	// quotaMonitor holds cached zero-token quota state. Own mutex — never
+	// acquire WorkerManager.mu while holding the monitor lock.
+	quotaMonitor *quota.Monitor
 }
 
 // spawnSkipLogWindow is the minimum interval between two log lines for the
@@ -493,6 +497,10 @@ func classifyWorkerError(output string) workerErrorInfo {
 		strings.Contains(lower, "quota") && strings.Contains(lower, "exhausted") ||
 		strings.Contains(lower, "rate limit") && strings.Contains(lower, "exceeded") ||
 		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "spend limit") ||
+		strings.Contains(lower, "usage-credits") ||
+		strings.Contains(lower, "monthly spend") ||
+		strings.Contains(output, `"api_error_status":429`) ||
 		strings.Contains(output, "429") && (strings.Contains(lower, "quota") || strings.Contains(lower, "rate")) {
 		info := workerErrorInfo{
 			Class:   workerErrorQuotaExhausted,
@@ -541,6 +549,24 @@ func classifyWorkerError(output string) workerErrorInfo {
 	}
 
 	return workerErrorInfo{Class: workerErrorTransient}
+}
+
+// SetQuotaMonitor attaches a quota preflight monitor (cache-read-only on spawn).
+func (m *WorkerManager) SetQuotaMonitor(mon *quota.Monitor) {
+	m.quotaMonitor = mon
+}
+
+// QuotaSnapshot returns cached quota state for worker_status / CLI.
+func (m *WorkerManager) QuotaSnapshot() []quota.SnapshotEntry {
+	if m.quotaMonitor == nil {
+		return nil
+	}
+	return m.quotaMonitor.Snapshot()
+}
+
+// DrainQueueForType drains pending spawns for one agent type (e.g. after quota unblocks).
+func (m *WorkerManager) DrainQueueForType(agentType string) {
+	m.drainQueue(agentType)
 }
 
 // SetConstitutionSources installs the discovery callback used to
@@ -1341,28 +1367,38 @@ func (m *WorkerManager) ResetFailureBackoff(instanceID string) {
 	}
 }
 
-// BackedOffAgentTypes returns agent types currently in failure backoff
-// (rate-limited, auth failure, etc.) that should not receive new tasks.
+// BackedOffAgentTypes returns agent types in failure backoff or quota preflight block.
 func (m *WorkerManager) BackedOffAgentTypes() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seen := make(map[string]bool)
 	var result []string
+	add := func(agentType string) {
+		if agentType == "" || seen[agentType] {
+			return
+		}
+		seen[agentType] = true
+		result = append(result, agentType)
+	}
+	if m.quotaMonitor != nil {
+		for _, agentType := range m.quotaMonitor.BlockedTypes() {
+			add(agentType)
+		}
+	}
 	for _, c := range m.configs {
 		if seen[c.AgentType] {
 			continue
 		}
-		seen[c.AgentType] = true
 		failures := m.consecutiveFailures[c.AgentType]
 		if failures == 0 {
 			continue
 		}
 		if until, ok := m.backoffUntil[c.AgentType]; ok && time.Until(until) > 0 {
-			result = append(result, c.AgentType)
+			add(c.AgentType)
 			continue
 		}
 		if failures >= failureBackoffMaxCount {
-			result = append(result, c.AgentType)
+			add(c.AgentType)
 		}
 	}
 	return result
@@ -1410,9 +1446,13 @@ func (m *WorkerManager) WorkerAgentTypes() []string {
 	return m.KnownAgentTypes()
 }
 
-// BackoffInfoForType returns the backoff status for a specific agent type:
-// backed off (bool), remaining duration, and reason summary.
+// BackoffInfoForType returns merged backoff ∪ quota-cache status for one agent type.
 func (m *WorkerManager) BackoffInfoForType(agentType string) (blocked bool, remaining time.Duration, reason string) {
+	if m.quotaMonitor != nil {
+		if blocked, remaining, reason := m.quotaMonitor.BlockedInfo(agentType); blocked {
+			return blocked, remaining, reason
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	failures := m.consecutiveFailures[agentType]
@@ -2670,6 +2710,15 @@ func (m *WorkerManager) SpawnForTask(taskID int, assignedTo string) {
 		return
 	}
 
+	if m.quotaMonitor != nil {
+		if blocked, until, reason := m.quotaMonitor.Blocked(cfg.AgentType); blocked {
+			m.logger.Printf("WorkerManager: SpawnForTask(%d) — %s quota blocked (%s), queuing", taskID, cfg.AgentType, reason)
+			m.enqueueSpawn(cfg.AgentType, taskID)
+			m.notifyQuotaBlocked(cfg.AgentType, reason, until)
+			return
+		}
+	}
+
 	running := m.countRunningByType(cfg.AgentType)
 	limit := m.instanceLimitForType(cfg.AgentType)
 	if running >= limit {
@@ -2969,6 +3018,14 @@ func (m *WorkerManager) drainQueue(agentType string) {
 		return
 	}
 
+	if m.quotaMonitor != nil {
+		if blocked, _, reason := m.quotaMonitor.Blocked(agentType); blocked {
+			m.logger.Printf("WorkerManager: drainQueue — %s quota blocked (%s), re-queuing task #%d", agentType, reason, next.TaskID)
+			m.enqueueSpawn(agentType, next.TaskID)
+			return
+		}
+	}
+
 	running := m.countRunningByType(agentType)
 	limit := m.instanceLimitForType(agentType)
 	if running >= limit {
@@ -3077,6 +3134,28 @@ func (m *WorkerManager) sendTaskSpawnAck(instanceID, recipient string, taskID in
 			ID:        s.NextMsgID,
 			From:      "system",
 			To:        recipient,
+			Content:   content,
+			Timestamp: time.Now(),
+		})
+		s.NextMsgID++
+		return nil
+	})
+}
+
+func (m *WorkerManager) notifyQuotaBlocked(agentType, reason string, until time.Time) {
+	if m.stateMutator == nil {
+		return
+	}
+	content := fmt.Sprintf("⏸️ **%s** quota preflight blocked spawn (%s). Task queued; will retry when quota clears.", agentType, reason)
+	if !until.IsZero() {
+		content = fmt.Sprintf("⏸️ **%s** quota preflight blocked spawn (%s). Resets ~%s. Task queued.",
+			agentType, reason, until.Format(time.RFC3339))
+	}
+	_ = m.stateMutator(func(s *domain.CollabState) error {
+		s.Messages = append(s.Messages, domain.Message{
+			ID:        s.NextMsgID,
+			From:      "system",
+			To:        m.driver(),
 			Content:   content,
 			Timestamp: time.Now(),
 		})

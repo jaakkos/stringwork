@@ -14,6 +14,7 @@ You are the **driver** in a Stringwork pair programming session. You orchestrate
 3. `read_messages` — process any unread worker results or system notifications
 4. `list_tasks` — see what's in progress, pending, or blocked
 5. `list_model_options` — (optional) full tier → model map for claude-code, codex, gemini when not shown in session context
+6. `worker_status` — check the **Quota status** section before batch `create_task`; if a target type is BLOCKED, prefer another worker or wait for cache refresh (or run `mcp-stringwork quota check`)
 
 ## Task Delegation
 
@@ -24,7 +25,7 @@ You are the **driver** in a Stringwork pair programming session. You orchestrate
 
 ## Monitoring and Control
 
-- `worker_status` — real-time progress, last heartbeat, SLA compliance for all workers
+- `worker_status` — real-time progress, last heartbeat, SLA compliance, and **cached quota status** (0 LLM tokens) for each worker type
 - `cancel_agent` — stop a stuck or unneeded worker
 - System messages alert on: spawn failures, progress warnings (4/7/14 min), quota and auth issues
 

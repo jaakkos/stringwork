@@ -94,8 +94,25 @@ Add to `.cursor/mcp.json` in your project:
       "env": { "MCP_CONFIG": "/path/to/config.yaml" }
     }
   }
+  # Optional: zero-token quota preflight before worker spawn (default off).
+  # Uses OAuth tokens only — API-key auth fails open (never blocks).
+  quota_preflight:
+    enabled: false
+    cache_ttl_seconds: 120
+    background_refresh_seconds: 300
+    fail_open: true
 }
 ```
+
+Check quota manually (no daemon required):
+
+```bash
+mcp-stringwork quota check
+mcp-stringwork quota check --json
+mcp-stringwork quota check --agent claude-code
+```
+
+When enabled, `worker_status` includes a **Quota status** section (cached). The driver should read it before mass `create_task` calls.
 
 Cursor starts the server as a subprocess via stdio.
 

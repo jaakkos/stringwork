@@ -16,7 +16,7 @@ import (
 )
 
 // registerWorkerStatus registers the worker_status tool (driver-oriented: list workers and their status).
-func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, wtp WorktreeInfoProvider, pip ProcessInfoProvider, bip BackoffInfoProvider, mtp ModelTierProvider) {
+func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, wtp WorktreeInfoProvider, pip ProcessInfoProvider, bip BackoffInfoProvider, qip QuotaSnapshotProvider, mtp ModelTierProvider) {
 	s.AddTool(
 		mcp.NewTool("worker_status",
 			mcp.WithDescription("List all worker instances with status, progress, process activity, and worktree info. Shows what each worker is doing, how long since their last progress report, and whether their process is producing output."),
@@ -175,10 +175,31 @@ func registerWorkerStatus(s *server.MCPServer, svc *app.CollabService, logger *l
 						result += "\nRate-Limited Workers:\n"
 						for _, agentType := range backedOff {
 							_, remaining, reason := bip.BackoffInfoForType(agentType)
+							if reason == "quota-preflight" {
+								continue
+							}
 							if remaining > 0 {
 								result += fmt.Sprintf("  - %s: %s (auto-retry in %s)\n", agentType, reason, remaining.Round(time.Second))
 							} else {
 								result += fmt.Sprintf("  - %s: %s (manual restart required)\n", agentType, reason)
+							}
+						}
+					}
+				}
+
+				if qip != nil {
+					snap := qip.QuotaSnapshot()
+					if len(snap) > 0 {
+						result += "\nQuota status (cached, 0 LLM tokens):\n"
+						for _, entry := range snap {
+							if entry.Blocked {
+								result += fmt.Sprintf("  %s: BLOCKED — %s (checked %s)\n",
+									entry.AgentType, entry.Summary, entry.Age)
+							} else if entry.State == "unknown" {
+								result += fmt.Sprintf("  %s: unknown — %s\n", entry.AgentType, entry.Summary)
+							} else {
+								result += fmt.Sprintf("  %s: OK — %s (checked %s)\n",
+									entry.AgentType, entry.Summary, entry.Age)
 							}
 						}
 					}

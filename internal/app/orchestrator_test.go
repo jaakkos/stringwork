@@ -308,6 +308,23 @@ func TestAssignTask_FallbackSkipsBackedOffTypes(t *testing.T) {
 	}
 }
 
+func TestAssignTask_FallbackSkipsQuotaBlockedType(t *testing.T) {
+	orch := NewTaskOrchestrator(nil, "least_loaded")
+	orch.SetKnownTypesProvider(fakeKnownTypes{types: []string{"claude-code", "codex"}})
+	orch.SetBackoffChecker(fakeBackoffChecker{excluded: []string{"claude-code"}})
+
+	state := &domain.CollabState{
+		DriverID:       "cursor",
+		AgentInstances: map[string]*domain.AgentInstance{},
+	}
+	task := &domain.Task{ID: 1, Title: "Quota skip", Status: "pending", AssignedTo: "any"}
+
+	result := orch.AssignTask(task, state)
+	if result != "codex" {
+		t.Errorf("expected codex when claude-code quota-blocked, got %q", result)
+	}
+}
+
 // TestAssignTask_FallbackReturnsEmptyWhenAllBackedOff confirms that the
 // fallback doesn't manufacture an answer when every configured type is in
 // backoff. Returning "" here is the right behavior — no point spawning into

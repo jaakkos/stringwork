@@ -24,6 +24,7 @@ import (
 	"github.com/jaakkos/stringwork/internal/dashboard"
 	"github.com/jaakkos/stringwork/internal/domain"
 	"github.com/jaakkos/stringwork/internal/policy"
+	"github.com/jaakkos/stringwork/internal/quota"
 	"github.com/jaakkos/stringwork/internal/repository"
 	"github.com/jaakkos/stringwork/internal/repository/sqlite"
 	"github.com/jaakkos/stringwork/internal/tools/collab"
@@ -78,6 +79,9 @@ func main() {
 			return
 		case "constitution":
 			runConstitutionCommand(os.Args[2:])
+			return
+		case "quota":
+			runQuotaCommand(os.Args[2:])
 			return
 		case "task-template":
 			runTaskTemplateCommand(os.Args[2:])
@@ -481,6 +485,47 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 			})
 		}
 		logger.Printf("WorkerManager enabled: driver=%s, %d worker type(s)", orchCfg.Driver, len(orchCfg.Workers))
+		if orchCfg.QuotaPreflightEnabled() {
+			qcfg := orchCfg.ResolvedQuotaPreflight()
+			failOpen := true
+			if qcfg.FailOpen != nil {
+				failOpen = *qcfg.FailOpen
+			}
+			checkers := quota.BuildCheckers(orchCfg.ConfiguredWorkerTypes())
+			qmon := quota.NewMonitor(checkers, quota.MonitorConfig{
+				CacheTTL: time.Duration(qcfg.CacheTTLSeconds) * time.Second,
+				FailOpen: failOpen,
+			}, logger)
+			qmon.SetOnTransition(func(agentType string, wasBlocked, nowBlocked bool) {
+				if wasBlocked && !nowBlocked {
+					wm.DrainQueueForType(agentType)
+				}
+			})
+			wm.SetQuotaMonitor(qmon)
+			warmCtx, warmCancel := context.WithTimeout(ctx, 10*time.Second)
+			qmon.Refresh(warmCtx)
+			warmCancel()
+			if qcfg.BackgroundRefreshSeconds > 0 {
+				interval := time.Duration(qcfg.BackgroundRefreshSeconds) * time.Second
+				go func() {
+					ticker := time.NewTicker(interval)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							qmon.Refresh(refreshCtx)
+							cancel()
+						}
+					}
+				}()
+				logger.Printf("QuotaMonitor enabled: cache_ttl=%ds refresh=%ds", qcfg.CacheTTLSeconds, qcfg.BackgroundRefreshSeconds)
+			} else {
+				logger.Printf("QuotaMonitor enabled: cache_ttl=%ds (startup warm only)", qcfg.CacheTTLSeconds)
+			}
+		}
 		wm.Preflight()
 	}
 
@@ -500,6 +545,7 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		regOpts = append(regOpts, collab.WithTaskSpawner(wm))
 		regOpts = append(regOpts, collab.WithSessionIDRecorder(wm))
 		regOpts = append(regOpts, collab.WithBackoffProvider(wm))
+		regOpts = append(regOpts, collab.WithQuotaProvider(wm))
 		regOpts = append(regOpts, collab.WithModelTierProvider(wm))
 	}
 	if wtManager != nil {

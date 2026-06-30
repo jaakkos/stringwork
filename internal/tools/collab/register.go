@@ -7,6 +7,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/jaakkos/stringwork/internal/app"
+	"github.com/jaakkos/stringwork/internal/quota"
 )
 
 // RegisterOption configures optional dependencies for tool registration.
@@ -63,12 +64,18 @@ type SessionIDRecorder interface {
 	SetWorkerSessionID(instanceID, sessionID string)
 }
 
+// QuotaSnapshotProvider exposes cached quota state for worker_status.
+type QuotaSnapshotProvider interface {
+	QuotaSnapshot() []quota.SnapshotEntry
+}
+
 type registerOpts struct {
 	canceller         WorkerCanceller
 	worktreeProvider  WorktreeInfoProvider
 	processProvider   ProcessInfoProvider
 	taskSpawner       TaskSpawner
 	backoffProvider   BackoffInfoProvider
+	quotaProvider     QuotaSnapshotProvider
 	modelTierProvider ModelTierProvider
 	sessionIDRecorder SessionIDRecorder
 }
@@ -97,6 +104,11 @@ func WithTaskSpawner(s TaskSpawner) RegisterOption {
 // WithBackoffProvider enables rate-limit/backoff visibility in worker_status output.
 func WithBackoffProvider(p BackoffInfoProvider) RegisterOption {
 	return func(o *registerOpts) { o.backoffProvider = p }
+}
+
+// WithQuotaProvider enables cached quota preflight status in worker_status output.
+func WithQuotaProvider(p QuotaSnapshotProvider) RegisterOption {
+	return func(o *registerOpts) { o.quotaProvider = p }
 }
 
 // WithModelTierProvider shows configured model_tiers in worker_status output.
@@ -151,7 +163,7 @@ func Register(s *server.MCPServer, svc *app.CollabService, logger *log.Logger, r
 	registerListAgents(s, svc, logger)
 
 	// Driver/worker tools (4)
-	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider, o.backoffProvider, o.modelTierProvider)
+	registerWorkerStatus(s, svc, logger, o.worktreeProvider, o.processProvider, o.backoffProvider, o.quotaProvider, o.modelTierProvider)
 	registerWorkerOutput(s, svc, logger, o.processProvider)
 	registerHeartbeat(s, svc, logger, o.sessionIDRecorder)
 	registerCancelAgent(s, svc, logger, o.canceller, o.processProvider)

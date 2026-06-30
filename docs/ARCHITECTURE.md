@@ -50,12 +50,15 @@ cmd/mcp-server (main, CLI)
 ### Worker lifecycle
 
 1. Driver creates a task with `assigned_to='any'`
-2. `TaskOrchestrator` assigns it to a worker type based on strategy (least_loaded or capability_match)
-3. `WorkerManager` spawns the worker process with the configured command (includes constraint compliance rules in spawn prompt; for Gemini, auto-generates `GEMINI_SYSTEM_MD`)
-4. Worker connects to MCP server, claims the task (constraints surfaced inline), calls `get_work_context` to check constraints, does work
-5. `Watchdog` monitors heartbeats and progress reports, escalates if silent, auto-cancels unresponsive workers
-6. Worker completes task and sends findings; process exits
-7. `WorkerManager` cleans up (worktree, process resources)
+2. `TaskOrchestrator` assigns it to a worker type based on strategy (least_loaded or capability_match), skipping types in failure backoff or **quota preflight block**
+3. `WorkerManager.SpawnForTask` reads the **quota cache only** (no HTTP on the synchronous `create_task` path). If the type is explicitly blocked, the task is queued and the driver gets a system message; stale/empty cache fails open and kicks a background refresh
+4. `WorkerManager` spawns the worker process with the configured command (includes constraint compliance rules in spawn prompt; for Gemini, auto-generates `GEMINI_SYSTEM_MD`)
+5. Worker connects to MCP server, claims the task (constraints surfaced inline), calls `get_work_context` to check constraints, does work
+6. `Watchdog` monitors heartbeats and progress reports, escalates if silent, auto-cancels unresponsive workers
+7. Worker completes task and sends findings; process exits
+8. `WorkerManager` cleans up (worktree, process resources)
+
+**Quota preflight** (`internal/quota`, opt-in via `orchestration.quota_preflight.enabled`): background HTTP checks against stored OAuth tokens (Anthropic usage, ChatGPT wham/usage, Gemini Code Assist) — **0 LLM tokens**. State lives in `quota.Monitor` cache, merged into `BackedOffAgentTypes` / `BackoffInfoForType` at read time (not written to `backoffUntil`). When a type transitions blocked→available, queued spawns are drained. CLI: `mcp-stringwork quota check [--json] [--agent TYPE]` (no daemon).
 
 If a worker is cancelled or crashes mid-task, `WorkerManager` captures its recent output and stores it in the task's `WorkContext.PreviousOutput`. When a replacement worker is spawned, this output is injected into its prompt so no information is lost across restarts.
 

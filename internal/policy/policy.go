@@ -123,6 +123,49 @@ type OrchestrationConfig struct {
 	// create_task; spawn resolves it here.
 	// Example: fast: {claude-code: haiku, codex: o4-mini, gemini: gemini-2.5-flash}
 	ModelTiers map[string]map[string]string `yaml:"model_tiers"`
+	// QuotaPreflight enables zero-token HTTP quota checks before worker spawn.
+	QuotaPreflight *QuotaPreflightConfig `yaml:"quota_preflight"`
+}
+
+// QuotaPreflightConfig controls background quota cache refresh and spawn gating.
+type QuotaPreflightConfig struct {
+	Enabled                  bool  `yaml:"enabled"`
+	CacheTTLSeconds          int   `yaml:"cache_ttl_seconds"`
+	BackgroundRefreshSeconds int   `yaml:"background_refresh_seconds"`
+	FailOpen                 *bool `yaml:"fail_open"`
+}
+
+// ResolvedQuotaPreflight returns quota preflight settings with defaults applied.
+func (o *OrchestrationConfig) ResolvedQuotaPreflight() QuotaPreflightConfig {
+	def := QuotaPreflightConfig{
+		CacheTTLSeconds:          120,
+		BackgroundRefreshSeconds: 300,
+	}
+	failOpen := true
+	if o == nil || o.QuotaPreflight == nil {
+		def.FailOpen = &failOpen
+		return def
+	}
+	q := *o.QuotaPreflight
+	if q.CacheTTLSeconds <= 0 {
+		q.CacheTTLSeconds = 120
+	}
+	if q.BackgroundRefreshSeconds == 0 && !o.QuotaPreflight.Enabled {
+		q.BackgroundRefreshSeconds = 300
+	}
+	if o.QuotaPreflight.FailOpen != nil {
+		failOpen = *o.QuotaPreflight.FailOpen
+	}
+	q.FailOpen = &failOpen
+	return q
+}
+
+// QuotaPreflightEnabled reports whether spawn-time quota cache reads are active.
+func (o *OrchestrationConfig) QuotaPreflightEnabled() bool {
+	if o == nil || o.QuotaPreflight == nil {
+		return false
+	}
+	return o.QuotaPreflight.Enabled
 }
 
 // MCPServerConfig describes an MCP server that should be auto-registered with
