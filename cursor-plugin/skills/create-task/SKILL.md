@@ -100,6 +100,35 @@ Call `worker_status` to see configured tier mappings for all worker types.
 
 Call `list_model_options` at session start for the full tier → model map and selection guidance.
 
+## Mechanical executor brief (5 elements)
+
+Delegates start with **no shared conversation context**. A complete brief includes:
+
+1. **Task / outcome** — what done looks like
+2. **Files / targets** — exact paths to touch and what NOT to touch
+3. **Upstream decisions** — choices already made (so the delegate does not re-litigate)
+4. **Verification** — which lint/build/test must pass
+5. **Commit** — whether to commit (default: **NO** — propose a message instead)
+
+If (1)–(4) are missing or ambiguous, the delegate should make safe mechanical
+progress only, then STOP and report what is missing.
+
+For routing (when to delegate vs keep on the driver, what never to delegate):
+team playbooks that adopt mechanical-executor routing (e.g. RegFin
+`docs/ai-token-efficiency.md` — section *Mechanical executor routing*).
+
+## How the worker should report back
+
+Include in every task `description`:
+
+> Return a structured report: **Changed** / **Verified** (quote the key pass/fail
+> line from actual output) / **Decisions I had to make** / **Blocked** / **Commit**
+> (proposed). Report outcomes, not a command-by-command narration.
+
+Canonical contract (vendor-neutral): `Changed` / `Verified` / `Decisions` /
+`Blocked` / `Commit` — see team playbooks that adopt this pattern (e.g. RegFin
+`docs/ai-agent-best-practices.md` §3.4).
+
 ## Examples
 
 ### Implementation task
