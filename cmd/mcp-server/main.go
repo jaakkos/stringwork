@@ -86,6 +86,9 @@ func main() {
 		case "task-template":
 			runTaskTemplateCommand(os.Args[2:])
 			return
+		case "hooks":
+			runHooksCommand(os.Args[2:])
+			return
 		case "--version", "-v", "version":
 			fmt.Println("mcp-stringwork " + Version)
 			return
@@ -451,6 +454,10 @@ func initializeServer(cfg *policy.Config, pol *policy.Policy) *serverBundle {
 		// prompts pick up rule changes (and config reloads) on the next
 		// task without restarting the daemon.
 		wm.SetConstitutionSources(pol.ConstitutionSources)
+		// Bind hooks config so the {worker_rules} spawn-prompt placeholder
+		// (used by CLI-spawned workers like Codex/Gemini) respects
+		// hooks.platforms.<type>.worker.spawn overrides.
+		wm.SetHooksConfig(pol.Hooks())
 		if mcpCfg := pol.MCPServers(); len(mcpCfg) > 0 {
 			var entries []app.MCPServerEntry
 			for name, sc := range mcpCfg {

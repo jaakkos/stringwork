@@ -111,6 +111,13 @@ When another agent is the driver (e.g. `driver: claude-code` in config), Cursor 
 - Reporting progress with `heartbeat` and `report_progress` while working
 - Sending findings to the driver via `send_message`
 
+The Cursor plugin's `sessionStart` hook (`cursor-plugin/hooks/hooks.json` ->
+`emit-session-hooks.sh`) reflects this: it delegates to `mcp-stringwork hooks
+emit --event session_start --platform cursor`, which prints the mandatory
+worker rules when Cursor resolves as a manual worker (as above), and prints
+nothing when Cursor is the driver (the default — `orchestration.driver:
+auto`/`cursor`). See [docs/WORKFLOW.md](../WORKFLOW.md#editor-hooks-role-aware-rule-injection).
+
 ## Troubleshooting
 
 - **Server not responding:** Check binary path and execute permission.

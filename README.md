@@ -233,6 +233,8 @@ Claude Code's `CLAUDE.md` instructions are wrapped in a "may or may not be relev
 
 Hooks are installed at user level (`~/.claude/settings.json`) so they work across all projects. They inject progress reporting rules as clean system-reminder messages — no disclaimer, survives context compaction. Scripts have a guard and do nothing in non-Stringwork projects.
 
+Hooks are **role-aware**: a session resolved as the orchestration driver gets silence by default, not worker progress-reporting reminders — see [docs/WORKFLOW.md](docs/WORKFLOW.md#editor-hooks-role-aware-rule-injection) for how role resolution works and how to override it per platform via the `hooks:` block in `mcp/config.yaml`.
+
 See [Claude Code config](docs/mcp-client-configs/claude-code-config.md) for details.
 
 ## CLI

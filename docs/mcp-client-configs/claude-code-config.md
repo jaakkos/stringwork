@@ -79,19 +79,23 @@ Claude Code's `CLAUDE.md` instructions get "may or may not be relevant" framing 
 ./scripts/uninstall-claude-hooks.sh  # clean removal
 ```
 
-Install copies hook scripts to `~/.config/stringwork/hooks/` and merges hook config into `~/.claude/settings.json` (user level — works for all projects). The scripts have a guard: they only activate when `~/.config/stringwork/state.sqlite` exists, so they're harmless in non-Stringwork projects.
+Install copies thin shim scripts to `~/.config/stringwork/hooks/` and merges hook config into `~/.claude/settings.json` (user level — works for all projects, merged surgically so other tools' hooks in the same file are preserved). The shims have a guard: they only activate when `~/.config/stringwork/state.sqlite` exists, so they're harmless in non-Stringwork projects.
 
-Uninstall removes the hook scripts, strips the `hooks` key from `~/.claude/settings.json` (preserving other settings), and removes the `/pair-respond` command.
+Uninstall removes only Stringwork's own `SessionStart`/`UserPromptSubmit`/`Stop` entries from `~/.claude/settings.json` (matched by command path — any other hooks you've configured are untouched) and removes the `/pair-respond` command.
 
 ### What the hooks do
 
-| Script | Event | Purpose |
-|--------|-------|---------|
-| `inject-rules.sh` | `SessionStart` | Injects mandatory rules at startup and after every context compaction |
-| `inject-reminder.sh` | `UserPromptSubmit` | Short reminder on every prompt (~30 tokens) |
-| `stop-check.sh` | `Stop` | Reminds Claude to report findings before finishing |
+Each shim delegates to `mcp-stringwork hooks emit --event <event> --platform claude-code`, which resolves this session's **role** (driver vs worker — see `internal/app.ResolveHookRole`) before deciding what to print:
+
+| Script | Event | Purpose (worker role) | Driver role |
+|--------|-------|------------------------|-------------|
+| `inject-rules.sh` | `SessionStart` | Injects mandatory rules at startup and after every context compaction | Silent by default |
+| `inject-reminder.sh` | `UserPromptSubmit` | Short reminder on every prompt (~30 tokens) | Silent by default |
+| `stop-check.sh` | `Stop` | Reminds Claude to report findings before finishing | Silent by default |
 
 `SessionStart` fires on `startup`, `resume`, `clear`, and `compact`, so rules survive context compaction.
+
+A session resolves as **driver** when `orchestration.driver` in `~/.config/stringwork/config.yaml` is `auto` or equals `claude-code`, and `STRINGWORK_AGENT` isn't set (i.e. this isn't a Stringwork-spawned worker process). Everything else — including a human running Claude Code as a manual worker under `driver: cursor` — resolves as **worker** and gets the full text, same as before this role split existed. Override per-event/per-role behavior under `hooks.platforms.claude-code` in config.yaml, or disable injection entirely with `hooks.enabled: false`. See [docs/WORKFLOW.md](../WORKFLOW.md#editor-hooks-role-aware-rule-injection).
 
 ### Why hooks instead of CLAUDE.md?
 

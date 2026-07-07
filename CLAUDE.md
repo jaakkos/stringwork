@@ -209,6 +209,23 @@ Claude Code can be the driver by setting `driver: claude-code` in config. This r
 
 See [docs/examples/config-claude-code-driver.yaml](docs/examples/config-claude-code-driver.yaml) for a complete example.
 
+### Editor/CLI hooks respect role — driver sessions don't get worker reminders
+
+The mandatory progress-reporting rules above are injected into Claude Code and
+Cursor sessions via editor hooks (`SessionStart`/`UserPromptSubmit`/`Stop`),
+not just this file. Those hooks resolve **role** per session — a driver
+session (this platform is `orchestration.driver`, or `driver: auto` and a
+human is at the keyboard with no `STRINGWORK_AGENT` set) gets silence by
+default, not the "call heartbeat every 60-90s" reminders. A worker session
+(spawned by Stringwork, or a human running an agent CLI/editor that isn't the
+configured driver) still gets the full text.
+
+Set `orchestration.driver` in `~/.config/stringwork/config.yaml` to `auto` or
+the platform you're driving from to get this behavior automatically; override
+individual events/roles under a `hooks:` block if the defaults don't fit. See
+[docs/WORKFLOW.md](docs/WORKFLOW.md#editor-hooks-role-aware-rule-injection)
+and the `hooks:` comments in [mcp/config.yaml](mcp/config.yaml).
+
 ## Available MCP Tools (24 coordination tools)
 
 - `get_session_context` - Full session context (messages, tasks, presence, notes)

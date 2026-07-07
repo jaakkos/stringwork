@@ -14,6 +14,17 @@
 # - A fixed http_port is recommended for a stable URL across restarts
 # - Cursor can still connect as a manual worker (uses claim_next in the IDE)
 #   but should NOT be listed in workers[] (it can't be auto-spawned)
+#
+# Hooks: with orchestration.driver: claude-code (below), Claude Code's
+# SessionStart/UserPromptSubmit/Stop hooks (installed via
+# scripts/install-claude-hooks.sh) resolve this session as DRIVER and stay
+# silent by default -- no "call heartbeat every 60-90s" reminders for the
+# session that's orchestrating. Cursor connecting as a manual worker under
+# this same config resolves as WORKER (its sessionStart hook, if installed
+# via the cursor-plugin, prints the mandatory rules) since "cursor" != the
+# configured driver "claude-code". See docs/WORKFLOW.md#editor-hooks-role-aware-rule-injection
+# and the `hooks:` block documented in mcp/config.yaml if you want to
+# override this per-platform/per-role behavior.
 
 workspace_root: ""
 log_file: ""

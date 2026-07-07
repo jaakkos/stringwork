@@ -168,6 +168,49 @@ func (o *OrchestrationConfig) QuotaPreflightEnabled() bool {
 	return o.QuotaPreflight.Enabled
 }
 
+// HooksConfig controls whether editor/CLI integration hooks (Claude Code
+// SessionStart/UserPromptSubmit/Stop, Cursor sessionStart/userPrompt, and the
+// {worker_rules} spawn-prompt placeholder for CLI-spawned workers) inject
+// Stringwork rule reminders. Injection is split by platform and by the
+// resolved role of the session the hook fires in — see
+// internal/app.ResolveHookRole and internal/app.ShouldEmitHook.
+//
+// Rationale: a human driving Claude Code (or Cursor) directly does not need
+// "call heartbeat every 60-90s" worker-progress reminders — those rules exist
+// to keep spawned WORKERS reporting to the driver, not to nag the driver
+// itself. Before this config existed, hooks fired unconditionally for any
+// session with a live state.sqlite, including driver sessions.
+type HooksConfig struct {
+	// Enabled is a master kill switch: false disables all hook injection
+	// regardless of per-platform settings below. Defaults to true (omitted
+	// or nil).
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Platforms maps a platform name (e.g. "claude-code", "cursor", "codex",
+	// "gemini") to its per-role hook settings. A platform absent from this
+	// map uses the built-in defaults (see ShouldEmitHook).
+	Platforms map[string]PlatformHooksConfig `yaml:"platforms,omitempty"`
+}
+
+// PlatformHooksConfig configures hook injection for one platform, split by
+// the role the session resolves to at emit time.
+type PlatformHooksConfig struct {
+	Driver *RoleHooksConfig `yaml:"driver,omitempty"`
+	Worker *RoleHooksConfig `yaml:"worker,omitempty"`
+}
+
+// RoleHooksConfig toggles individual hook events for one (platform, role)
+// pair. SessionStart/UserPrompt/Stop back the Claude Code and Cursor hook
+// scripts; Spawn backs the {worker_rules} placeholder expanded into
+// orchestration.workers[].command for CLI-spawned workers (Codex, Gemini).
+// Each field is a *bool so "unset" (apply the role default) is distinguishable
+// from an explicit false.
+type RoleHooksConfig struct {
+	SessionStart *bool `yaml:"session_start,omitempty"`
+	UserPrompt   *bool `yaml:"user_prompt,omitempty"`
+	Stop         *bool `yaml:"stop,omitempty"`
+	Spawn        *bool `yaml:"spawn,omitempty"`
+}
+
 // MCPServerConfig describes an MCP server that should be auto-registered with
 // worker CLIs (claude, codex) when they are spawned. Supports URL-based
 // (HTTP/SSE) and command-based servers.
@@ -231,6 +274,10 @@ type Config struct {
 	Daemon        *DaemonConfig              `yaml:"daemon"`
 	Audit         *AuditConfig               `yaml:"audit"`
 	Backup        *BackupConfig              `yaml:"backup"`
+	// Hooks controls per-platform, per-role injection of Stringwork rule
+	// reminders into editor/CLI hooks and spawn prompts. Omitted entirely ->
+	// legacy always-inject behavior (see HooksConfig doc comment).
+	Hooks *HooksConfig `yaml:"hooks,omitempty"`
 	// Constitution declares user- and team-level rule sources that
 	// extend the built-in ~/.config/stringwork/constitution directory.
 	// Sources are ordered: built-in global first, then profile (R4.c),
@@ -558,6 +605,14 @@ func (p *Policy) TaskBoundInstanceRetentionHours() int {
 // Orchestration returns the orchestration config (driver/workers). Never nil (default applied in LoadConfig).
 func (p *Policy) Orchestration() *OrchestrationConfig {
 	return p.config.Orchestration
+}
+
+// Hooks returns the hooks config (per-platform, per-role hook injection
+// settings). May be nil when the user has not configured a `hooks:` block —
+// callers should treat a nil *HooksConfig as "use legacy defaults" (see
+// internal/app.ShouldEmitHook).
+func (p *Policy) Hooks() *HooksConfig {
+	return p.config.Hooks
 }
 
 // MaxTaskFailures returns the failure threshold before a task is auto-blocked (default: 3).

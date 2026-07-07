@@ -51,6 +51,51 @@ Key tools:
 
 Any MCP client can join by calling `register_agent`. Once registered, it uses the same tools as built-in agents.
 
+## Editor/CLI hooks: role-aware rule injection
+
+Claude Code and Cursor get the "MANDATORY progress-reporting" rules injected
+via editor hooks (`SessionStart`/`UserPromptSubmit`/`Stop` for Claude Code;
+`sessionStart` for the Cursor plugin), on top of whatever's in CLAUDE.md /
+.mdc rule files. Before this existed, those hooks fired unconditionally for
+any session with a live `state.sqlite` — including **driver** sessions, which
+don't need "call heartbeat every 60-90s" reminders since they orchestrate
+rather than execute tasks.
+
+Each hook is a thin shim that delegates to:
+
+```bash
+mcp-stringwork hooks emit --event <session_start|user_prompt|stop|spawn> --platform <name>
+```
+
+`hooks emit` resolves a **role** for the current session and either prints
+the matching rule text or nothing at all:
+
+| Signal | Resolves to |
+|---|---|
+| `STRINGWORK_AGENT` env var set | **worker** — Stringwork sets this on every spawned worker process, so this is the most reliable signal regardless of config |
+| `orchestration.driver: auto`, or `orchestration.driver` equals `--platform` | **driver** |
+| Neither of the above | **worker** — e.g. Claude Code hooks firing while `orchestration.driver: cursor` (a human running Claude Code as a manual worker) |
+| No `orchestration` configured at all | **legacy** — always inject, matching pre-hooks-config behavior |
+
+Defaults: **driver sessions are silent**, **worker/legacy sessions get the
+full mandatory rules** (session_start/user_prompt/stop) or the spawn-prompt
+`{worker_rules}` placeholder (Codex/Gemini, expanded in
+`orchestration.workers[].command`). Override any (platform, role, event)
+combination under a `hooks:` block in `~/.config/stringwork/config.yaml` —
+see the commented example in [`mcp/config.yaml`](../mcp/config.yaml). A
+master kill switch (`hooks.enabled: false`) disables all injection outright.
+
+**The one thing you need to get right for the default to work correctly:**
+`orchestration.driver` must actually reflect who's driving. If you drive
+directly from Claude Code with no Cursor open, set `driver: auto` or
+`driver: claude-code` — otherwise Claude Code still resolves as a worker
+(since it isn't the configured driver) and keeps getting the reminders.
+
+Re-run `./scripts/install-claude-hooks.sh` after upgrading Stringwork to pick
+up shim changes; `./scripts/uninstall-claude-hooks.sh` removes only
+Stringwork's own hook entries, leaving any other hooks you've configured
+(rtk, formatters, etc.) untouched.
+
 ## Standard Workflow
 
 ### 1. Session start

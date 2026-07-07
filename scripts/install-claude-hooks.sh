@@ -5,144 +5,167 @@
 # by injecting rules as clean system-reminder messages.
 #
 # What this does:
-#   1. Copies hook scripts to ~/.config/stringwork/hooks/
+#   1. Installs thin shim scripts to ~/.config/stringwork/hooks/ that delegate
+#      to `mcp-stringwork hooks emit` — role/platform resolution lives in the
+#      Go binary (internal/app.ResolveHookRole / ShouldEmitHook), not in bash.
 #   2. Merges hook config into ~/.claude/settings.json (preserves existing settings)
 #
-# The hooks have a guard — they only activate when ~/.config/stringwork/state.sqlite
+# The shims have a guard — they only activate when ~/.config/stringwork/state.sqlite
 # exists, so they're harmless in non-Stringwork projects.
 #
+# `mcp-stringwork hooks emit` decides WHETHER to print anything based on the
+# resolved role for THIS session:
+#   - Driver sessions (orchestration.driver == "auto" or == this platform,
+#     and STRINGWORK_AGENT is unset) print nothing by default — a human
+#     driving the pair-programming session doesn't need worker
+#     progress-reporting reminders.
+#   - Worker sessions (STRINGWORK_AGENT set, or this platform isn't the
+#     configured driver) print the mandatory rules, same as before this
+#     config existed.
+# Override per-platform/per-role behavior in ~/.config/stringwork/config.yaml
+# under `hooks:` — see docs/CONSTITUTION.md and mcp/config.yaml comments.
+#
 # Usage:
-#   Install:   ./scripts/install-claude-hooks.sh
+#   Install:   ./scripts/install-claude-hooks.sh [--platform NAME]
 #   Uninstall: ./scripts/uninstall-claude-hooks.sh
+#
+#   --platform NAME   Platform identity to report to `hooks emit` (default:
+#                      claude-code). Only change this if you're adapting
+#                      these shims for a different Claude-Code-like CLI that
+#                      should be treated as a distinct hooks.platforms.<name>
+#                      entry in config.yaml.
 
 set -euo pipefail
+
+PLATFORM="claude-code"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --platform)
+            PLATFORM="$2"
+            shift 2
+            ;;
+        --platform=*)
+            PLATFORM="${1#--platform=}"
+            shift
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 HOOKS_DIR="$HOME/.config/stringwork/hooks"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "=== Stringwork: Installing Claude Code hooks ==="
+echo "=== Stringwork: Installing Claude Code hooks (platform: $PLATFORM) ==="
 
-# 1. Copy hook scripts
-echo "Installing hook scripts to $HOOKS_DIR ..."
+# Resolve the mcp-stringwork binary once at install time and bake the
+# resolved path into the shims. Falls back to bare `mcp-stringwork` (resolved
+# via PATH at hook-fire time) if we can't find it now — e.g. running this
+# script before the binary is built/installed anywhere.
+STRINGWORK_BIN="$(command -v mcp-stringwork 2>/dev/null || true)"
+if [ -z "$STRINGWORK_BIN" ] && [ -x "$HOME/.local/bin/mcp-stringwork" ]; then
+    STRINGWORK_BIN="$HOME/.local/bin/mcp-stringwork"
+fi
+if [ -z "$STRINGWORK_BIN" ]; then
+    echo "  ⚠ mcp-stringwork binary not found on PATH or in ~/.local/bin/ — shims"
+    echo "    will resolve it via PATH when they fire. Run dev-install.sh first"
+    echo "    if hooks don't produce output after installing."
+    STRINGWORK_BIN="mcp-stringwork"
+fi
+
+# 1. Install hook shims
+echo "Installing hook shims to $HOOKS_DIR ..."
 mkdir -p "$HOOKS_DIR"
 
-cat > "$HOOKS_DIR/inject-rules.sh" << 'EOF'
+write_shim() {
+    local file="$1" event="$2"
+    cat > "$file" <<SHIM
 #!/bin/bash
-[ -f "$HOME/.config/stringwork/state.sqlite" ] || exit 0
-cat <<'RULES'
-## MANDATORY Pair Programming Rules (Stringwork — server-enforced)
+# Thin shim — role/platform decisions live in the Go binary
+# (internal/app.ResolveHookRole / ShouldEmitHook). Regenerate with
+# scripts/install-claude-hooks.sh, do not hand-edit.
+[ -f "\$HOME/.config/stringwork/state.sqlite" ] || exit 0
+exec "$STRINGWORK_BIN" hooks emit --event $event --platform $PLATFORM 2>/dev/null
+SHIM
+}
 
-You are a worker in the Stringwork pair programming system. These rules are NON-NEGOTIABLE.
-
-### Progress Reporting — REQUIRED while working on ANY task
-
-TRIGGER: You claimed or are working on a task.
-ACTION: Call BOTH of these MCP tools at the specified intervals:
-
-1. `heartbeat` — every 60-90 seconds with a progress description
-   Example: heartbeat agent='claude-code' progress='implementing auth middleware' step=2 total_steps=4
-
-2. `report_progress` — every 2-3 minutes with task_id, description, percent_complete
-   Example: report_progress agent='claude-code' task_id=5 description='Auth done. Writing tests (8/15).' percent_complete=50 eta_seconds=120
-
-Consequence of NOT reporting:
-- 4 min silence → WARNING alert sent to driver
-- 7 min silence → CRITICAL alert sent to driver
-- 14 min silence → Task auto-recovered, you may be CANCELLED
-
-### Communication — REQUIRED before finishing
-
-TRIGGER: You are about to finish or stop working.
-ACTION: Call `send_message` from your agent name to the driver with a detailed summary.
-
-### STOP Signals — immediate compliance required
-
-TRIGGER: You see a STOP banner on any tool response.
-ACTION: Stop ALL work immediately. Call read_messages. Exit.
-RULES
-EOF
-
-# inject-reminder.sh
-cat > "$HOOKS_DIR/inject-reminder.sh" << 'EOF'
-#!/bin/bash
-[ -f "$HOME/.config/stringwork/state.sqlite" ] || exit 0
-echo "MANDATORY: If working on a task, call heartbeat (every 60-90s) and report_progress (every 2-3min). Always send_message with findings before finishing."
-EOF
-
-# stop-check.sh
-cat > "$HOOKS_DIR/stop-check.sh" << 'EOF'
-#!/bin/bash
-[ -f "$HOME/.config/stringwork/state.sqlite" ] || exit 0
-echo "REMINDER: Before stopping, verify you have:"
-echo "1. Called send_message to report your findings to the driver"
-echo "2. Called update_task to mark task status (completed/blocked)"
-echo "3. Called report_progress with final status"
-echo "If you haven't done these, continue working and complete them now."
-EOF
+write_shim "$HOOKS_DIR/inject-rules.sh" "session_start"
+write_shim "$HOOKS_DIR/inject-reminder.sh" "user_prompt"
+write_shim "$HOOKS_DIR/stop-check.sh" "stop"
 
 chmod +x "$HOOKS_DIR"/*.sh
-echo "  ✓ Hook scripts installed"
+echo "  ✓ Hook shims installed (delegating to: $STRINGWORK_BIN)"
 
 # 2. Merge hooks into ~/.claude/settings.json
+#
+# IMPORTANT: this merges SURGICALLY at the individual hook-entry level, not
+# by replacing the whole "hooks" key. `. + {hooks: $hooks}` (the old
+# approach) silently destroyed any unrelated hooks the user had configured
+# under SessionStart/UserPromptSubmit/Stop, and entirely wiped out other
+# event keys (PreToolUse, PostToolUse, etc.) since those aren't in our
+# HOOKS_JSON at all. Every jq step below touches only the three entries we
+# own (matched by command path), leaving everything else in settings.json
+# untouched — including other SessionStart/UserPromptSubmit/Stop entries
+# from other tools.
 echo "Merging hooks into $CLAUDE_SETTINGS ..."
 mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
 
-HOOKS_JSON='{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.config/stringwork/hooks/inject-rules.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.config/stringwork/hooks/inject-reminder.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.config/stringwork/hooks/stop-check.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}'
+# Literal $HOME (not shell-expanded) — Claude Code expands this itself at
+# hook-execution time, matching how the shims are referenced in the JSON.
+SESSION_START_CMD='$HOME/.config/stringwork/hooks/inject-rules.sh'
+USER_PROMPT_CMD='$HOME/.config/stringwork/hooks/inject-reminder.sh'
+STOP_CMD='$HOME/.config/stringwork/hooks/stop-check.sh'
 
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if command -v jq &>/dev/null; then
-        # Merge with existing settings using jq
-        EXISTING=$(cat "$CLAUDE_SETTINGS")
-        echo "$EXISTING" | jq --argjson hooks "$(echo "$HOOKS_JSON" | jq '.hooks')" '. + {hooks: $hooks}' > "$CLAUDE_SETTINGS.tmp"
+        jq \
+            --arg sessionStartCmd "$SESSION_START_CMD" \
+            --arg userPromptCmd "$USER_PROMPT_CMD" \
+            --arg stopCmd "$STOP_CMD" \
+            '
+            .hooks.SessionStart as $ss
+            | .hooks.UserPromptSubmit as $ups
+            | .hooks.Stop as $stop
+            | .hooks.SessionStart = (
+                [($ss // [])[] | select((.hooks[0].command // "") != $sessionStartCmd)]
+                + [{"matcher": "", "hooks": [{"type": "command", "command": $sessionStartCmd, "timeout": 10}]}]
+              )
+            | .hooks.UserPromptSubmit = (
+                [($ups // [])[] | select((.hooks[0].command // "") != $userPromptCmd)]
+                + [{"hooks": [{"type": "command", "command": $userPromptCmd, "timeout": 5}]}]
+              )
+            | .hooks.Stop = (
+                [($stop // [])[] | select((.hooks[0].command // "") != $stopCmd)]
+                + [{"hooks": [{"type": "command", "command": $stopCmd, "timeout": 10}]}]
+              )
+            ' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp"
         mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-        echo "  ✓ Merged hooks into existing settings"
+        echo "  ✓ Merged hooks into existing settings (other hooks preserved)"
     else
-        echo "  ⚠ jq not found. Please manually add hooks to $CLAUDE_SETTINGS"
-        echo "  Hooks JSON:"
-        echo "$HOOKS_JSON"
+        echo "  ⚠ jq not found. Please manually add these entries to the SessionStart,"
+        echo "    UserPromptSubmit, and Stop arrays under \"hooks\" in $CLAUDE_SETTINGS"
+        echo "    (do not replace the whole \"hooks\" key — merge into existing arrays):"
+        echo '    SessionStart:     {"matcher": "", "hooks": [{"type": "command", "command": "'"$SESSION_START_CMD"'", "timeout": 10}]}'
+        echo '    UserPromptSubmit: {"hooks": [{"type": "command", "command": "'"$USER_PROMPT_CMD"'", "timeout": 5}]}'
+        echo '    Stop:             {"hooks": [{"type": "command", "command": "'"$STOP_CMD"'", "timeout": 10}]}'
         exit 1
     fi
 else
-    echo "$HOOKS_JSON" > "$CLAUDE_SETTINGS"
+    jq -n \
+        --arg sessionStartCmd "$SESSION_START_CMD" \
+        --arg userPromptCmd "$USER_PROMPT_CMD" \
+        --arg stopCmd "$STOP_CMD" \
+        '{
+            hooks: {
+                SessionStart: [{"matcher": "", "hooks": [{"type": "command", "command": $sessionStartCmd, "timeout": 10}]}],
+                UserPromptSubmit: [{"hooks": [{"type": "command", "command": $userPromptCmd, "timeout": 5}]}],
+                Stop: [{"hooks": [{"type": "command", "command": $stopCmd, "timeout": 10}]}]
+            }
+        }' > "$CLAUDE_SETTINGS"
     echo "  ✓ Created $CLAUDE_SETTINGS with hooks"
 fi
 
@@ -156,10 +179,19 @@ fi
 echo ""
 echo "=== Done! ==="
 echo ""
-echo "Hooks installed:"
-echo "  SessionStart    → Injects mandatory rules (survives context compaction)"
-echo "  UserPromptSubmit → Short reminder on every prompt (~30 tokens)"
-echo "  Stop            → Reminds to report findings before finishing"
+echo "Hooks installed (platform: $PLATFORM):"
+echo "  SessionStart     → mcp-stringwork hooks emit --event session_start"
+echo "  UserPromptSubmit → mcp-stringwork hooks emit --event user_prompt"
+echo "  Stop             → mcp-stringwork hooks emit --event stop"
 echo ""
-echo "Scripts have a guard: they only activate when Stringwork state exists."
+echo "Each fires only when ~/.config/stringwork/state.sqlite exists, and prints"
+echo "nothing when this session resolves to the orchestration DRIVER role (see"
+echo "internal/app.ResolveHookRole). Set orchestration.driver in"
+echo "~/.config/stringwork/config.yaml to 'auto' or '$PLATFORM' to make Claude"
+echo "Code sessions you drive directly silent; leave it as another platform"
+echo "(e.g. cursor) and Claude Code stays a worker that gets full reminders."
+echo ""
+echo "Override individual events/roles under hooks.platforms.$PLATFORM in"
+echo "config.yaml if the defaults don't fit — see mcp/config.yaml comments."
+echo ""
 echo "Restart Claude Code for hooks to take effect."

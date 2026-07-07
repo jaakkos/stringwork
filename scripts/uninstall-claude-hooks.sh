@@ -24,30 +24,43 @@ else
     echo "  - No hooks directory found at $HOOKS_DIR"
 fi
 
-# 2. Remove hooks from ~/.claude/settings.json
+# 2. Remove OUR entries from ~/.claude/settings.json
+#
+# IMPORTANT: this removes SURGICALLY by matching command path — only the
+# SessionStart/UserPromptSubmit/Stop array entries pointing at our own hook
+# scripts. `del(.hooks)` (the old approach) deleted every hook the user had
+# configured for ANY tool (rtk, format-on-edit, test-discipline,
+# pr-draft-guard, etc.), not just ours.
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if command -v jq &>/dev/null; then
-        EXISTING=$(cat "$CLAUDE_SETTINGS")
-        HAS_HOOKS=$(echo "$EXISTING" | jq 'has("hooks")')
+        SESSION_START_CMD='$HOME/.config/stringwork/hooks/inject-rules.sh'
+        USER_PROMPT_CMD='$HOME/.config/stringwork/hooks/inject-reminder.sh'
+        STOP_CMD='$HOME/.config/stringwork/hooks/stop-check.sh'
 
+        HAS_HOOKS=$(jq 'has("hooks")' "$CLAUDE_SETTINGS")
         if [ "$HAS_HOOKS" = "true" ]; then
-            # Remove just the "hooks" key, keep everything else
-            echo "$EXISTING" | jq 'del(.hooks)' > "$CLAUDE_SETTINGS.tmp"
-
-            # Check if the result is just {}
-            REMAINING=$(cat "$CLAUDE_SETTINGS.tmp" | jq 'keys | length')
-            if [ "$REMAINING" -eq 0 ]; then
-                rm -f "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-                echo "  ✓ Removed $CLAUDE_SETTINGS (was empty after removing hooks)"
-            else
-                mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-                echo "  ✓ Removed hooks from $CLAUDE_SETTINGS (kept other settings)"
-            fi
+            jq \
+                --arg sessionStartCmd "$SESSION_START_CMD" \
+                --arg userPromptCmd "$USER_PROMPT_CMD" \
+                --arg stopCmd "$STOP_CMD" \
+                '
+                .hooks.SessionStart = [(.hooks.SessionStart // [])[] | select((.hooks[0].command // "") != $sessionStartCmd)]
+                | .hooks.UserPromptSubmit = [(.hooks.UserPromptSubmit // [])[] | select((.hooks[0].command // "") != $userPromptCmd)]
+                | .hooks.Stop = [(.hooks.Stop // [])[] | select((.hooks[0].command // "") != $stopCmd)]
+                | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
+                | if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end
+                | if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end
+                | if (.hooks | length) == 0 then del(.hooks) else . end
+                ' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp"
+            mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+            echo "  ✓ Removed our hooks from $CLAUDE_SETTINGS (other hooks and settings preserved)"
         else
             echo "  - No hooks found in $CLAUDE_SETTINGS"
         fi
     else
-        echo "  ⚠ jq not found. Please manually remove the \"hooks\" key from $CLAUDE_SETTINGS"
+        echo "  ⚠ jq not found. Please manually remove the SessionStart/UserPromptSubmit/Stop"
+        echo "    entries referencing ~/.config/stringwork/hooks/*.sh from $CLAUDE_SETTINGS"
+        echo "    (leave any other hooks/settings in place)."
     fi
 else
     echo "  - No settings file at $CLAUDE_SETTINGS"

@@ -138,6 +138,63 @@ http_port: 0
 #         task_kind: ["review"]      # only attached to review-flavoured tasks
 #         # agent_roles: ["claude-code"]  # or narrow by agent type
 
+# --- Hooks (role-aware rule injection) ---
+# Controls whether editor/CLI integration hooks inject Stringwork's
+# mandatory worker-progress-reporting rules for the CURRENT session:
+#   - Claude Code: SessionStart / UserPromptSubmit / Stop
+#     (installed by scripts/install-claude-hooks.sh; delegates to
+#     `mcp-stringwork hooks emit --event ... --platform claude-code`)
+#   - Cursor plugin: sessionStart
+#     (cursor-plugin/hooks/hooks.json -> emit-session-hooks.sh, platform cursor)
+#   - Codex / Gemini: the {worker_rules} placeholder in a worker's spawn
+#     `command:` below, when present, expands to the same text (or "" if
+#     disabled) at spawn time — see the "Model tiers" / workers[] comments
+#     further down. NOT wired into the default command templates shipped
+#     here, because those are already phrased for `communication: cli`
+#     ($STRINGWORK_BIN heartbeat ...) rather than MCP tool calls; adding
+#     {worker_rules} to your OWN command template gets you the MCP-tool
+#     phrasing (heartbeat agent=... progress=...) with role-based on/off
+#     control instead.
+#
+# Every hook resolves a ROLE for the current session before deciding
+# whether to print anything (see internal/app.ResolveHookRole):
+#   - STRINGWORK_AGENT env var set          -> worker (Stringwork-spawned;
+#     set on every spawned process, see worker_manager.go)
+#   - orchestration.driver == "auto", or
+#     orchestration.driver == this platform -> driver
+#   - otherwise                              -> worker (e.g. Claude Code
+#     hooks firing while orchestration.driver: cursor — a human running
+#     Claude Code as a manual worker, not the driver)
+#   - no `orchestration:` configured at all -> legacy (always inject,
+#     matching behavior from before this config existed)
+#
+# Defaults (used for any (platform, role, event) not explicitly listed
+# below): driver = silent for every event; worker/legacy = full mandatory
+# rules for session_start/user_prompt/stop, and the worker rules text for
+# spawn. You only need a `hooks:` block at all if you want to override
+# those defaults — get the driver-silence behavior for free by setting
+# orchestration.driver correctly (see below).
+#
+# hooks:
+#   enabled: true              # master kill switch — false disables ALL injection
+#   platforms:
+#     claude-code:
+#       driver:                  # only matters when this platform IS the driver
+#         session_start: false   # (shown = the default; set true to opt back in)
+#         user_prompt: false
+#         stop: false
+#       worker:                  # only matters when this platform is NOT the driver
+#         session_start: true
+#         user_prompt: true
+#         stop: true
+#     cursor:
+#       driver: { session_start: false }
+#       worker: { session_start: true }
+#     codex:
+#       worker: { spawn: true }   # honored only if your command template uses {worker_rules}
+#     gemini:
+#       worker: { spawn: true }
+#
 # --- Orchestration (driver + workers) ---
 # One driver (e.g. Cursor) and N workers. The server spawns workers automatically
 # when there's pending work -- no need to keep them running manually.

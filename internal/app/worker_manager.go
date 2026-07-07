@@ -94,6 +94,11 @@ type WorkerManager struct {
 	mcpServerURL string
 	// mcpServers are additional MCP servers to auto-register with worker CLIs.
 	mcpServers []MCPServerEntry
+	// hooksConfig controls whether the {worker_rules} spawn-prompt placeholder
+	// expands to the mandatory worker rules text for a given worker type. Nil
+	// (the default when SetHooksConfig is never called) falls back to
+	// legacy behavior: {worker_rules} always expands (see ShouldEmitHook).
+	hooksConfig *policy.HooksConfig
 	// mcpReady caches the MCP readiness result. Once the health endpoint responds, the server is in-process and stays ready.
 	mcpReady bool
 	// mcpRegistered caches which agent types have been verified/registered with their CLI tools.
@@ -615,6 +620,17 @@ func (m *WorkerManager) resolvedConstitution(scope constitution.Scope) string {
 // SetWorktreeManager sets the worktree manager for per-worker git isolation.
 func (m *WorkerManager) SetWorktreeManager(wm *worktree.Manager) {
 	m.worktreeManager = wm
+}
+
+// SetHooksConfig sets the hooks config used to decide whether the
+// {worker_rules} spawn-prompt placeholder expands to the mandatory worker
+// rules text for a given worker type (see expandWorkerTemplates). Not set
+// by default; callers that want per-platform control over spawn-prompt
+// rule injection should call this once during server startup.
+func (m *WorkerManager) SetHooksConfig(h *policy.HooksConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooksConfig = h
 }
 
 // WorktreeManager returns the worktree manager, if set.
@@ -1825,8 +1841,18 @@ If you see a STOP banner on any tool call response:
 `
 }
 
-func expandWorkerTemplates(args []string, agent, workspace, driver string) []string {
-	replacer := strings.NewReplacer("{workspace}", workspace, "{agent}", agent, "{driver}", driver)
+// expandWorkerTemplates expands {workspace}, {agent}, {driver}, and
+// {worker_rules} placeholders in a worker's spawn command. workerRules is
+// pre-resolved by the caller (see runOnce) from hooksConfig + the worker's
+// agent type, so this function stays a pure string substitution — it does
+// not itself decide whether rules should be injected.
+func expandWorkerTemplates(args []string, agent, workspace, driver, workerRules string) []string {
+	replacer := strings.NewReplacer(
+		"{workspace}", workspace,
+		"{agent}", agent,
+		"{driver}", driver,
+		"{worker_rules}", workerRules,
+	)
 	out := make([]string, len(args))
 	for i, a := range args {
 		out[i] = replacer.Replace(a)
@@ -2380,7 +2406,14 @@ func (m *WorkerManager) runOnce(c WorkerSpawnConfig, workspaceDir string, attemp
 		delete(m.runningWorkers, c.InstanceID)
 		m.mu.Unlock()
 	}()
-	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir, m.driver())
+	workerRules := ""
+	m.mu.Lock()
+	hooksCfg := m.hooksConfig
+	m.mu.Unlock()
+	if ShouldEmitHook(hooksCfg, c.AgentType, HookRoleWorker, HookEventSpawn) {
+		workerRules = TextForHook(HookRoleWorker, HookEventSpawn)
+	}
+	args := expandWorkerTemplates(c.Command, c.InstanceID, workspaceDir, m.driver(), workerRules)
 	if len(args) == 0 {
 		return runResult{Err: fmt.Errorf("empty command")}
 	}
