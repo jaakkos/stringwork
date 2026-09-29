@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/mark3labs/mcp-go v1.1.0
+	github.com/mark3labs/mcp-go v1.1.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.59.0
 )
